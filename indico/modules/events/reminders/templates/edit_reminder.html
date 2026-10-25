@@ -1,8 +1,7 @@
 {% from 'forms/_form.html' import form_header, form_footer, form_fieldset, form_rows %}
 {% from 'message_box.html' import message_box %}
 {% set editable = not reminder or not reminder.is_sent %}
-{% set disabled_fields = () if editable else form._fields.viewkeys() %}
-{% set widget_attrs = form.default_widget_attrs %}
+{% set disabled_fields = () if editable else form._fields.keys() %}
 
 <div class="reminders">
     {% if reminder and reminder.is_overdue %}
@@ -12,12 +11,12 @@
     {% endif %}
 
     {{ form_header(form, id='reminder-form') }}
-    {{ form_rows(form, fields=form.schedule_fields, widget_attrs=widget_attrs, disable=disabled_fields) }}
+    {{ form_rows(form, fields=form.schedule_fields, disable=disabled_fields) }}
     {% call form_fieldset(_('Recipients')) %}
-        {{ form_rows(form, fields=form.recipient_fields, widget_attrs=widget_attrs, disable=disabled_fields) }}
+        {{ form_rows(form, fields=form.recipient_fields, disable=disabled_fields) }}
     {% endcall %}
     {% call form_fieldset(_('Misc')) %}
-        {{ form_rows(form, skip=form.schedule_recipient_fields, widget_attrs=widget_attrs, disable=disabled_fields) }}
+        {{ form_rows(form, skip=form.schedule_recipient_fields, disable=disabled_fields) }}
     {% endcall %}
     {% call form_footer(form) %}
         {% if editable %}
@@ -37,17 +36,21 @@
             (function() {
                 'use strict';
 
-                $('#absolute_date').datepicker({minDate: 0});
                 $('#preview-reminder').ajaxDialog({
-                    title: $T('Reminder Preview'),
+                    title: $T('Reminder preview'),
                     method: 'POST',
                     data: function() {
                         return {
+                            reminder_type: {{ form.reminder_type.data.name|tojson }},
+                            render_mode: {{ form.render_mode.data.name|tojson }},
                             include_summary: $('#include_summary').prop('checked') ? '1' : '0',
                             include_description: $('#include_description').prop('checked') ? '1' : '0',
+                            attach_ical: $('#attach_ical').prop('checked') ? '1' : '0',
+                            subject: $('#subject').val() ?? '',
                             message: $('#message').val()
                         };
-                    }
+                    },
+                    dialogClasses: 'editor-output',
                 });
             })();
         </script>

@@ -1,28 +1,20 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import has_request_context, render_template, session
+from flask import flash, has_request_context, render_template, session
 
 from indico.core import signals
+from indico.modules.events.contributions.models.contributions import Contribution
+from indico.modules.events.layout import layout_settings
 from indico.modules.events.layout.util import MenuEntryData
+from indico.modules.events.sessions.models.blocks import SessionBlock
 from indico.modules.users import User
 from indico.modules.vc.forms import VCPluginSettingsFormBase
-from indico.modules.vc.models.vc_rooms import VCRoom, VCRoomEventAssociation, VCRoomLinkType
+from indico.modules.vc.models.vc_rooms import VCRoom, VCRoomEventAssociation
 from indico.modules.vc.plugins import VCPluginMixin
 from indico.modules.vc.util import get_managed_vc_plugins, get_vc_plugins
 from indico.util.i18n import _
@@ -31,10 +23,20 @@ from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem, TopMenuItem
 
 
-__all__ = ('VCPluginMixin', 'VCPluginSettingsFormBase')
+__all__ = ('VCPluginMixin', 'VCPluginSettingsFormBase', 'VCRoomEventAssociation')
 
 
-@template_hook('event-header')
+@template_hook('conference-home-info')
+def _inject_conference_home(event, **kwargs):
+    if not layout_settings.get(event, 'show_vc_rooms'):
+        return
+    res = VCRoomEventAssociation.find_for_event(event, only_linked_to_event=True)
+    event_vc_rooms = [event_vc_room for event_vc_room in res.all() if event_vc_room.vc_room.plugin is not None]
+    if event_vc_rooms:
+        return render_template('vc/conference_home.html', event=event, event_vc_rooms=event_vc_rooms)
+
+
+@template_hook('event-header', priority=100)
 def _inject_event_header(event, **kwargs):
     res = VCRoomEventAssociation.find_for_event(event, only_linked_to_event=True)
     event_vc_rooms = [event_vc_room for event_vc_room in res.all() if event_vc_room.vc_room.plugin is not None]
@@ -57,23 +59,45 @@ def _extend_event_management_menu(sender, event, **kwargs):
         return
     if not event.can_manage(session.user):
         return
-    return SideMenuItem('videoconference', _('Videoconference'), url_for('vc.manage_vc_rooms', event),
-                        section='services')
+    return SideMenuItem(
+        'videoconference', _('Videoconference'), url_for('vc.manage_vc_rooms', event), section='services'
+    )
 
 
 @signals.event.sidemenu.connect
 def _extend_event_menu(sender, **kwargs):
     def _visible(event):
         return bool(get_vc_plugins()) and VCRoomEventAssociation.find_for_event(event).has_rows()
-    return MenuEntryData(_('Videoconference Rooms'), 'videoconference_rooms', 'vc.event_videoconference',
-                         position=14, visible=_visible)
+
+    return MenuEntryData(
+        _('Videoconference'), 'videoconference_rooms', 'vc.event_videoconference', position=14, visible=_visible
+    )
 
 
 @signals.event.contribution_deleted.connect
 @signals.event.session_block_deleted.connect
-def _link_object_deleted(obj, **kwargs):
-    for event_vc_room in obj.vc_room_associations:
+def _link_object_deleted(obj: Contribution | SessionBlock, **kwargs):
+    assocs = list(obj.vc_room_associations)
+    for event_vc_room in assocs:
+        # tie the room to the event instead
+        signals.vc.vc_room_detached.send(event_vc_room, vc_room=event_vc_room.vc_room, old_link=obj, event=obj.event)
+
         event_vc_room.link_object = obj.event
+
+        signals.vc.vc_room_attached.send(
+            event_vc_room, vc_room=event_vc_room.vc_room, event=obj.event, data={}, old_link=obj
+        )
+
+    if not assocs:
+        return
+
+    if isinstance(obj, Contribution):
+        message = _('There was a videoconference associated with this contribution. It has been linked to the event '
+                    'instead')
+    else:
+        message = _('There was a videoconference associated with this session block. It has been linked to the event '
+                    'instead')
+    flash(message, 'warning')
 
 
 @signals.event.session_deleted.connect
@@ -99,9 +123,10 @@ def _topmenu_items(sender, **kwargs):
 @signals.event_management.get_cloners.connect
 def _get_vc_cloner(sender, **kwargs):
     from indico.modules.vc.clone import VCCloner
+
     return VCCloner
 
 
 @signals.users.merged.connect
 def _merge_users(target, source, **kwargs):
-    VCRoom.find(created_by_id=source.id).update({VCRoom.created_by_id: target.id})
+    VCRoom.query.filter_by(created_by_id=source.id).update({VCRoom.created_by_id: target.id})

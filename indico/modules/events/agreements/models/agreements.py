@@ -1,37 +1,27 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from uuid import uuid4
 
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from werkzeug.exceptions import ServiceUnavailable
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.util.date_time import now_utc
-from indico.util.i18n import _
-from indico.util.string import return_ascii
-from indico.util.struct.enum import RichIntEnum
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import pgettext
 
 
 class AgreementState(RichIntEnum):
-    __titles__ = [_("Pending"), _("Accepted"), _("Rejected"), _("Accepted on behalf"), _("Rejected on behalf")]
+    __titles__ = [pgettext('Agreement', 'Pending'), pgettext('Agreement', 'Accepted'),
+                  pgettext('Agreement', 'Rejected'), pgettext('Agreement', 'Accepted on behalf'),
+                  pgettext('Agreement', 'Rejected on behalf')]
     pending = 0
     accepted = 1
     rejected = 2
@@ -42,7 +32,8 @@ class AgreementState(RichIntEnum):
 
 
 class Agreement(db.Model):
-    """Agreements between a person and Indico"""
+    """Agreements between a person and Indico."""
+
     __tablename__ = 'agreements'
     __table_args__ = (db.UniqueConstraint('event_id', 'type', 'identifier'),
                       {'schema': 'events'})
@@ -125,7 +116,7 @@ class Agreement(db.Model):
     )
     #: Definition-specific data of the agreement
     data = db.Column(
-        JSON
+        JSONB
     )
 
     #: The user this agreement is linked to
@@ -152,8 +143,8 @@ class Agreement(db.Model):
         return self.state in {AgreementState.accepted, AgreementState.accepted_on_behalf}
 
     @accepted.expression
-    def accepted(self):
-        return self.state.in_((AgreementState.accepted, AgreementState.accepted_on_behalf))
+    def accepted(cls):
+        return cls.state.in_((AgreementState.accepted, AgreementState.accepted_on_behalf))
 
     @hybrid_property
     def pending(self):
@@ -164,16 +155,16 @@ class Agreement(db.Model):
         return self.state in {AgreementState.rejected, AgreementState.rejected_on_behalf}
 
     @rejected.expression
-    def rejected(self):
-        return self.state.in_((AgreementState.rejected, AgreementState.rejected_on_behalf))
+    def rejected(cls):
+        return cls.state.in_((AgreementState.rejected, AgreementState.rejected_on_behalf))
 
     @hybrid_property
     def signed_on_behalf(self):
         return self.state in {AgreementState.accepted_on_behalf, AgreementState.rejected_on_behalf}
 
     @signed_on_behalf.expression
-    def signed_on_behalf(self):
-        return self.state.in_((AgreementState.accepted_on_behalf, AgreementState.rejected_on_behalf))
+    def signed_on_behalf(cls):
+        return cls.state.in_((AgreementState.accepted_on_behalf, AgreementState.rejected_on_behalf))
 
     @property
     def definition(self):
@@ -182,14 +173,12 @@ class Agreement(db.Model):
 
     @property
     def locator(self):
-        return {'confId': self.event_id,
+        return {'event_id': self.event_id,
                 'id': self.id}
 
-    @return_ascii
     def __repr__(self):
         state = self.state.name if self.state is not None else None
-        return '<Agreement({}, {}, {}, {}, {}, {})>'.format(self.id, self.event_id, self.type, self.identifier,
-                                                            self.person_email, state)
+        return f'<Agreement({self.id}, {self.event_id}, {self.type}, {self.identifier}, {self.person_email}, {state})>'
 
     @staticmethod
     def create_from_data(event, type_, person):

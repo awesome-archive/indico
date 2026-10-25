@@ -1,47 +1,44 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.modules.events.papers.models.competences import PaperCompetence
 from indico.modules.events.papers.models.reviews import PaperReviewType
 from indico.modules.events.papers.settings import PaperReviewingRole, paper_reviewing_settings
+from indico.modules.events.papers.util import is_type_reviewing_possible
 from indico.modules.events.settings import EventSettingProperty
 from indico.util.caching import memoize_request
 from indico.util.date_time import now_utc
-from indico.util.string import MarkdownText, return_ascii
+from indico.util.string import MarkdownText
 
 
-class CallForPapers(object):
-    """Proxy class to facilitate access to the call for papers settings"""
+class CallForPapers:
+    """Proxy class to facilitate access to the call for papers settings."""
 
     def __init__(self, event):
         self.event = event
 
-    @return_ascii
     def __repr__(self):
-        return '<CallForPapers({}, start_dt={}, end_dt={})>'.format(self.event.id, self.start_dt, self.end_dt)
+        return f'<CallForPapers({self.event.id}, start_dt={self.start_dt}, end_dt={self.end_dt})>'
 
     start_dt = EventSettingProperty(paper_reviewing_settings, 'start_dt')
     end_dt = EventSettingProperty(paper_reviewing_settings, 'end_dt')
     content_reviewing_enabled = EventSettingProperty(paper_reviewing_settings, 'content_reviewing_enabled')
     layout_reviewing_enabled = EventSettingProperty(paper_reviewing_settings, 'layout_reviewing_enabled')
     judge_deadline = EventSettingProperty(paper_reviewing_settings, 'judge_deadline')
+    judge_deadline_enforced = EventSettingProperty(paper_reviewing_settings, 'enforce_judge_deadline')
     layout_reviewer_deadline = EventSettingProperty(paper_reviewing_settings, 'layout_reviewer_deadline')
     content_reviewer_deadline = EventSettingProperty(paper_reviewing_settings, 'content_reviewer_deadline')
+    content_reviewer_deadline_enforced = EventSettingProperty(paper_reviewing_settings,
+                                                              'enforce_content_reviewer_deadline')
+    layout_reviewer_deadline_enforced = EventSettingProperty(paper_reviewing_settings,
+                                                             'enforce_layout_reviewer_deadline')
+    hide_accepted = EventSettingProperty(paper_reviewing_settings, 'hide_accepted')
+    limit_review_cycles = EventSettingProperty(paper_reviewing_settings, 'limit_review_cycles')
+    max_review_cycles = EventSettingProperty(paper_reviewing_settings, 'max_review_cycles')
 
     @property
     def has_started(self):
@@ -76,7 +73,7 @@ class CallForPapers(object):
         elif reviewing_type == PaperReviewType.layout:
             self.layout_reviewing_enabled = enable
         else:
-            raise ValueError('Invalid reviewing type: {}'.format(reviewing_type))
+            raise ValueError(f'Invalid reviewing type: {reviewing_type}')
 
     def get_reviewing_state(self, reviewing_type):
         if reviewing_type == PaperReviewType.content:
@@ -84,7 +81,7 @@ class CallForPapers(object):
         elif reviewing_type == PaperReviewType.layout:
             return self.layout_reviewing_enabled
         else:
-            raise ValueError('Invalid reviewing type: {}'.format(reviewing_type))
+            raise ValueError(f'Invalid reviewing type: {reviewing_type}')
 
     @property
     def managers(self):
@@ -168,8 +165,29 @@ class CallForPapers(object):
             return (self.is_reviewer(user, PaperReviewingRole.content_reviewer) or
                     self.is_reviewer(user, PaperReviewingRole.layout_reviewer))
 
+    def is_authorized_submitter(self, user):
+        """Check if the user can submit papers even when the CfP is closed."""
+        return paper_reviewing_settings.acls.contains_user(self.event, 'authorized_submitters', user)
+
+    def can_submit_proceedings(self, user):
+        """Check if the user can theoretically submit papers.
+
+        This does not check if the user actually has any contributions for which they can
+        submit a paper. To check if a user can submit a paper for a specific contribution, use
+        :meth:`Contribution.can_submit_proceedings <.Contribution.can_submit_proceedings>` instead.
+        """
+        return self.is_open or self.is_authorized_submitter(user)
+
     def can_access_reviewing_area(self, user):
         return self.is_staff(user)
 
     def can_access_judging_area(self, user):
         return self.is_manager(user) or self.is_judge(user)
+
+    @property
+    def is_content_reviewing_possible(self):
+        return is_type_reviewing_possible(self, PaperReviewType.content)
+
+    @property
+    def is_layout_reviewing_possible(self):
+        return is_type_reviewing_possible(self, PaperReviewType.layout)

@@ -1,8 +1,37 @@
 {% extends 'users/base.html' %}
 {% from '_switch.html' import switch %}
+{% from 'message_box.html' import message_box %}
 {% from 'api/_messages.html' import get_enable_persistent_msg, get_disable_persistent_msg %}
 
 {% block user_content %}
+    {% if can_create_personal_tokens %}
+        {% call message_box('warning') %}
+            {%- set link_start -%}
+                <a href="{{ url_for('oauth.user_tokens') }}">
+            {%- endset -%}
+            {%- set link_end -%}
+                </a>
+            {%- endset -%}
+            <p>
+                <strong>
+                    {% trans -%}
+                        API keys are deprecated and may be removed in a future Indico version.
+                    {%- endtrans %}
+                </strong>
+            </p>
+            <p>
+                {% trans -%}
+                    Please create {{ link_start }}API tokens{{ link_end }} instead.
+                    They use a more standard way of authenticating (Bearer token authentication
+                    instead of an HMAC signature) and you can (and should!) create one token for
+                    each script/application where you need to access the Indico API. To reduce
+                    the risk from a leaked token they also let you specify more fine-grained
+                    scopes.
+                {%- endtrans %}
+            </p>
+        {% endcall %}
+    {% endif %}
+
     <div class="i-box-group vert">
         <div class="i-box">
             <div class="i-box-header">
@@ -12,15 +41,24 @@
                 {% if key and can_modify %}
                     <div class="i-box-buttons toolbar">
                         <div class="group">
-                            <button type="button" class="i-button warning icon-plus" data-href="{{ url_for('.key_create') }}" data-method="post"
+                            <button type="button"
+                                    class="ui orange small button"
+                                    data-href="{{ url_for('.key_create') }}"
+                                    data-method="post"
                                     data-params='{"force": "1"}'
                                     data-title="{% trans %}Create new API key{% endtrans %}"
-                                    data-confirm="{% trans %}Do you really want to create a new API key? Your old key will stop working immediately!{% endtrans %}">
+                                    data-confirm="{% trans %}Do you really want to create a new API key?
+                                    Your old key will stop working immediately!{% endtrans %}">
+                                <i aria-hidden="true" class="icon plus"></i>
                                 {%- trans %}Create new API key{% endtrans -%}
                             </button>
-                            <button type="button" class="i-button danger icon-remove" data-href="{{ url_for('.key_delete') }}" data-method="post"
+                            <button type="button"
+                                    class="ui negative small button"
+                                    data-href="{{ url_for('.key_delete') }}"
+                                    data-method="post"
                                     data-title="{% trans %}Delete API key{% endtrans %}"
                                     data-confirm="{% trans %}Do you really want to delete your API key?{% endtrans %}">
+                                <i aria-hidden="true" class="icon trash alternate"></i>
                                 {%- trans %}Delete API key{% endtrans -%}
                             </button>
                         </div>
@@ -36,7 +74,10 @@
                         {%- endtrans -%}
                     </p>
 
-                    <button type="button" class="i-button highlight" data-href="{{ url_for('.key_create') }}" data-method="post">
+                    <button type="button"
+                            class="ui primary button"
+                            data-href="{{ url_for('.key_create') }}"
+                            data-method="post">
                         {%- trans %}Create API key{% endtrans -%}
                     </button>
                 {% else %}
@@ -45,7 +86,10 @@
                         <dd>
                             {{ key.token }}
                             {% if key.is_blocked %}
-                                <i class="icon-warning warningText" title="{% trans %}Your API key has been blocked. Please contact an administrator for further details.{% endtrans %}"></i>
+                                <i class="icon-warning warningText"
+                                   title="{% trans %}Your API key has been blocked.
+                                   Please contact an administrator for further details.{% endtrans %}">
+                                </i>
                             {% endif %}
                         </dd>
                         {% if use_signatures %}
@@ -69,9 +113,13 @@
                             <dd>
                                 {{ key.last_used_uri }}
                                 {% if key.last_used_auth %}
-                                    <i class="icon-shield" title="{% trans %}Last request could access private data.{% endtrans %}"></i>
+                                    <i class="icon-shield"
+                                       title="{% trans %}Last request could access private data.{% endtrans %}">
+                                    </i>
                                 {% else %}
-                                    <i class="icon-earth" title="{% trans %}Last request could only access public data.{% endtrans %}"></i>
+                                    <i class="icon-earth"
+                                       title="{% trans %}Last request could only access public data.{% endtrans %}">
+                                    </i>
                                 {% endif %}
                             </dd>
                         {% endif %}
@@ -91,6 +139,35 @@
             </div>
         </div>
 
+        <div class="i-box">
+            <div class="i-box-header">
+                <div class="i-box-title">
+                    {%- trans %}Token-based links{% endtrans -%}
+                </div>
+                <div class="i-box-buttons toolbar">
+                    <div class="group">
+                        <button type="button"
+                                class="ui negative small button"
+                                data-href="{{ url_for('core.reset_signature_tokens') }}"
+                                data-method="POST"
+                                data-confirm="{% trans %}Are you sure you'd like to invalidate all your
+                                token-based links?{% endtrans %}">
+                            <i aria-hidden="true" class="icon trash alternate"></i>
+                            {%- trans %}Invalidate all links{% endtrans -%}
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="i-box-content">
+                {% trans %}
+                    Token-based unique links are secret URLs which Indico uses to allow you to easily fetch data
+                    from within other applications (e.g. calendar schedulers through iCalendar). They are generated
+                    through a digital signature based on a secret key that is unique per Indico user. If one of your
+                    links is compromised, you should click this button. All other links will be invalidated.
+                {% endtrans %}
+            </div>
+        </div>
+
         {% if session.user.is_admin and (key or old_keys) %}
             <div class="i-box">
                 <div class="i-box-header">
@@ -101,13 +178,18 @@
                         <div class="i-box-buttons toolbar">
                             <div class="group">
                                 {% if key.is_blocked %}
-                                    <button type="button" class="i-button accept" data-href="{{ url_for('.key_block') }}"
+                                    <button type="button"
+                                            class="ui positive small button"
+                                            data-href="{{ url_for('.key_block') }}"
                                             data-method="post">
                                         {%- trans %}Unblock API key{% endtrans -%}
                                     </button>
                                 {% else %}
-                                    <button type="button" class="i-button warning icon-disable" data-href="{{ url_for('.key_block') }}"
+                                    <button type="button"
+                                            class="ui negative small button"
+                                            data-href="{{ url_for('.key_block') }}"
                                             data-method="post">
+                                        <i aria-hidden="true" class="icon ban"></i>
                                         {%- trans %}Block API key{% endtrans -%}
                                     </button>
                                 {% endif %}
@@ -132,7 +214,7 @@
                                                 used <strong>{{ n }} times</strong>
                                             {%- endtrans -%}
                                             {%- if old_key.last_used_dt -%}
-                                                , {% trans date=old_key.last_used_dt|format_datetime('short')|ensure_unicode -%}
+                                                , {% trans date=old_key.last_used_dt|format_datetime('short') -%}
                                                     last used on {{ date }}
                                                 {%- endtrans %}
                                             {%- endif -%}

@@ -3,59 +3,73 @@
 {% from 'attachments/_attachments.html' import render_attachments %}
 
 {% block content %}
-    <div class="conferenceDetails">
-        <div itemprop="description" class="description js-mathjax">
+    <div class="conferenceDetails" id="main-content" data-bypass-target="{% trans %}Skip to main content{% endtrans %}">
+        <div itemprop="description" class="description js-mathjax editor-output">
             {{ event.description }}
         </div>
 
         <div class="infogrid">
+            <h2>{% trans %}Conference information{% endtrans %}</h2>
             <div class="infoline date">
-                <span title="{% trans %}Date/Time{% endtrans %}" class="icon icon-time" aria-hidden="true"></span>
+                <h3 class="icon icon-time">
+                    <span>{% trans %}Date/Time{% endtrans %}</span>
+                </h3>
                 <div class="text">
-                    <div>
+                    <p>
                         <span class="label">{% trans %}Starts{% endtrans %}</span>
                         <time datetime="{{ event.start_dt_display.isoformat() }}">
                             {{ event.start_dt_display|format_datetime(timezone=event.display_tzinfo) }}
                         </time>
-                    </div>
-                    <div>
+                    </p>
+                    <p>
                         <span class="label">{% trans %}Ends{% endtrans %}</span>
                         <time datetime="{{ event.end_dt_display.isoformat() }}">
                             {{ event.end_dt_display|format_datetime(timezone=event.display_tzinfo) }}
                         </time>
-                    </div>
-                    <div class="timezone">{{ event.display_tzinfo.zone }}</div>
+                    </p>
+                    <p>
+                        {% set display_tz = event.display_tzinfo.zone %}
+                        <span class="timezone-label">{% trans %}All times are in {{ display_tz }}{% endtrans %}</span>
+                        <span class="timezone" aria-hidden="true">{{ display_tz }}</span>
+                    </p>
                 </div>
             </div>
 
-            {% if event.has_location_info or event.address %}
-                <div class="infoline location">
-                    <span title="{% trans %}Location{% endtrans %}" class="icon icon-location" aria-hidden="true"></span>
-                    <div class="text">
-                        <div class="place">
-                            {{ event.venue_name }}
-                        </div>
-                        {% if event.room and event.room.map_url %}
-                            <div class="room">
-                                <a href="{{ event.room.map_url }}">{{ event.room_name }}</a>
+            {% block location_info %}
+                {% if event.has_location_info or event.address %}
+                    <div class="infoline location">
+                        <h3 class="icon icon-location">
+                            <span>{% trans %}Location{% endtrans %}</span>
+                        </h3>
+                        <div class="text">
+                            <div class="place">
+                                {{ event.venue_name }}
                             </div>
-                        {% elif event.room_name %}
-                            <div class="room">
-                                {{ event.room_name }}
-                            </div>
-                        {% endif %}
+                            {% if event.room_name %}
+                                <div class="room">
+                                    {{ event.room_name }}
+                                </div>
+                            {% endif %}
 
-                        {% if event.address %}
-                            <div class="address nohtml">{{ event.address }}</div>
-                        {% endif %}
+                            {% if event.address %}
+                                <div class="address nohtml">{{ event.address }}</div>
+                            {% endif %}
+
+                            {% if event.map_url %}
+                                <a href="{{ event.map_url }}" target="_blank" rel="noopener noreferrer">
+                                    {% trans %}Go to map{% endtrans %}
+                                </a>
+                            {% endif %}
+                        </div>
                     </div>
-                </div>
-            {% endif %}
+                {% endif %}
+            {% endblock %}
 
             {% if event.person_links %}
                 <div class="infoline chairs clear">
-                    <span title="{% trans %}Chairpersons{% endtrans %}" class="icon icon-user-chairperson"
-                          aria-hidden="true"></span>
+                    <h3 class="icon icon-user">
+                        <span>{% trans %}Chairpersons{% endtrans %}</span>
+                    </h3>
                     <ul class="chair_list text">
                         {% for link in event.person_links|sort(attribute='display_order_key') %}
                             <li>
@@ -76,19 +90,22 @@
                 </div>
             {% endif %}
 
-            {% set is_submitter = event.can_manage(session.user, 'submit') %}
-            {% if is_submitter or event.attached_items %}
+            {% set can_attach = event.can_manage_attachments(session.user) %}
+            {% if can_attach or event.attached_items %}
                 <div class="infoline material material-list">
-                    <span title="{% trans %}Materials{% endtrans %}" class="icon icon-attachment" aria-hidden="true"></span>
+                    <h3 class="icon icon-attachment">
+                        <span>{% trans %}Materials{% endtrans %}</span>
+                    </h3>
                     <div class="text attachments-box">
                         {{ render_attachments(event.attached_items, management=false) }}
                     </div>
-                    {% if is_submitter %}
+                    {% if can_attach %}
                         <div>
-                            <a href="#" class="i-button text-color subtle icon-edit hide-if-locked"
-                               data-locator="{{ event.locator|tojson|forceescape }}"
-                               data-reload-on-change
-                               data-attachment-editor></a>
+                            <button class="i-button text-color subtle icon-edit hide-if-locked"
+                                    title="{% trans %}Manage materials{% endtrans %}"
+                                    data-locator="{{ event.locator|tojson|forceescape }}"
+                                    data-reload-on-change
+                                    data-attachment-editor></button>
                         </div>
                     {% endif %}
                 </div>
@@ -96,8 +113,9 @@
 
             {% if event.additional_info %}
                 <div class="infoline info">
-                    <span title="{% trans %}Extra information{% endtrans %}" class="icon icon-info"
-                          aria-hidden="true"></span>
+                    <h3 class="icon icon-info">
+                        <span>{% trans %}Extra information{% endtrans %}</span>
+                    </h3>
                     <div class="text">
                         {{ event.additional_info|rich_markup }}
                     </div>

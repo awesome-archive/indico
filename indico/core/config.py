@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import ast
 import codecs
@@ -23,13 +12,15 @@ import re
 import socket
 import warnings
 from datetime import timedelta
+from functools import cache
+from urllib.parse import urljoin, urlsplit
 
 import pytz
 from celery.schedules import crontab
 from flask import current_app, g
 from flask.helpers import get_root_path
+from marshmallow import ValidationError
 from werkzeug.datastructures import ImmutableDict
-from werkzeug.urls import url_parse
 
 from indico.util.caching import make_hashable
 from indico.util.fs import resolve_link
@@ -37,39 +28,66 @@ from indico.util.packaging import package_is_editable
 from indico.util.string import crc32, snakify
 
 
+__all__ = ['config']
+
+
+# Note: Whenever you add/change something here, you MUST update the docs (settings.rst) as well
 DEFAULTS = {
+    'ALLOW_ADMIN_USER_DELETION': False,
+    'ALLOW_PUBLIC_USER_SEARCH': True,
+    'ALLOWED_LANGUAGES': None,
     'ATTACHMENT_STORAGE': 'default',
     'AUTH_PROVIDERS': {},
     'BASE_URL': None,
-    'CACHE_BACKEND': 'files',
     'CACHE_DIR': '/opt/indico/cache',
     'CATEGORY_CLEANUP': {},
     'CELERY_BROKER': None,
     'CELERY_CONFIG': {},
     'CELERY_RESULT_BACKEND': None,
+    'CHECK_ACTION_PERMISSIONS': False,
+    'CHECKIN_APP_URL': 'https://checkin.getindico.io',
     'COMMUNITY_HUB_URL': 'https://hub.getindico.io',
+    'CSP_ENABLED': False,
+    'CSP_REPORT_URI': None,
+    'CSP_SCRIPT_SOURCES': set(),
+    'CSP_DIRECTIVES': set(),
     'CUSTOMIZATION_DEBUG': False,
     'CUSTOMIZATION_DIR': None,
     'CUSTOM_COUNTRIES': {},
+    'CUSTOM_LANGUAGES': {},
     'DB_LOG': False,
     'DEBUG': False,
     'DEFAULT_LOCALE': 'en_GB',
     'DEFAULT_TIMEZONE': 'UTC',
     'DISABLE_CELERY_CHECK': None,
+    'DISABLE_GRAVATAR': False,
+    'EMAIL_BACKEND': 'indico.vendor.django_mail.backends.smtp.EmailBackend',
+    'EMAIL_LOG_STORAGE': None,
+    'ENABLE_APPLE_WALLET': False,
+    'ENABLE_GOOGLE_WALLET': False,
     'ENABLE_ROOMBOOKING': False,
+    'EXPERIMENTAL_EDITING_SERVICE': False,
     'EXTERNAL_REGISTRATION_URL': None,
-    'FLOWER_URL': None,
     'HELP_URL': 'https://learn.getindico.io',
+    'FAILED_LOGIN_RATE_LIMIT': '5 per 15 minutes; 10 per day',
+    'FAVICON_URL': None,
     'IDENTITY_PROVIDERS': {},
+    'LATEX_RATE_LIMIT': '2 per 3 seconds',
     'LOCAL_IDENTITIES': True,
+    'LOCAL_USERNAMES': True,
     'LOCAL_MODERATION': False,
+    'LOCAL_PASSWORD_MIN_LENGTH': 8,
     'LOCAL_REGISTRATION': True,
+    'LOCAL_GROUPS': True,
     'LOGGING_CONFIG_FILE': 'logging.yaml',
+    'LOGIN_LOGO_URL': None,
     'LOGO_URL': None,
     'LOG_DIR': '/opt/indico/log',
+    'MATERIAL_PACKAGE_RATE_LIMIT': '3 per 30 minutes, 3 per day',
+    'MAX_DATA_EXPORT_SIZE': 10 * 1024,  # 10GB
+    'MAX_EMAIL_ATTACHMENT_SIZE': 10,  # 10MB
     'MAX_UPLOAD_FILES_TOTAL_SIZE': 0,
     'MAX_UPLOAD_FILE_SIZE': 0,
-    'MEMCACHED_SERVERS': [],
     'NO_REPLY_EMAIL': None,
     'PLUGINS': set(),
     'PROFILE': False,
@@ -80,13 +98,22 @@ DEFAULTS = {
     'SCHEDULED_TASK_OVERRIDE': {},
     'SECRET_KEY': None,
     'SENTRY_DSN': None,
+    'SENTRY_ENVIRONMENT': 'production',
     'SENTRY_LOGGING_LEVEL': 'WARNING',
     'SESSION_LIFETIME': 86400 * 31,
+    'SESSION_MAX_LIFETIME': None,
+    'SIGNUP_CAPTCHA': True,
+    'SIGNUP_RATE_LIMIT': '2 per hour; 5 per day',
+    'SMTP_ALLOWED_SENDERS': set(),
+    'SMTP_CERTFILE': None,
+    'SMTP_KEYFILE': None,
     'SMTP_LOGIN': None,
     'SMTP_PASSWORD': None,
+    'SMTP_SENDER_FALLBACK': None,
     'SMTP_SERVER': ('localhost', 25),
     'SMTP_TIMEOUT': 30,
     'SMTP_USE_CELERY': True,
+    'SMTP_USE_SSL': False,
     'SMTP_USE_TLS': False,
     'SQLALCHEMY_DATABASE_URI': None,
     'SQLALCHEMY_MAX_OVERFLOW': 3,
@@ -98,10 +125,12 @@ DEFAULTS = {
     'STORAGE_BACKENDS': {'default': 'fs:/opt/indico/archive'},
     'STRICT_LATEX': False,
     'SUPPORT_EMAIL': None,
+    'SYSTEM_NOTICES_URL': 'https://getindico.io/notices.yml',
     'TEMP_DIR': '/opt/indico/tmp',
     'USE_PROXY': False,
+    'WALLET_LOGO_URL': None,
     'WORKER_NAME': socket.getfqdn(),
-    'XELATEX_PATH': 'xelatex',
+    'XELATEX_PATH': None,
 }
 
 # Default values for settings that cannot be set in the config file
@@ -111,6 +140,16 @@ INTERNAL_DEFAULTS = {
     'LOGGING_CONFIG_PATH': None,
     'TESTING': False
 }
+
+# Keys that are required to be set in the config file
+REQUIRED_KEYS = {'SQLALCHEMY_DATABASE_URI', 'SECRET_KEY', 'BASE_URL', 'CELERY_BROKER', 'REDIS_CACHE_URL',
+                 'DEFAULT_TIMEZONE', 'DEFAULT_LOCALE', 'CACHE_DIR', 'TEMP_DIR', 'LOG_DIR', 'STORAGE_BACKENDS',
+                 'ATTACHMENT_STORAGE', 'SUPPORT_EMAIL', 'NO_REPLY_EMAIL'}
+
+# Reserved namespace for file-backed plugin config keys (``PLUGIN_<NAME>_<KEY>``). These are
+# collected during config loading and resolved later, once each plugin is initialized, so that
+# loading the config never has to import any plugin.
+PLUGIN_CONFIG_PREFIX = 'PLUGIN_'
 
 
 def get_config_path():
@@ -149,10 +188,9 @@ def _parse_config(path):
     globals_ = {'timedelta': timedelta, 'crontab': crontab}
     locals_ = {}
     with codecs.open(path, encoding='utf-8') as config_file:
-        # XXX: unicode_literals is inherited from this file
-        exec compile(config_file.read(), path, 'exec') in globals_, locals_
-    return {unicode(k if k.isupper() else _convert_key(k)): v
-            for k, v in locals_.iteritems()
+        exec(compile(config_file.read(), path, 'exec'), globals_, locals_)  # noqa: S102
+    return {str(k if k.isupper() else _convert_key(k)): v
+            for k, v in locals_.items()
             if k[0] != '_'}
 
 
@@ -167,8 +205,6 @@ def _convert_key(name):
 
 
 def _postprocess_config(data):
-    if data['DEFAULT_TIMEZONE'] not in pytz.all_timezones_set:
-        raise ValueError('Invalid default timezone: {}'.format(data['DEFAULT_TIMEZONE']))
     data['BASE_URL'] = data['BASE_URL'].rstrip('/')
     data['STATIC_SITE_STORAGE'] = data['STATIC_SITE_STORAGE'] or data['ATTACHMENT_STORAGE']
     if data['DISABLE_CELERY_CHECK'] is None:
@@ -176,12 +212,42 @@ def _postprocess_config(data):
 
 
 def _sanitize_data(data, allow_internal=False):
+    """Split raw config into known core keys and pending plugin keys.
+
+    Returns a ``(clean, plugin)`` tuple: ``clean`` holds recognized core keys,
+    ``plugin`` holds keys under the reserved ``PLUGIN_`` namespace (left for the
+    owning plugin to claim later). Unknown keys outside that namespace are dropped
+    with a warning.
+    """
     allowed = set(DEFAULTS)
     if allow_internal:
         allowed |= set(INTERNAL_DEFAULTS)
-    for key in set(data) - allowed:
-        warnings.warn('Ignoring unknown config key {}'.format(key))
-    return {k: v for k, v in data.iteritems() if k in allowed}
+    clean = {}
+    plugin = {}
+    for key, value in data.items():
+        if key in allowed:
+            clean[key] = value
+        elif key.startswith(PLUGIN_CONFIG_PREFIX):
+            plugin[key] = value
+        else:
+            warnings.warn(f'Ignoring unknown config key {key}', stacklevel=2)
+    return clean, plugin
+
+
+def _warn_unclaimed_plugin_config(data):
+    """Warn about ``PLUGIN_*`` keys that no initialized plugin claimed.
+
+    Runs after all plugins are loaded (via :meth:`IndicoConfig.validate`), so any key
+    still pending belongs to a plugin that is not enabled or does not declare it.
+    """
+    for key in data['PLUGIN_CONFIG']['pending']:
+        warnings.warn(f'Ignoring unknown config key {key}', stacklevel=2)
+
+
+def _validate_config(data):
+    for key in sorted(REQUIRED_KEYS):
+        if not data.get(key):
+            warnings.warn(f'Required config key {key} is not configured', stacklevel=2)
 
 
 def load_config(only_defaults=False, override=None):
@@ -194,14 +260,20 @@ def load_config(only_defaults=False, override=None):
                      the configuration.  Any values provided here
                      will override values from the config file.
     """
-    data = dict(DEFAULTS, **INTERNAL_DEFAULTS)
+    data = DEFAULTS | INTERNAL_DEFAULTS
+    # Plugin keys are held here until the owning plugin claims them during its init.
+    plugin_pending = {}
+
     if not only_defaults:
         path = get_config_path()
-        config = _sanitize_data(_parse_config(path))
+        raw_config = _parse_config(path)
+        config, plugin = _sanitize_data(raw_config)
         data.update(config)
-        env_override = os.environ.get('INDICO_CONF_OVERRIDE')
-        if env_override:
-            data.update(_sanitize_data(ast.literal_eval(env_override)))
+        plugin_pending.update(plugin)
+        if env_override := os.environ.get('INDICO_CONF_OVERRIDE'):
+            config, plugin = _sanitize_data(ast.literal_eval(env_override))
+            data.update(config)
+            plugin_pending.update(plugin)
         resolved_path = resolve_link(path) if os.path.islink(path) else path
         resolved_path = None if resolved_path == os.devnull else resolved_path
         data['CONFIG_PATH'] = path
@@ -210,12 +282,19 @@ def load_config(only_defaults=False, override=None):
             data['LOGGING_CONFIG_PATH'] = os.path.join(os.path.dirname(resolved_path), data['LOGGING_CONFIG_FILE'])
 
     if override:
-        data.update(_sanitize_data(override, allow_internal=True))
+        config, plugin = _sanitize_data(override, allow_internal=True)
+        data.update(config)
+        plugin_pending.update(plugin)
+    # ``pending`` and ``resolved`` are mutable on purpose: plugins move their keys from the former
+    # to the latter (via ``register_plugin_config``) after this immutable config is already built.
+    data['PLUGIN_CONFIG'] = {'pending': plugin_pending, 'resolved': {}}
     _postprocess_config(data)
+    if not only_defaults:
+        _validate_config(data)
     return ImmutableDict(data)
 
 
-class IndicoConfig(object):
+class IndicoConfig:
     """Wrapper for the Indico configuration.
 
     It exposes all config keys as read-only attributes.
@@ -262,13 +341,87 @@ class IndicoConfig(object):
 
     @property
     def IMAGES_BASE_URL(self):
-        return 'static/images' if g.get('static_site') else url_parse('{}/images'.format(self.BASE_URL)).path
+        return 'static/images' if g.get('static_site') else urlsplit(f'{self.BASE_URL}/images').path
+
+    @property
+    def LATEX_ENABLED(self):
+        return bool(self.XELATEX_PATH)
+
+    @property
+    def ABSOLUTE_LOGO_URL(self):
+        return urljoin(self.BASE_URL, self.LOGO_URL) if self.LOGO_URL else None
+
+    @property
+    def ABSOLUTE_WALLET_LOGO_URL(self):
+        return urljoin(self.BASE_URL, self.WALLET_LOGO_URL) if self.WALLET_LOGO_URL else None
+
+    @property
+    @cache  # noqa: B019
+    def XELATEX_PODMAN_CONFIG(self):
+        from indico.legacy.pdfinterface.latex import PodmanConfig
+        if not self.XELATEX_PATH:
+            return None
+        elif self.XELATEX_PATH == 'podman':
+            return PodmanConfig()
+        elif self.XELATEX_PATH.startswith('podman:'):
+            optstring = self.XELATEX_PATH.removeprefix('podman:')
+            return PodmanConfig.from_string(optstring)
+
+    def validate(self):
+        from indico.core.auth import login_rate_limiter, signup_rate_limiter
+        from indico.legacy.pdfinterface.latex import latex_rate_limiter
+        login_rate_limiter._get_current_object()  # fail in case FAILED_LOGIN_RATE_LIMIT is invalid
+        signup_rate_limiter._get_current_object()  # fail in case SIGNUP_RATE_LIMIT is invalid
+        latex_rate_limiter._get_current_object()  # fail in case LATEX_RATE_LIMIT is invalid
+        if self.DEFAULT_TIMEZONE not in pytz.all_timezones_set:
+            raise ValueError(f'Invalid default timezone: {self.DEFAULT_TIMEZONE}')
+        if self.SMTP_ALLOWED_SENDERS and not self.SMTP_SENDER_FALLBACK:
+            raise ValueError('Cannot restrict SMTP senders without a fallback')
+        if self.SMTP_USE_TLS and self.SMTP_USE_SSL:
+            raise ValueError('SMTP_USE_TLS and SMTP_USE_SSL are mutually exclusive')
+        if not self.DEBUG and self.LOCAL_PASSWORD_MIN_LENGTH < 8:
+            raise ValueError('Minimum password length cannot be less than 8 characters long')
+        if self.CSP_ENABLED not in {True, False, 'report-only'}:
+            raise ValueError(f'Invalid value for CSP_ENABLED: {self.CSP_ENABLED!r}')
+        try:
+            self.XELATEX_PODMAN_CONFIG  # noqa: B018
+        except ValidationError as err:
+            raise ValueError(f'Invalid value for XELATEX_PATH: {err}')
+        _warn_unclaimed_plugin_config(self.data)
+
+    def register_plugin_config(self, plugin):
+        """Resolve a plugin's file-backed config once the plugin is initialized.
+
+        Called from :meth:`~indico.core.plugins.IndicoPlugin.init`, when the plugin is
+        already imported. Declared defaults are applied for keys omitted from the config
+        file, and any values collected during :func:`load_config` are consumed here.
+        Collisions with a core key are warned about and the plugin default is ignored;
+        collisions between plugins raise ``RuntimeError``.
+        """
+        store = self.data['PLUGIN_CONFIG']
+        pending, resolved = store['pending'], store['resolved']
+        prefix = f'{PLUGIN_CONFIG_PREFIX}{plugin.name.upper()}'
+        for key, default in plugin.plugin_config_defaults.items():
+            full = f'{prefix}_{key}'
+            if full in DEFAULTS:
+                warnings.warn(f'Plugin {plugin.name!r} config key {full!r} collides with a core config key; '
+                              f'plugin default ignored', stacklevel=2)
+                continue
+            if full in resolved:
+                raise RuntimeError(f'Plugin {plugin.name!r} config key {full!r} collides with another plugin')
+            resolved[full] = pending.pop(full, default)
 
     def __getattr__(self, name):
         try:
             return self.data[name]
         except KeyError:
-            raise self._exc('no such setting: ' + name)
+            pass
+        if name.startswith(PLUGIN_CONFIG_PREFIX):
+            try:
+                return self.data['PLUGIN_CONFIG']['resolved'][name]
+            except KeyError:
+                pass
+        raise self._exc('no such setting: ' + name)
 
     def __setattr__(self, key, value):
         raise AttributeError('cannot change config at runtime')

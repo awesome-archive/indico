@@ -1,37 +1,30 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import re
 from collections import namedtuple
 from io import BytesIO
 
 from PIL import Image
-from reportlab.lib import colors, pagesizes
+from reportlab.lib import pagesizes
+from reportlab.lib.colors import getAllNamedColors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import Paragraph
 
-from indico.legacy.pdfinterface.base import setTTFonts
+from indico.core import signals
+from indico.legacy.pdfinterface.base import init_reportlab_fonts
 from indico.modules.designer import PageOrientation
-from indico.util.string import strip_tags
+from indico.util.signals import values_from_signal
+from indico.util.string import RichMarkup, sanitize_html, strip_tags
 
 
 FONT_STYLES = {
@@ -51,8 +44,6 @@ ALIGNMENTS = {
     'justified': TA_JUSTIFY
 }
 
-AVAILABLE_COLOR_NAMES = {'black', 'red', 'blue', 'green', 'yellow', 'brown', 'cyan', 'gold', 'pink', 'gray', 'white'}
-COLORS = {k: getattr(colors, k) for k in AVAILABLE_COLOR_NAMES}
 PIXELS_CM = 50
 FONT_SIZE_RE = re.compile(r'(\d+)(pt)?')
 
@@ -63,7 +54,9 @@ def _extract_font_size(text):
     return int(FONT_SIZE_RE.match(text).group(1))
 
 
-class DesignerPDFBase(object):
+class DesignerPDFBase:
+    placeholders_context = 'designer-fields'
+
     def __init__(self, template, config):
         self.config = self._build_config(config)
         self.template = template
@@ -71,11 +64,11 @@ class DesignerPDFBase(object):
         self.backside_tpl_data = None
         if template.backside_template:
             self.backside_tpl_data = self._process_tpl_data(template.backside_template.data)
-        self.page_size = getattr(pagesizes, self.config.page_size.name)
+        self.page_size = self.config.page_size.size
         if self.config.page_orientation == PageOrientation.landscape:
             self.page_size = pagesizes.landscape(self.page_size)
         self.width, self.height = self.page_size
-        setTTFonts()
+        init_reportlab_fonts()
 
     def _process_tpl_data(self, tpl_data):
         return TplData(width_cm=(float(tpl_data['width']) / PIXELS_CM),
@@ -83,7 +76,7 @@ class DesignerPDFBase(object):
                        **tpl_data)
 
     def _remove_transparency(self, fd):
-        """Remove transparency from an image and replace it with white"""
+        """Remove transparency from an image and replace it with white."""
         img = Image.open(fd)
         # alpha-channel PNG: replace the transparent areas with plain white
         if img.mode == 'RGBA':
@@ -104,32 +97,69 @@ class DesignerPDFBase(object):
         data.seek(0)
         return data
 
+    def _normalize_color(self, color):
+        if not color:
+            return None
+        elif color in getAllNamedColors():
+            return color
+        if re.match(r'^[a-f0-9]{3,6}$', color):
+            color = f'#{color}'
+        return color
+
+    def _get_resized_font(self, content, font_size, font_name, width):
+        content = str(content)  # resolve LazyString
+        min_font_size = 6
+        resized_font = font_size
+        item_width = width / PIXELS_CM * cm
+        while resized_font > min_font_size and item_width < stringWidth(content, font_name, resized_font):
+            resized_font -= 0.25
+        return {'fontSize': resized_font, 'leading': resized_font}
+
     def _draw_item(self, canvas, item, tpl_data, content, margin_x, margin_y):
-        style = ParagraphStyle({})
-        style.alignment = ALIGNMENTS[item['text_align']]
-        style.textColor = COLORS[item['color']]
-        style.fontSize = _extract_font_size(item['font_size'])
-        style.leading = style.fontSize
+        font_size = _extract_font_size(item['font_size'])
+        styles = {
+            'alignment': ALIGNMENTS[item['text_align']],
+            'textColor': self._normalize_color(item.get('color') or '#000000'),
+            'backColor': self._normalize_color(item.get('background_color') or None),
+            'borderPadding': (0, 0, 4, 0),
+            'fontSize': font_size,
+            'leading': font_size
+        }
 
         if item['bold'] and item['italic']:
-            style.fontName = FONT_STYLES[item['font_family']][3]
+            styles['fontName'] = FONT_STYLES[item['font_family']][3]
         elif item['italic']:
-            style.fontName = FONT_STYLES[item['font_family']][2]
+            styles['fontName'] = FONT_STYLES[item['font_family']][2]
         elif item['bold']:
-            style.fontName = FONT_STYLES[item['font_family']][1]
+            styles['fontName'] = FONT_STYLES[item['font_family']][1]
         else:
-            style.fontName = FONT_STYLES[item['font_family']][0]
+            styles['fontName'] = FONT_STYLES[item['font_family']][0]
+
+        if not isinstance(content, BytesIO) and item.get('text_overflow', 'wrap') == 'resize':
+            styles.update(self._get_resized_font(content, font_size, styles['fontName'], item['width']))
+
+        for update in values_from_signal(
+            signals.event.designer.update_badge_style.send(self.template, item=item, styles=styles),
+            as_list=True
+        ):
+            styles.update(update)
+
+        style = ParagraphStyle({})
+        for key, value in styles.items():
+            setattr(style, key, value)
 
         item_x = float(item['x']) / PIXELS_CM * cm
         item_y = float(item['y']) / PIXELS_CM * cm
         item_width = item['width'] / PIXELS_CM * cm
         item_height = (item['height'] / PIXELS_CM * cm) if item.get('height') is not None else None
+        item_preserve_aspect_ratio = item.get('preserve_aspect_ratio', True)
 
-        if isinstance(content, Image.Image):
+        if isinstance(content, BytesIO):
             canvas.drawImage(ImageReader(content), margin_x + item_x, self.height - margin_y - item_height - item_y,
-                             item_width, item_height)
+                             item_width, item_height, mask='auto', preserveAspectRatio=item_preserve_aspect_ratio)
         else:
-            content = strip_tags(content)
+            content = content.unescape() if isinstance(content, RichMarkup) else content
+            content = sanitize_html(strip_tags(content))
             for line in content.splitlines():
                 p = Paragraph(line, style)
                 available_height = (tpl_data.height_cm - (item_y / PIXELS_CM)) * cm

@@ -3,6 +3,7 @@
 {% from 'events/contributions/display/_contribution_list.html' import render_contribution_list %}
 {% from 'events/display/common/_conferences.html' import render_attachments %}
 {% from 'events/display/indico/_common.html' import render_location, render_users %}
+{% from 'events/_affiliation.html' import render_person_affiliation %}
 {% from 'message_box.html' import message_box %}
 
 {% block page_class %}conference-page item-summary{% endblock %}
@@ -16,7 +17,13 @@
 {% endblock %}
 
 {% block info %}
-    <div class="time-data">
+    {% if sess.code %}
+        <div class="generic-data">
+            <i class="icon-tag header-data"></i>
+            {{ sess.code }}
+        </div>
+    {% endif %}
+    <div class="generic-data">
         <i class="icon-time header-data"></i>
         <span class="time-info">
             {% if sess.start_dt -%}
@@ -27,7 +34,7 @@
         </span>
     </div>
     {% if sess.has_location_info %}
-        <div class="location-data">
+        <div class="generic-data">
             {{ render_location(sess, class='session-location') }}
         </div>
     {% endif %}
@@ -35,41 +42,38 @@
 
 {% block page_actions -%}
     <div class="toolbar">
-        {% if sess.can_manage(session.user) -%}
-            <div class="group">
-                <a href="#" class="i-button icon-edit"
-                   title="{% trans %}Edit session{% endtrans %}"
-                   data-title="{% trans %}Edit session{% endtrans %}"
-                   data-href="{{ url_for('.modify_session', sess) }}"
-                   data-ajax-dialog
-                   data-reload-after></a>
-                <a href="#" class="i-button icon-shield" title="{% trans %}Manage protection{% endtrans %}"
-                   data-title="{% trans title=sess.title %}Manage protection{% endtrans %}"
-                   data-href="{{ url_for('.session_protection', sess) }}"
-                   data-ajax-dialog
-                   data-reload-after></a>
+        <div class="group">
+            {% if sess.can_manage(session.user) -%}
+                <button class="i-button icon-edit"
+                        title="{% trans %}Edit session{% endtrans %}"
+                        data-title="{% trans %}Edit session{% endtrans %}"
+                        data-href="{{ url_for('.modify_session', sess) }}"
+                        data-ajax-dialog
+                        data-reload-after></button>
+                <button class="i-button icon-shield"
+                        title="{% trans %}Manage protection{% endtrans %}"
+                        data-title="{% trans title=sess.title %}Manage protection{% endtrans %}"
+                        data-href="{{ url_for('.session_protection', sess) }}"
+                        data-ajax-dialog
+                        data-reload-after></button>
+            {%- endif %}
+            {% if sess.can_manage(session.user, 'coordinate') -%}
                 <a href="{{ url_for('timetable.manage_session', sess) }}"
                    class="i-button icon-time"
                    title="{% trans %}Manage timetable{% endtrans %}"></a>
-            </div>
-        {%- endif %}
+            {%- endif %}
+        </div>
         <div class="group">
-            <a href="{{ url_for('sessions.export_session_timetable', sess) }}" class="i-button icon-file-pdf"></a>
+            <a href="{{ url_for('sessions.export_session_timetable', sess) }}" class="i-button icon-file-pdf" title="{% trans %}Export to PDF{% endtrans %}"></a>
             {% if sess.start_dt -%}
                 {% if g.static_site %}
-                    <a href="{{ url_for('sessions.export_ics', sess) }}" class="i-button icon-calendar"></a>
+                    <a href="{{ url_for('sessions.export_ics', sess) }}" class="i-button icon-calendar" title="{% trans %}Export{% endtrans %}"></a>
                 {% else %}
-                    <a id="exportIcal{{ sess.id }}" href="#"
-                       class="i-button icon-calendar js-export-ical"
-                       data-id="{{ sess.id }}"></a>
+                    <div id="session-calendar-link" data-session-id="{{ sess.id }}" data-event-id="{{ sess.event_id }}"
+                         data-session-contrib-count="{{ sess.contributions|length }}"></div>
                 {% endif %}
             {%- endif %}
         </div>
-        {% if sess.start_dt -%}
-            {% with item=sess, ics_url=url_for('sessions.export_ics', sess) -%}
-                {% include 'events/sessions/display/session_ical_export.html' %}
-            {%- endwith %}
-        {%- endif %}
     </div>
 {%- endblock %}
 
@@ -91,13 +95,17 @@
                             {% for convener in block.person_links -%}
                                 <li class="icon-user">
                                     {% if sess.can_manage(session.user) %}
-                                        <a href="mailto:{{ convener.person.email }}">
-                                            {{ convener.person.full_name }}
+                                        <a href="mailto:{{ convener.email }}">
+                                            {{ convener.full_name }}
                                         </a>
                                     {% else %}
-                                        {{ convener.person.full_name }}
+                                        {{ convener.full_name }}
                                     {% endif %}
-                                    ({{ convener.person.affiliation }})
+                                    {% if convener.affiliation %}
+                                        <span class="affiliation">
+                                            <span class="text">({{ render_person_affiliation(convener) }})</span>
+                                        </span>
+                                    {% endif %}
                                 </li>
                             {%- else -%}
                                 <li>{% trans %}There are no conveners in this block{% endtrans %}</li>
@@ -127,14 +135,16 @@
     <section>
         <div class="item-subitems toolbar">
             {% if sess.contributions %}
-                <a href="#" class="i-button icon-list js-switch-view" data-show="session-contrib-list">
+                <button class="i-button icon-list js-switch-view"
+                        data-show="session-contrib-list">
                     {%- trans %}Contribution list{% endtrans -%}
-                </a>
+                </button>
             {% endif %}
             {% if not sess.is_poster %}
-                <a href="#" class="i-button icon-time highlight js-switch-view" data-show="session-timetable">
+                <button class="i-button icon-time highlight js-switch-view"
+                        data-show="session-timetable">
                     {%- trans %}Timetable{% endtrans -%}
-                </a>
+                </button>
             {% endif %}
         </div>
     </section>

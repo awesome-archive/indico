@@ -1,48 +1,47 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from wtforms.fields.core import StringField
-from wtforms.validators import DataRequired, Length
+from wtforms.fields import BooleanField, StringField
+from wtforms.validators import DataRequired, Length, ValidationError
 
 from indico.modules.events.models.roles import EventRole
-from indico.modules.events.roles.util import get_role_colors
 from indico.util.i18n import _
+from indico.util.spreadsheets import CSVFieldDelimiter
 from indico.web.forms.base import IndicoForm
-from indico.web.forms.fields import IndicoSinglePalettePickerField
+from indico.web.forms.colors import get_role_colors
+from indico.web.forms.fields import FileField, IndicoEnumSelectField, IndicoSinglePalettePickerField
+from indico.web.forms.widgets import SwitchWidget
 
 
-class RoleForm(IndicoForm):
+class EventRoleForm(IndicoForm):
     name = StringField(_('Name'), [DataRequired()],
                        description=_('The full name of the role'))
-    code = StringField(_('Abbreviation'), [DataRequired(), Length(max=3)], filters=[lambda x: x.upper() if x else ''],
+    code = StringField(_('Code'), [DataRequired(), Length(max=3)], filters=[lambda x: x.upper() if x else ''],
                        render_kw={'style': 'width:60px; text-align:center; text-transform:uppercase;'},
                        description=_('A shortcut (max. 3 characters) for the role'))
-    color = IndicoSinglePalettePickerField(_('Colour'), color_list=get_role_colors(), text_color='ffffff',
-                                           description=_('The colour used when displaying the role'))
+    color = IndicoSinglePalettePickerField(_('Color'), color_list=get_role_colors(), text_color='ffffff',
+                                           description=_('The color used when displaying the role'))
 
     def __init__(self, *args, **kwargs):
         self.role = kwargs.get('obj')
         self.event = kwargs.pop('event')
-        super(RoleForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def validate_code(self, field):
         query = EventRole.query.with_parent(self.event).filter_by(code=field.data)
         if self.role is not None:
             query = query.filter(EventRole.id != self.role.id)
         if query.has_rows():
-            raise ValueError(_('A role with this abbreviation already exists.'))
+            raise ValidationError(_('A role with this code already exists.'))
+
+
+class ImportMembersCSVForm(IndicoForm):
+    source_file = FileField(_('Source File'), [DataRequired(_('You need to upload a CSV or TXT file.'))],
+                            accepted_file_types='.csv,.txt')
+    remove_existing = BooleanField(_('Remove existing members'), widget=SwitchWidget())
+    delimiter = IndicoEnumSelectField(_('CSV field delimiter'), enum=CSVFieldDelimiter,
+                                      default=CSVFieldDelimiter.comma.name)

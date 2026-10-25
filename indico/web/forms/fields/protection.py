@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import render_template
 from markupsafe import Markup
@@ -35,9 +24,11 @@ class IndicoProtectionField(IndicoEnumRadioField):
         get_acl_message_url = kwargs.pop('acl_message_url', None)
         self.acl_message_url = get_acl_message_url(kwargs['_form']) if get_acl_message_url else None
         self.can_inherit_protection = self.protected_object.protection_parent is not None
-        if not self.can_inherit_protection:
-            kwargs['skip'] = {ProtectionMode.inheriting}
-        super(IndicoProtectionField, self).__init__(*args, enum=ProtectionMode, **kwargs)
+        self.is_unlisted_event = isinstance(self.protected_object, db.m.Event) and self.protected_object.is_unlisted
+        skip = set(self.protected_object.disallowed_protection_modes)
+        if not self.can_inherit_protection and not self.is_unlisted_event:
+            skip.add(ProtectionMode.inheriting)
+        super().__init__(*args, enum=ProtectionMode, skip=skip, **kwargs)
 
     def render_protection_message(self):
         protected_object = self.get_form().protected_object
@@ -49,6 +40,8 @@ class IndicoProtectionField(IndicoEnumRadioField):
             parent_type = _('Event')
         elif isinstance(protected_object.protection_parent, db.m.Category):
             parent_type = _('Category')
+        elif isinstance(protected_object.protection_parent, db.m.MenuEntry):
+            parent_type = _('Menu Entry')
         else:
             parent_type = _('Session')
         rv = render_template('_protection_info.html', field=self, protected_object=protected_object,

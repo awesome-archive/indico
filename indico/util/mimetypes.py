@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import mimetypes
 import re
@@ -64,17 +53,17 @@ _regex_mapping = [
     # Video
     ('^video/', 'icon-file-video'),
     # OpenOffice
-    ('application/vnd\.oasis\.opendocument\.', 'icon-file-openoffice'),
+    (r'application/vnd\.oasis\.opendocument\.', 'icon-file-openoffice'),
     # XML
-    ('.+/.+\+xml$', 'icon-file-xml'),
+    (r'.+/.+\+xml$', 'icon-file-xml'),
     # JSON
-    ('.+/.+\+json$', 'icon-file-css')
+    (r'.+/.+\+json$', 'icon-file-css')
 ]
 _regex_mapping = [(re.compile(regex), icon) for regex, icon in _regex_mapping]
 
 
 def icon_from_mimetype(mimetype, default_icon='icon-file-filled'):
-    """Gets the most suitable icon for a MIME type."""
+    """Get the most suitable icon for a MIME type."""
     mimetype = mimetype.lower()
     try:
         return _exact_mapping[mimetype]
@@ -86,10 +75,10 @@ def icon_from_mimetype(mimetype, default_icon='icon-file-filled'):
 
 
 def register_custom_mimetypes():
-    """Registers additional extension/mimetype mappings.
+    """Register additional extension/mimetype mappings.
 
     This is used for mimetypes/extensions that are not in the official
     mapping but useful, e.g. because indico has special handling for
     files with that type.
     """
-    mimetypes.add_type(b'text/markdown', b'.md')
+    mimetypes.add_type('text/markdown', '.md')

@@ -1,40 +1,50 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
 from copy import copy
 from importlib import import_module
+from typing import Self
 
 from flask import g
-from flask_sqlalchemy import BaseQuery, Model, Pagination
+from flask_sqlalchemy.model import Model
+from flask_sqlalchemy.pagination import Pagination, QueryPagination
+from flask_sqlalchemy.query import Query as BaseQuery
 from sqlalchemy import Column, inspect, orm
 from sqlalchemy.event import listen, listens_for
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import contains_eager, joinedload
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import get_history, set_committed_value
 from sqlalchemy.orm.exc import NoResultFound
 
 from indico.core import signals
 from indico.util.packaging import get_package_root_path
+from indico.util.signals import values_from_signal
+
+
+class IndicoQueryPagination(QueryPagination):
+    def __init__(self, *args, **kwargs):
+        self.show_all = kwargs.pop('show_all', False)
+        super().__init__(*args, **kwargs)
+
+    def _query_items(self):
+        query = self._query_args['query']
+        if not self.show_all:
+            query = query.limit(self.per_page).offset(self._query_offset)
+        return query.all()
+
+    def _query_count(self):
+        if self.show_all:
+            return len(self.items)
+        return super()._query_count()
 
 
 class IndicoBaseQuery(BaseQuery):
-    def paginate(self, page=1, per_page=25, show_all=False):
+    def paginate(self, *, page=1, per_page=25, show_all=False) -> Pagination:
         """Paginate a query object.
 
         This behaves almost like the default `paginate` method from
@@ -45,20 +55,9 @@ class IndicoBaseQuery(BaseQuery):
         :param show_all: Whether to show all the elements on one page.
         :return: a :class:`Pagination` object
         """
-        if page < 1 or show_all:
-            page = 1
-
         if show_all:
-            items = self.all()
-            per_page = total = len(items)
-        else:
-            items = self.limit(per_page).offset((page - 1) * per_page).all()
-            if page == 1 and len(items) < per_page:
-                total = len(items)
-            else:
-                total = self.order_by(None).count()
-
-        return Pagination(self, page, per_page, total, items)
+            page = 1
+        return IndicoQueryPagination(query=self, page=page, per_page=per_page, max_per_page=None, show_all=show_all)
 
     def has_rows(self):
         """Check whether a query yields any rows.
@@ -68,9 +67,25 @@ class IndicoBaseQuery(BaseQuery):
         """
         return self.session.query(self.enable_eagerloads(False).exists()).scalar()
 
+    def signal_query(self, query_name, **kwargs):
+        """Return a query object that may have been modified by a signal handler.
+
+        :param query_name: A descriptive name to provide context to signal handlers.
+        :return: A query object.
+        """
+        queries = values_from_signal(signals.core.db_query.send(query_name, query=self, **kwargs), as_list=True)
+        if not queries:
+            return self
+        elif len(queries) == 1:
+            return queries[0]
+        else:
+            raise RuntimeError(f'Only one subscriber can customize the "{query_name}" query ({len(queries)} found)')
+
 
 class IndicoModel(Model):
-    """Indico DB model"""
+    """Indico DB model."""
+
+    query: IndicoBaseQuery
 
     #: Whether relationship preloading is allowed.  If disabled,
     #: the on-load event that populates relationship from the preload
@@ -79,38 +94,7 @@ class IndicoModel(Model):
     query_class = IndicoBaseQuery
 
     @classmethod
-    def find(cls, *args, **kwargs):
-        special_field_names = ('join', 'eager')
-        special_fields = {}
-        for key in special_field_names:
-            value = kwargs.pop('_{}'.format(key), ())
-            if not isinstance(value, (list, tuple)):
-                value = (value,)
-            special_fields[key] = value
-        joined_eager = set(special_fields['eager']) & set(special_fields['join'])
-        options = []
-        options += [joinedload(rel) for rel in special_fields['eager'] if rel not in joined_eager]
-        options += [contains_eager(rel) for rel in joined_eager]
-        return (cls.query
-                .filter_by(**kwargs)
-                .join(*special_fields['join'])
-                .filter(*args)
-                .options(*options))
-
-    @classmethod
-    def find_all(cls, *args, **kwargs):
-        return cls.find(*args, **kwargs).all()
-
-    @classmethod
-    def find_first(cls, *args, **kwargs):
-        return cls.find(*args, **kwargs).first()
-
-    @classmethod
-    def find_one(cls, *args, **kwargs):
-        return cls.find(*args, **kwargs).one()
-
-    @classmethod
-    def get(cls, oid, is_deleted=None):
+    def get(cls, oid, is_deleted: bool | None = None) -> Self | None:
         """Get an object based on its primary key.
 
         :param oid: The primary key of the object
@@ -130,10 +114,17 @@ class IndicoModel(Model):
         return obj
 
     @classmethod
-    def get_one(cls, oid, is_deleted=None):
+    def get_or_404(cls, oid, is_deleted=None):
+        """Get an object based on its primary key, raising a 404 if not found.
+
+        :param oid: The primary key of the object
+        :param is_deleted: If specified, a 404 error will be returned if the
+                           `is_deleted` attribute of the object does not match
+                           the specified value.
+        """
         obj = cls.get(oid, is_deleted=is_deleted)
         if obj is None:
-            raise NoResultFound()
+            raise NoResultFound
         return obj
 
     @classmethod
@@ -167,12 +158,12 @@ class IndicoModel(Model):
         cache = g.get('relationship_cache', {}).get(type(target))
         if not cache:
             return
-        for rel, value in cache['data'].get(target, {}).iteritems():
+        for rel, value in cache['data'].get(target, {}).items():
             if rel not in target.__dict__:
                 set_committed_value(target, rel, value)
 
     def assign_id(self):
-        """Immediately assigns an ID to the object.
+        """Immediately assign an ID to the object.
 
         This only works if the table has exactly one serial column.
         It also "wastes" the ID if the new object is not actually
@@ -198,31 +189,39 @@ class IndicoModel(Model):
             id_ = db.session.query(db.func.nextval(db.func.pg_get_serial_sequence(table_name, col_name))).scalar()
         setattr(self, attr_name, id_)
 
-    def populate_from_dict(self, data, keys=None, skip=None):
-        """Populates the object with values in a dictionary
+    def populate_from_dict(self, data, keys=None, skip=None, track_changes=True):
+        """Populate the object with values in a dictionary.
 
         :param data: a dict containing values to populate the object.
         :param keys: If set, only keys from that list are populated.
         :param skip: If set, keys from that list are skipped.
+        :param track_changes: Set to false to disable change tracking, e.g. if
+                              you have any data keys pointing to properties whose
+                              attributes cannot be read back yet.
         """
         cls = type(self)
         changed = {}
-        for key, value in data.iteritems():
+        for key, value in data.items():
             if keys and key not in keys:
-                return False
+                continue
             if skip and key in skip:
                 continue
             if not hasattr(cls, key):
-                raise ValueError("{} has no attribute '{}'".format(cls.__name__, key))
-            old_value = getattr(self, key, None)
-            if old_value != value:
-                # XXX: we copy because of https://bitbucket.org/zzzeek/sqlalchemy/issues/3913/
-                changed[key] = (copy(old_value), value)
+                raise ValueError(f"{cls.__name__} has no attribute '{key}'")
+            if not track_changes:
                 setattr(self, key, value)
-        return changed
+                continue
+            # Track the old and new value so we can log the change
+            old_value = getattr(self, key, None)
+            setattr(self, key, value)
+            new_value = getattr(self, key)
+            if old_value != new_value:
+                # XXX: we copy because of https://github.com/sqlalchemy/sqlalchemy/issues/3913
+                changed[key] = (copy(old_value), copy(new_value))
+        return changed if track_changes else None
 
     def populate_from_attrs(self, obj, attrs):
-        """Populates the object from another object's attributes
+        """Populate the object from another object's attributes.
 
         :param obj: an object
         :param attrs: a set containing the attributes to copy
@@ -230,31 +229,19 @@ class IndicoModel(Model):
         cls = type(self)
         for attr in attrs:
             if not hasattr(cls, attr):
-                raise ValueError("{} has no attribute '{}'".format(cls.__name__, attr))
+                raise ValueError(f"{cls.__name__} has no attribute '{attr}'")
             setattr(self, attr, getattr(obj, attr))
-
-    def __committed__(self, change):
-        """Called after a commit for this object.
-
-        ALWAYS call super if you override this method!
-
-        :param change: The operation that has been committed (delete/insert/update)
-        """
-        if hasattr(g, 'memoize_cache'):
-            del g.memoize_cache
-        signals.model_committed.send(type(self), obj=self, change=change)
 
 
 @listens_for(orm.mapper, 'after_configured', once=True)
 def _mappers_configured():
-    from indico.core.db import db
-    for model in db.Model._decl_class_registry.itervalues():
+    for model in get_all_models():
         if hasattr(model, '__table__') and model.allow_relationship_preloading:
             listen(model, 'load', model._populate_preloaded_relationships)
 
 
 def import_all_models(package_name='indico'):
-    """Utility that imports all modules in indico/**/models/
+    """Utility that imports all modules in indico/**/models/.
 
     :param package_name: Package name to scan for models. If unset,
                          the top-level package containing this file
@@ -264,10 +251,10 @@ def import_all_models(package_name='indico'):
     if not package_root:
         return
     modules = []
-    for root, dirs, files in os.walk(package_root):
+    for root, _dirs, files in os.walk(package_root):
         if os.path.basename(root) == 'models':
             package = os.path.relpath(root, package_root).replace(os.sep, '.')
-            modules += ['{}.{}.{}'.format(package_name, package, name[:-3])
+            modules += [f'{package_name}.{package}.{name[:-3]}'
                         for name in files
                         if name.endswith('.py') and name != '__init__.py' and not name.endswith('_test.py')]
 
@@ -275,8 +262,14 @@ def import_all_models(package_name='indico'):
         import_module(module)
 
 
+def get_all_models():
+    """Get all models SQLAlchemy knows about."""
+    from indico.core.db import db
+    return {mapper.class_ for mapper in db.Model.registry.mappers}
+
+
 def attrs_changed(obj, *attrs):
-    """Checks if the given fields have been changed since the last flush
+    """Check if the given fields have been changed since the last flush.
 
     :param obj: SQLAlchemy-mapped object
     :param attrs: attribute names
@@ -285,8 +278,10 @@ def attrs_changed(obj, *attrs):
 
 
 def get_default_values(model):
-    """Returns a dict containing all static default values of a model.
+    """Return a dict containing all static default values of a model.
+
     This only takes `default` into account, not `server_default`.
+
     :param model: A SQLAlchemy model
     """
     return {attr.key: attr.columns[0].default.arg
@@ -296,7 +291,7 @@ def get_default_values(model):
 
 def get_simple_column_attrs(model):
     """
-    Returns a set containing all "simple" column attributes, i.e.
+    Return a set containing all "simple" column attributes, i.e.
     attributes which map to a table column and are neither primary
     key nor foreign key.
 
@@ -314,7 +309,7 @@ def get_simple_column_attrs(model):
 
 
 def auto_table_args(cls, **extra_kwargs):
-    """Merges SQLAlchemy ``__table_args__`` values.
+    """Merge SQLAlchemy ``__table_args__`` values.
 
     This is useful when using mixins to compose model classes if the
     mixins need to define custom ``__table_args__``. Since defining
@@ -352,10 +347,10 @@ def auto_table_args(cls, **extra_kwargs):
             else:
                 posargs.extend(value)
         else:  # pragma: no cover
-            raise ValueError('Unexpected tableargs: {}'.format(value))
+            raise TypeError(f'Unexpected tableargs: {value}')
     kwargs.update(extra_kwargs)
     if posargs and kwargs:
-        return tuple(posargs) + (kwargs,)
+        return (*posargs, kwargs)
     elif kwargs:
         return kwargs
     else:
@@ -363,11 +358,11 @@ def auto_table_args(cls, **extra_kwargs):
 
 
 def _get_backref_name(relationship):
-    return relationship.backref if isinstance(relationship.backref, basestring) else relationship.backref[0]
+    return relationship.backref if isinstance(relationship.backref, str) else relationship.backref[0]
 
 
 def populate_one_to_one_backrefs(model, *relationships):
-    """Populates the backref of a one-to-one relationship on load
+    """Populate the backref of a one-to-one relationship on load.
 
     See this post in the SQLAlchemy docs on why it's useful/necessary:
     http://docs.sqlalchemy.org/en/latest/orm/loading_relationships.html#creating-custom-load-rules
@@ -383,35 +378,42 @@ def populate_one_to_one_backrefs(model, *relationships):
 
         @listens_for(model, 'load')
         def _populate_backrefs(target, context):
-            for name, backref in mappings.iteritems():
+            for name, backref in mappings.items():
                 # __dict__ to avoid triggering lazy-loaded relationships
                 if target.__dict__.get(name) is not None:
                     set_committed_value(getattr(target, name), backref, target)
 
 
-def override_attr(attr_name, parent_name, fget=None):
+def override_attr(attr_name, parent_name, *, fget=None, check_attr_name=None, own_attr_name=None):
     """Create property that overrides an attribute coming from parent.
 
     In order to ensure setter functionality at creation time, ``parent`` must be
-    initialized before the overriden attribute.
+    initialized before the overridden attribute.
 
-    :param attr_name: The name of the attribute to be overriden.
+    :param attr_name: The name of the attribute to be overridden.
     :param parent_name: The name of the attribute from which to override the attribute.
     :param fget: Getter for own property
+    :param check_attr_name: The name of the attribute to check; by default this is `attr_name`,
+                            but in case another attribute should be checked to determine whether
+                            an override is happening or not, it can be provided here.
+    :param own_attr_name: The name of the attribute on the object that has this property; by default
+                          this is ``_<attr_name>``.
     """
-
-    own_attr_name = '_' + attr_name
+    if own_attr_name is None:
+        own_attr_name = '_' + attr_name
 
     def _get(self):
         parent = getattr(self, parent_name)
         attr = getattr(self, own_attr_name)
+        check_attr = getattr(self, check_attr_name or own_attr_name)
         fget_ = (lambda self, __: attr) if fget is None else fget
-        return fget_(self, own_attr_name) if attr is not None or not parent else getattr(parent, attr_name)
+        return fget_(self, own_attr_name) if check_attr is not None or not parent else getattr(parent, attr_name)
 
     def _set(self, value):
         parent = getattr(self, parent_name)
         own_value = getattr(self, own_attr_name)
-        if not parent or own_value is not None or value != getattr(parent, attr_name):
+        always_set = check_attr_name and getattr(self, check_attr_name) is not None
+        if not parent or own_value is not None or value != getattr(parent, attr_name) or always_set:
             setattr(self, own_attr_name, value)
 
     def _expr(cls):

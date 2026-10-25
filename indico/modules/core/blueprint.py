@@ -1,23 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from flask import request
 
-from indico.modules.core.controllers import (RHChangeLanguage, RHChangeTimezone, RHContact, RHReportError,
-                                             RHReportErrorAPI, RHSettings, RHVersionCheck)
+from indico.modules.core.controllers import (RHAPIGenerateCaptcha, RHChangeLanguage, RHChangeTimezone, RHConfig,
+                                             RHContact, RHCountries, RHPrincipals, RHRenderMarkdown, RHReportErrorAPI,
+                                             RHResetSignatureTokens, RHSessionExpiry, RHSessionRefresh, RHSettings,
+                                             RHSignURL, RHVersionCheck)
 from indico.web.flask.util import redirect_view
 from indico.web.flask.wrappers import IndicoBlueprint
 
@@ -33,11 +26,28 @@ _bp.add_url_rule('/admin/', 'admin_dashboard', view_func=redirect_view('.setting
 # Global operations
 _bp.add_url_rule('/change-language', 'change_lang', RHChangeLanguage, methods=('POST',))
 _bp.add_url_rule('/change-timezone', 'change_tz', RHChangeTimezone, methods=('POST',))
+_bp.add_url_rule('/session-expiry', 'session_expiry', RHSessionExpiry)
+_bp.add_url_rule('/session-refresh', 'session_refresh', RHSessionRefresh, methods=('POST',))
+_bp.add_url_rule('/api/principals', 'principals', RHPrincipals, methods=('POST',))
+_bp.add_url_rule('/api/sign-url', 'sign_url', RHSignURL, methods=('POST',))
+with _bp.add_prefixed_rules('/user/<int:user_id>', '/user'):
+    _bp.add_url_rule('/reset-signature-tokens', 'reset_signature_tokens', RHResetSignatureTokens, methods=('POST',))
+_bp.add_url_rule('/api/config', 'config', RHConfig)
+_bp.add_url_rule('/api/render-markdown', 'markdown', RHRenderMarkdown, methods=('POST',))
+_bp.add_url_rule('!/api/countries', 'api_countries', RHCountries)
 
 # Misc pages
 _bp.add_url_rule('/contact', 'contact', RHContact)
-_bp.add_url_rule('/report-error/<error_id>', 'report_error', RHReportError, methods=('GET', 'POST'))
 _bp.add_url_rule('/report-error/api/<error_id>', 'report_error_api', RHReportErrorAPI, methods=('POST',))
 
 # Allow loadbalancers etc to easily check whether the service is alive
 _bp.add_url_rule('/ping', 'ping', lambda: ('', 204))
+
+# CAPTCHA
+_bp.add_url_rule('/api/captcha/generate', 'generate_captcha', RHAPIGenerateCaptcha)
+
+
+@_bp.url_defaults
+def _add_user_id(endpoint, values):
+    if endpoint == 'core.reset_signature_tokens' and 'user_id' not in values:
+        values['user_id'] = request.view_args.get('user_id')

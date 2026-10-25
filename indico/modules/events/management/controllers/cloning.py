@@ -1,22 +1,10 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from dateutil import rrule
@@ -27,8 +15,11 @@ from indico.modules.events.cloning import EventCloner
 from indico.modules.events.management.controllers import RHManageEventBase
 from indico.modules.events.management.forms import (CLONE_REPEAT_CHOICES, CloneCategorySelectForm, CloneContentsForm,
                                                     CloneRepeatabilityForm, CloneRepeatIntervalForm,
-                                                    CloneRepeatOnceForm, CloneRepeatPatternForm)
-from indico.modules.events.operations import clone_event
+                                                    CloneRepeatOnceForm, CloneRepeatPatternForm, ImportContentsForm,
+                                                    ImportSourceEventForm)
+from indico.modules.events.notifications import notify_event_creation
+from indico.modules.events.operations import clone_event, clone_into_event
+from indico.modules.events.util import get_event_from_url
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.util import jsonify_data, jsonify_template
@@ -40,19 +31,19 @@ REPEAT_FORM_MAP = {
     'pattern': CloneRepeatPatternForm
 }
 
-RRULE_FREQ_MAP = OrderedDict([
-    ('years', rrule.YEARLY),
-    ('months', rrule.MONTHLY),
-    ('weeks', rrule.WEEKLY),
-    ('days', rrule.DAILY),
-    ('hours', rrule.HOURLY),
-    ('minutes', rrule.MINUTELY),
-    ('seconds', rrule.SECONDLY)
-])
+RRULE_FREQ_MAP = {
+    'years': rrule.YEARLY,
+    'months': rrule.MONTHLY,
+    'weeks': rrule.WEEKLY,
+    'days': rrule.DAILY,
+    'hours': rrule.HOURLY,
+    'minutes': rrule.MINUTELY,
+    'seconds': rrule.SECONDLY,
+}
 
 
 def relativedelta_to_rrule_interval(rdelta):
-    for unit, freq in RRULE_FREQ_MAP.viewitems():
+    for unit, freq in RRULE_FREQ_MAP.items():
         value = getattr(rdelta, unit)
         if value:
             return freq, value
@@ -68,7 +59,7 @@ def get_clone_calculator(repeatability, event):
         raise BadRequest
 
 
-class CloneCalculator(object):
+class CloneCalculator:
     def __init__(self, event):
         self.event = event
 
@@ -87,7 +78,7 @@ class CloneCalculator(object):
         return args
 
     def calculate(self, formdata):
-        """Calculate dates of cloned events
+        """Calculate dates of cloned events.
 
         :return: a ``(dates, last_day_of_month)`` tuple
         """
@@ -95,7 +86,7 @@ class CloneCalculator(object):
         if form.validate():
             return self._calculate(form)
         else:
-            raise ValueError([(unicode(getattr(form, k).label.text), v) for k, v in form.errors.viewitems()])
+            raise ValueError('<br>'.join(form.error_list))
 
 
 class PatternCloneCalculator(CloneCalculator):
@@ -141,9 +132,9 @@ class RHClonePreview(RHManageEventBase):
         try:
             dates, last_day_of_month = clone_calculator.calculate(request.form)
             if len(dates) > 100:
-                raise ValueError(_("You can clone maximum of 100 times at once"))
-        except ValueError as e:
-            return jsonify(error={'message': e.message})
+                raise ValueError(_('You can clone maximum of 100 times at once'))
+        except ValueError as exc:
+            return jsonify(error={'message': str(exc)})
         return jsonify_data(count=len(dates), dates=dates, last_day_of_month=last_day_of_month, flash=False)
 
 
@@ -158,7 +149,8 @@ class RHCloneEvent(RHManageEventBase):
         elif step == 2:
             return CloneContentsForm(self.event, set_defaults=set_defaults)
         elif step == 3:
-            default_category = (self.event.category if self.event.category.can_create_events(session.user)
+            default_category = (self.event.category
+                                if self.event.category and self.event.category.can_create_events(session.user)
                                 else None)
             return CloneCategorySelectForm(self.event, category=default_category)
         elif step == 4:
@@ -170,38 +162,114 @@ class RHCloneEvent(RHManageEventBase):
         step = int(request.form.get('step', 1))
         tpl_args = {}
         form = self._form_for_step(step, set_defaults=True)
-        prev_form = self._form_for_step(step - 1)
+        prev_form = self._form_for_step(step - 1, set_defaults=False)
 
         if prev_form and not prev_form.validate():
             form = prev_form
-            step = step - 1
+            step -= 1
 
-        if step == 4:
-            tpl_args.update({
-                'step_title': dict(CLONE_REPEAT_CHOICES)[request.form['repeatability']],
-            })
-        elif step > 4:
+        if step > 4:
             # last step - perform actual cloning
             form = REPEAT_FORM_MAP[request.form['repeatability']](self.event)
 
             if form.validate_on_submit():
                 if form.repeatability.data == 'once':
-                    dates = [form.start_dt.data]
+                    # only one repetition
+                    clone = clone_event(
+                        self.event, 0, form.start_dt.data, set(form.selected_items.data), form.category.data,
+                        form.refresh_users.data
+                    )
+                    notify_event_creation(clone)
+                    flash(_('Welcome to your cloned event!'), 'success')
+                    return jsonify_data(redirect=url_for('event_management.settings', clone), flash=False)
                 else:
+                    # recurring event
                     clone_calculator = get_clone_calculator(form.repeatability.data, self.event)
                     dates = clone_calculator.calculate(request.form)[0]
-                clones = [clone_event(self.event, start_dt, set(form.selected_items.data), form.category.data)
-                          for start_dt in dates]
-                if len(clones) == 1:
-                    flash(_('Welcome to your cloned event!'), 'success')
-                    return jsonify_data(redirect=url_for('event_management.settings', clones[0]), flash=False)
-                else:
-                    flash(_('{} new events created.').format(len(dates)), 'success')
+                    clones = [
+                        clone_event(self.event, n, start_dt, set(form.selected_items.data), form.category.data,
+                                    form.refresh_users.data)
+                        for n, start_dt in enumerate(dates, 1)
+                    ]
+                    if clones:
+                        notify_event_creation(clones[0], clones)
+                        flash(_('{} new events created.').format(len(clones)), 'success')
                     return jsonify_data(redirect=form.category.data.url, flash=False)
             else:
                 # back to step 4, since there's been an error
                 step = 4
+
+        if step == 4:
+            tpl_args['step_title'] = dict(CLONE_REPEAT_CHOICES)[request.form['repeatability']]
+
         dependencies = {c.name: {'requires': list(c.requires_deep), 'required_by': list(c.required_by_deep)}
                         for c in EventCloner.get_cloners(self.event)}
         return jsonify_template('events/management/clone_event.html', event=self.event, step=step, form=form,
                                 cloner_dependencies=dependencies, **tpl_args)
+
+
+def _get_import_source_from_url(target_event, url):
+    event = get_event_from_url(url)
+    if event == target_event:
+        raise ValueError(_('Cannot import from the same event'))
+    if event.type_ != target_event.type_:
+        raise ValueError(_('Cannot import from a different type of event'))
+    if not event.can_manage(session.user):
+        raise ValueError(_('You do not have management rights to this event'))
+    return event
+
+
+class RHImportFromEvent(RHManageEventBase):
+    """Import data from another event."""
+
+    def _process_args(self):
+        RHManageEventBase._process_args(self)
+        url = request.form.get('source_event_url')
+        self.source_event = _get_import_source_from_url(self.event, url) if url else None
+
+    def _form_for_step(self, step, set_defaults=True):
+        if step == 1:
+            return ImportSourceEventForm()
+        elif step == 2:
+            return ImportContentsForm(self.source_event, self.event, set_defaults=set_defaults)
+        else:
+            return None
+
+    def _process(self):
+        step = int(request.form.get('step', 1))
+        form = self._form_for_step(step, set_defaults=True)
+        prev_form = self._form_for_step(step - 1)
+
+        if prev_form and not prev_form.validate():
+            form = prev_form
+            step -= 1
+
+        elif step > 2:
+            # last step - perform actual cloning
+            form = ImportContentsForm(self.source_event, self.event)
+
+            if form.validate_on_submit():
+                updated_event = clone_into_event(self.source_event, self.event, set(form.selected_items.data))
+                flash(_('Import successful!'), 'success')
+                return jsonify_data(redirect=url_for('event_management.settings', updated_event), flash=False)
+            else:
+                # back to step 2, since there's been an error
+                step = 2
+        dependencies = {c.name: {'requires': list(c.requires_deep), 'required_by': list(c.required_by_deep)}
+                        for c in EventCloner.get_cloners(self.event)}
+        return jsonify_template('events/management/import_event.html', event=self.event, step=step, form=form,
+                                cloner_dependencies=dependencies)
+
+
+class RHImportEventDetails(RHManageEventBase):
+    ALLOW_LOCKED = True
+
+    def _process(self):
+        from indico.modules.events.schemas import EventDetailsSchema
+        schema = EventDetailsSchema()
+        form = ImportSourceEventForm()
+        try:
+            event = _get_import_source_from_url(self.event, form.source_event_url.data)
+        except ValueError as exc:
+            return jsonify(error={'message': str(exc)})
+        return jsonify_data(event=schema.dump(event))

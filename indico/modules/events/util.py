@@ -1,30 +1,22 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import json
 import os
 import random
+import re
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
+from io import BytesIO
 from mimetypes import guess_extension
 from tempfile import NamedTemporaryFile
+from urllib.parse import urlsplit
 from zipfile import ZipFile
 
 from flask import current_app, flash, g, redirect, request, session
@@ -36,24 +28,32 @@ from indico.core import signals
 from indico.core.config import config
 from indico.core.errors import NoReportError, UserValueError
 from indico.core.permissions import FULL_ACCESS_PERMISSION, READ_ACCESS_PERMISSION
-from indico.modules.api import api_settings
+from indico.modules.categories.models.roles import CategoryRole
 from indico.modules.events import Event
+from indico.modules.events.abstracts.models.abstracts import Abstract
+from indico.modules.events.contributions import contribution_settings
 from indico.modules.events.contributions.models.contributions import Contribution
 from indico.modules.events.contributions.models.subcontributions import SubContribution
 from indico.modules.events.layout import theme_settings
 from indico.modules.events.models.events import EventType
 from indico.modules.events.models.persons import EventPerson
 from indico.modules.events.models.principals import EventPrincipal
+from indico.modules.events.models.roles import EventRole
+from indico.modules.events.models.settings import EventSetting
 from indico.modules.events.models.static_list_links import StaticListLink
+from indico.modules.events.registration.models.forms import RegistrationForm
+from indico.modules.events.sessions.models.blocks import SessionBlock
 from indico.modules.events.sessions.models.sessions import Session
 from indico.modules.events.timetable.models.breaks import Break
 from indico.modules.events.timetable.models.entries import TimetableEntry
 from indico.modules.networks import IPNetworkGroup
+from indico.modules.users import User
+from indico.util.caching import memoize_request
 from indico.util.fs import chmod_umask, secure_filename
 from indico.util.i18n import _
+from indico.util.iterables import materialize_iterable
 from indico.util.string import strip_tags
-from indico.util.user import principal_from_fossil
-from indico.web.flask.templating import get_template_module
+from indico.util.user import principal_from_identifier
 from indico.web.flask.util import send_file, url_for
 from indico.web.forms.colors import get_colors
 
@@ -64,7 +64,7 @@ def check_event_locked(rh, event, force=False):
 
 
 def get_object_from_args(args=None):
-    """Retrieves an event object from request arguments.
+    """Retrieve an event object from request arguments.
 
     This utility is meant to be used in cases where the same controller
     can deal with objects attached to various parts of an event which
@@ -74,28 +74,37 @@ def get_object_from_args(args=None):
                  ``request.view_args`` is used.
     :return: An ``(object_type, event, object)`` tuple.  The event is
              always the :class:`Event` associated with the object.
-             The object may be an `Event`, `Session`, `Contribution`
+             The object may be an `Event`, `Session`, `SessionBlock`, `Contribution`
              or `SubContribution`.  If the object does not exist,
              ``(object_type, None, None)`` is returned.
     """
     if args is None:
         args = request.view_args
     object_type = args['object_type']
-    event = Event.find_first(id=args['confId'], is_deleted=False)
+    event = Event.get(args['event_id'], is_deleted=False)
     if event is None:
         obj = None
     elif object_type == 'event':
         obj = event
     elif object_type == 'session':
         obj = Session.query.with_parent(event).filter_by(id=args['session_id']).first()
+    elif object_type == 'session_block':
+        obj = (SessionBlock.query
+               .filter(SessionBlock.id == args['session_block_id'],
+                       SessionBlock.session.has(event=event, id=args['session_id'], is_deleted=False))
+               .first())
     elif object_type == 'contribution':
         obj = Contribution.query.with_parent(event).filter_by(id=args['contrib_id']).first()
     elif object_type == 'subcontribution':
-        obj = SubContribution.find(SubContribution.id == args['subcontrib_id'], ~SubContribution.is_deleted,
-                                   SubContribution.contribution.has(event=event, id=args['contrib_id'],
-                                                                    is_deleted=False)).first()
+        obj = (SubContribution.query
+               .filter(SubContribution.id == args['subcontrib_id'],
+                       ~SubContribution.is_deleted,
+                       SubContribution.contribution.has(event=event, id=args['contrib_id'], is_deleted=False))
+               .first())
+    elif object_type == 'abstract':
+        obj = Abstract.query.with_parent(event).filter_by(id=args['abstract_id']).first()
     else:
-        raise ValueError('Unexpected object type: {}'.format(object_type))
+        raise ValueError(f'Unexpected object type: {object_type}')
     if obj is not None:
         return object_type, event, obj
     else:
@@ -129,7 +138,7 @@ def get_theme(event, override_theme_id=None):
 
 
 def get_events_managed_by(user, dt=None):
-    """Gets the IDs of events where the user has management privs.
+    """Get the IDs of events where the user has management privs.
 
     :param user: A `User`
     :param dt: Only include events taking place on/after that date
@@ -144,7 +153,7 @@ def get_events_managed_by(user, dt=None):
 
 
 def get_events_created_by(user, dt=None):
-    """Gets the IDs of events created by the user
+    """Get the IDs of events created by the user.
 
     :param user: A `User`
     :param dt: Only include events taking place on/after that date
@@ -158,7 +167,7 @@ def get_events_created_by(user, dt=None):
 
 def get_events_with_linked_event_persons(user, dt=None):
     """
-    Returns a dict containing the event ids and role for all events
+    Return a dict containing the event ids and role for all events
     where the user is a chairperson or (in case of a lecture) speaker.
 
     :param user: A `User`
@@ -180,49 +189,8 @@ def get_random_color(event):
     return random.choice(tuple(unused_colors) or get_colors())
 
 
-def serialize_event_person(person):
-    """Serialize EventPerson to JSON-like object"""
-    return {'_type': 'EventPerson',
-            'id': person.id,
-            'email': person.email,
-            'name': person.display_full_name,
-            'firstName': person.first_name,
-            'familyName': person.last_name,
-            'title': person.title,
-            'affiliation': person.affiliation,
-            'phone': person.phone,
-            'address': person.address,
-            'user_id': person.user_id}
-
-
-def serialize_person_link(person_link):
-    """Serialize PersonLink to JSON-like object"""
-    data = {'email': person_link.person.email,
-            'name': person_link.display_full_name,
-            'fullName': person_link.display_full_name,
-            'firstName': person_link.first_name,
-            'familyName': person_link.last_name,
-            'title': person_link.title,
-            'affiliation': person_link.affiliation,
-            'phone': person_link.phone,
-            'address': person_link.address,
-            'displayOrder': person_link.display_order}
-    if person_link.person.id is not None:
-        # In case of a newly added person we only serialize the data again
-        # if the form's validation failed and the field needs to be displayed
-        # with the same data.  However, now we don't have a person ID since
-        # the person was never created, so if we send an ID/type in the
-        # serialized data it'll be sent back and cause an error as it'll appear
-        # as an existing person instead of a new one when submitting the form
-        # again.
-        data.update({'_type': 'PersonLink',
-                     'id': person_link.person.id,
-                     'personId': person_link.person.id})
-    return data
-
-
 def update_object_principals(obj, new_principals, read_access=False, full_access=False, permission=None):
-    """Updates an object's ACL with a new list of principals
+    """Update an object's ACL with a new list of principals.
 
     Exactly one argument out of `read_access`, `full_access` and `role` must be specified.
 
@@ -259,7 +227,7 @@ def update_object_principals(obj, new_principals, read_access=False, full_access
     return {'added': added, 'removed': removed}
 
 
-class ListGeneratorBase(object):
+class ListGeneratorBase:
     """Base class for classes performing actions on Indico object lists.
 
     :param event: The associated `Event`
@@ -292,7 +260,7 @@ class ListGeneratorBase(object):
         This ID will be used as a key to set the list's configuration to the
         session.
         """
-        return '{}_config_{}'.format(self.list_link_type, self.entry_parent.id)
+        return f'{self.list_link_type}_config_{self.entry_parent.id}'
 
     def _get_config(self):
         """Load the list's configuration from the DB and return it."""
@@ -305,9 +273,9 @@ class ListGeneratorBase(object):
         return session.get(session_key, self.default_list_config)
 
     def _split_item_ids(self, item_ids, separator_type=None):
-        """Separate the dynamic item ids from the static
+        """Separate the dynamic item ids from the static.
 
-        :param item_ids: The list of ids to be splitted.
+        :param item_ids: The list of ids to be split.
         :param separator_type: The type of the item to base the partitioning on.
                                If the value is 'dynamic', the function will
                                return a tuple where the first element is a list
@@ -319,12 +287,13 @@ class ListGeneratorBase(object):
                  partitioning.
         """
         if separator_type == 'dynamic':
-            dynamic_item_ids = [item_id for item_id in item_ids if not isinstance(item_id, basestring)]
+            dynamic_item_ids = [item_id for item_id in item_ids if not isinstance(item_id, str)]
             return dynamic_item_ids, [item_id for item_id in item_ids if item_id not in dynamic_item_ids]
         elif separator_type == 'static':
             static_item_ids = [item_id for item_id in item_ids if item_id in self.static_items]
             return static_item_ids, [item_id for item_id in item_ids if item_id not in static_item_ids]
-        return item_ids,
+        else:
+            raise ValueError('Invalid separator_type')
 
     def _build_query(self):
         """Return the query of the list's entries.
@@ -342,16 +311,19 @@ class ListGeneratorBase(object):
 
     def _get_filters_from_request(self):
         """Get the new filters after the filter form is submitted."""
+        def _get(item, name):
+            return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
         def get_selected_options(item_id, item):
-            if item.get('filter_choices') or item.get('type') == 'bool':
-                return [x if x != 'None' else None for x in request.form.getlist('field_{}'.format(item_id))]
+            if _get(item, 'filter_choices') or _get('type', 'bool'):
+                return [x if x != 'None' else None for x in request.form.getlist(f'field_{item_id}')]
 
         filters = deepcopy(self.default_list_config['filters'])
-        for item_id, item in self.static_items.iteritems():
+        for item_id, item in self.static_items.items():
             options = get_selected_options(item_id, item)
             if options:
                 filters['items'][item_id] = options
-        for item_id, item in self.extra_filters.iteritems():
+        for item_id, item in self.extra_filters.items():
             options = get_selected_options(item_id, item)
             if options:
                 filters['extra'][item_id] = options
@@ -382,47 +354,25 @@ class ListGeneratorBase(object):
         self.list_config['filters'] = filters
         if request.values.get('visible_items'):
             visible_items = json.loads(request.values['visible_items'])
-            self.list_config['items'] = sorted(visible_items)
+            self.list_config['items'] = sorted(visible_items, key=str)
         session.modified = True
 
     def flash_info_message(self, obj):
         raise NotImplementedError
 
 
-def get_base_ical_parameters(user, detail, path, params=None):
-    """Returns a dict of all parameters expected by iCal template"""
+def create_event_logo_tmp_file(event, tmpdir=None):
+    """Create a temporary file with the event's logo.
 
-    from indico.web.http_api.util import generate_public_auth_request
-
-    api_mode = api_settings.get('security_mode')
-    persistent_allowed = api_settings.get('allow_persistent')
-    api_key = user.api_key if user else None
-    persistent_user_enabled = api_key.is_persistent_allowed if api_key else None
-    tpl = get_template_module('api/_messages.html')
-    persistent_agreement = tpl.get_ical_persistent_msg()
-    top_urls = generate_public_auth_request(api_key, path, params)
-    urls = generate_public_auth_request(api_key, path, dict(params or {}, detail=detail))
-    request_urls = {
-        'publicRequestURL': top_urls['publicRequestURL'],
-        'authRequestURL': top_urls['authRequestURL'],
-        'publicRequestDetailedURL': urls['publicRequestURL'],
-        'authRequestDetailedURL': urls['authRequestURL']
-    }
-
-    return {'api_mode': api_mode, 'api_key': api_key, 'persistent_allowed': persistent_allowed,
-            'persistent_user_enabled': persistent_user_enabled, 'api_active': api_key is not None,
-            'api_key_user_agreement': tpl.get_ical_api_key_msg(), 'api_persistent_user_agreement': persistent_agreement,
-            'user_logged': user is not None, 'request_urls': request_urls}
-
-
-def create_event_logo_tmp_file(event):
-    """Creates a temporary file with the event's logo"""
+    If `tmpdir` is specified, the logo file is created in there and
+    a path relative to that directory is returned.
+    """
     logo_meta = event.logo_metadata
     logo_extension = guess_extension(logo_meta['content_type']) or os.path.splitext(logo_meta['filename'])[1]
-    temp_file = NamedTemporaryFile(delete=False, dir=config.TEMP_DIR, suffix=logo_extension)
-    temp_file.write(event.logo)
-    temp_file.flush()
-    return temp_file
+    with NamedTemporaryFile(delete=False, dir=(tmpdir or config.TEMP_DIR), suffix=logo_extension) as temp_file:
+        temp_file.write(event.logo)
+        temp_file.flush()
+    return os.path.relpath(temp_file.name, tmpdir) if tmpdir else temp_file.name
 
 
 @contextmanager
@@ -449,7 +399,7 @@ def track_time_changes(auto_extend=False, user=None):
     changes = defaultdict(dict)
     try:
         yield changes
-    except:
+    except Exception:
         del g.old_times
         raise
     else:
@@ -466,14 +416,14 @@ def track_time_changes(auto_extend=False, user=None):
                 if isinstance(obj, Event):
                     if not obj.can_manage(user):
                         # TODO: raise Forbidden exceptions after adding protection check in the UI
-                        raise UserValueError(_("Your action requires modification of event boundaries, but you are "
-                                               "not authorized to manage the event."))
+                        raise UserValueError(_('Your action requires modification of event boundaries, but you are '
+                                               'not authorized to manage the event.'))
                 elif not obj.object.can_manage(user):
                     # TODO: raise Forbidden exceptions after adding protection check in the UI
-                    raise UserValueError(_("Your action requires modification of session block boundaries, but you are "
-                                           "not authorized to manage the session block."))
+                    raise UserValueError(_('Your action requires modification of session block boundaries, but you are '
+                                           'not authorized to manage the session block.'))
         old_times = g.pop('old_times')
-        for obj, info in old_times.iteritems():
+        for obj, info in old_times.items():
             if isinstance(obj, TimetableEntry):
                 obj = obj.object
             if obj.start_dt != info['start_dt']:
@@ -482,13 +432,18 @@ def track_time_changes(auto_extend=False, user=None):
                 changes[obj]['duration'] = (info['duration'], obj.duration)
             if obj.end_dt != info['end_dt']:
                 changes[obj]['end_dt'] = (info['end_dt'], obj.end_dt)
-        for obj, obj_changes in changes.iteritems():
+        for obj, obj_changes in changes.items():
             entry = None if isinstance(obj, Event) else obj.timetable_entry
             signals.event.times_changed.send(type(obj), entry=entry, obj=obj, changes=obj_changes)
+            if isinstance(obj, Event):
+                # remove duration from the changes dict, as the event updated signal doesn't want/need it
+                signals.event.updated.send(
+                    obj, changes={k: v for k, v in obj_changes.items() if k in {'start_dt', 'end_dt'}}
+                )
 
 
 def register_time_change(entry):
-    """Register a time-related change for a timetable entry
+    """Register a time-related change for a timetable entry.
 
     This is an internal helper function used in the models to record
     changes of the start time or duration.  The changes are exposed
@@ -500,7 +455,7 @@ def register_time_change(entry):
     try:
         old_times = g.old_times
     except AttributeError:
-        msg = 'Time change of {} was not tracked'.format(entry)
+        msg = f'Time change of {entry} was not tracked'
         if current_app.config.get('REPL'):
             warnings.warn(msg + ' (exception converted to a warning since you are using the REPL)', stacklevel=2)
             return
@@ -515,7 +470,7 @@ def register_time_change(entry):
 
 
 def register_event_time_change(event):
-    """Register a time-related change for an event
+    """Register a time-related change for an event.
 
     This is an internal helper function used in the model to record
     changes of the start time or end time.  The changes are exposed
@@ -527,7 +482,7 @@ def register_event_time_change(event):
     try:
         old_times = g.old_times
     except AttributeError:
-        msg = 'Time change of {} was not tracked'.format(event)
+        msg = f'Time change of {event} was not tracked'
         if current_app.config.get('REPL'):
             warnings.warn(msg + ' (exception converted to a warning since you are using the REPL)', stacklevel=2)
             return
@@ -541,16 +496,82 @@ def register_event_time_change(event):
             old_times[event][field] = getattr(event, field)
 
 
-def serialize_event_for_ical(event, detail_level):
-    from indico.modules.events.contributions.util import serialize_contribution_for_ical
-    fossil = 'conferenceMetadataWithContribs' if detail_level == 'contributions' else 'conferenceMetadata'
-    data = {'id': event.id, 'title': event.title, 'description': event.description, 'startDate': event.start_dt,
-            'endDate': event.end_dt, 'url': event.external_url,
-            'location': event.venue_name, 'roomFullname': event.room_name, 'speakers': [], '_fossil': fossil,
-            'contributions': []}
-    if detail_level == 'contributions':
-        data['contributions'] = [serialize_contribution_for_ical(c) for c in event.contributions]
-    return data
+@contextmanager
+def track_location_changes():
+    """Track location changes of event objects.
+
+    This provides a list of changes while the context manager was
+    active and also triggers `location_changed` signals.
+
+    If the code running inside the ``with`` block of this context
+    manager raises an exception, no signals will be triggered.
+    """
+    if 'old_locations' in g:
+        raise RuntimeError('location change tracking may not be nested')
+    g.old_locations = defaultdict(dict)
+    changes = defaultdict(dict)
+    try:
+        yield changes
+    except Exception:
+        del g.old_locations
+        raise
+    else:
+        old_locations = g.pop('old_locations')
+        cols = ('own_room_id', 'own_room_name', 'own_venue_id', 'own_venue_name', 'own_address', 'inherit_location')
+        for obj, info in old_locations.items():
+            for col in cols:
+                new_value = getattr(obj, col)
+                if new_value != info[col]:
+                    changes[obj][col] = (info[col], new_value)
+        for obj, obj_changes in changes.items():
+            signals.event.location_changed.send(type(obj), obj=obj, changes=obj_changes)
+
+
+def register_location_change(entry):
+    """Register a location-related change for an event object.
+
+    This is an internal helper function used in the models to record
+    changes of the location information.  The changes are exposed
+    through the `track_location_changes` contextmanager function.
+    """
+    # if it's a new object it's not a change so we just ignore it
+    if not inspect(entry).persistent:
+        return
+    try:
+        old_locations = g.old_locations
+    except AttributeError:
+        msg = f'Location change of {entry} was not tracked'
+        if current_app.config.get('REPL'):
+            warnings.warn(msg + ' (exception converted to a warning since you are using the REPL)', stacklevel=2)
+            return
+        elif current_app.config['TESTING']:
+            warnings.warn(msg + ' (exception converted to a warning during tests)', stacklevel=2)
+            return
+        else:
+            raise RuntimeError(msg)
+    for field in ('own_room_id', 'own_room_name', 'own_venue_id', 'own_venue_name', 'own_address', 'inherit_location'):
+        if old_locations[entry].get(field) is None:
+            old_locations[entry][field] = getattr(entry, field)
+
+
+def serialize_event_for_ical(event):
+    title = event.title
+    if event.label:
+        title += f' [{event.label.title}]'
+
+    return {
+        '_fossil': 'conferenceMetadata',
+        'id': event.id,
+        'title': title,
+        'description': event.description,
+        'startDate': event.start_dt,
+        'endDate': event.end_dt,
+        'url': event.external_url,
+        'location': event.venue_name,
+        'roomFullname': event.room_name,
+        'speakers': [],
+        'contributions': []
+    }
 
 
 def serialize_event_for_json_ld(event, full=False):
@@ -567,13 +588,31 @@ def serialize_event_for_json_ld(event, full=False):
             'address': event.address or 'No address set'
         }
     }
+    if full and event.default_locale:
+        data['inLanguage'] = event.default_locale.replace('_', '-')
     if full and event.description:
         data['description'] = strip_tags(event.description)
     if full and event.person_links:
-        data['performer'] = map(serialize_person_for_json_ld, event.person_links)
+        data['performer'] = list(map(serialize_person_for_json_ld, event.person_links))
     if full and event.has_logo:
         data['image'] = event.external_logo_url
     return data
+
+
+@materialize_iterable()
+def serialize_events_for_json_ld(events, *, full=False):
+    # We have to query the default locale separately because there's no way to
+    # lazy-load them using the SettingsProxy, and when generating e.g. a category
+    # listing we really don't want to spam an extra query for each event.
+    query = (EventSetting.query
+             .filter_by(module='language', name='default_locale')
+             .filter(EventSetting.event_id.in_(e.id for e in events)))
+    default_locales = {x.event: x.value for x in query}
+    for event in events:
+        data = serialize_event_for_json_ld(event, full=full)
+        if locale := default_locales.get(event):
+            data['inLanguage'] = locale.replace('_', '-')
+        yield data
 
 
 def serialize_person_for_json_ld(person):
@@ -588,15 +627,15 @@ def serialize_person_for_json_ld(person):
 
 
 def get_field_values(form_data):
-    """Split the form fields between custom and static"""
-    fields = {x: form_data[x] for x in form_data.iterkeys() if not x.startswith('custom_')}
-    custom_fields = {x: form_data[x] for x in form_data.iterkeys() if x.startswith('custom_')}
+    """Split the form fields between custom and static."""
+    fields = {x: form_data[x] for x in form_data if not x.startswith('custom_')}
+    custom_fields = {x: form_data[x] for x in form_data if x.startswith('custom_')}
     return fields, custom_fields
 
 
 def set_custom_fields(obj, custom_fields_data):
     changes = {}
-    for custom_field_name, custom_field_value in custom_fields_data.iteritems():
+    for custom_field_name, custom_field_value in custom_fields_data.items():
         custom_field_id = int(custom_field_name[7:])  # Remove the 'custom_' part
         old_value = obj.set_custom_field(custom_field_id, custom_field_value)
         if old_value != custom_field_value:
@@ -606,30 +645,60 @@ def set_custom_fields(obj, custom_fields_data):
 
 def check_permissions(event, field, allow_networks=False):
     for principal_fossil, permissions in field.data:
-        principal = principal_from_fossil(principal_fossil, allow_emails=True, allow_networks=allow_networks,
-                                          allow_pending=True, event=event)
-        if allow_networks and isinstance(principal, IPNetworkGroup) and set(permissions) - {READ_ACCESS_PERMISSION}:
-            msg = _('IP networks cannot have management permissions: {}').format(principal.name)
-            return msg
+        try:
+            principal = principal_from_identifier(principal_fossil['identifier'],
+                                                  allow_external_users=True,
+                                                  allow_groups=True,
+                                                  allow_category_roles=True,
+                                                  allow_event_roles=True,
+                                                  allow_emails=True,
+                                                  allow_registration_forms=True,
+                                                  allow_networks=allow_networks,
+                                                  event_id=event.id)
+        except ValueError as exc:
+            return _('Invalid ACL entry: {}').format(exc)
+        if isinstance(principal, IPNetworkGroup) and set(permissions) - {READ_ACCESS_PERMISSION}:
+            return _('IP networks cannot have management permissions: {}').format(principal.name)
+        if isinstance(principal, RegistrationForm) and set(permissions) - {READ_ACCESS_PERMISSION}:
+            return _('Registrants cannot have management permissions: {}').format(principal.name)
         if FULL_ACCESS_PERMISSION in permissions and len(permissions) != 1:
             # when full access permission is set, discard rest of permissions
             permissions[:] = [FULL_ACCESS_PERMISSION]
 
 
+def get_event_from_url(url):
+    """Get an event from an Indico event URL."""
+    data = urlsplit(url)
+    if not all([data.scheme, data.netloc, data.path]):
+        raise ValueError(_('Invalid event URL'))
+    event_path = re.match(r'/event/(\d+)(/|$)', data.path)
+    if not event_path:
+        raise ValueError(_('Invalid event URL'))
+    if not url.startswith(config.BASE_URL):
+        raise ValueError(_('Events from other Indico instances cannot be imported'))
+    event_id = event_path.group(1)
+    event = Event.get(event_id, is_deleted=False)
+    if not event:
+        raise ValueError(_('This event does not exist'))
+    return event
+
+
 class ZipGeneratorMixin:
-    """Mixin for RHs that generate zip with files"""
+    """Mixin for RHs that generate zip with files."""
+
+    _MAX_ARCHIVE_PATH_LENGTH = 200
 
     def _adjust_path_length(self, segments):
-        """
-        Shorten the path length to < 260 chars.
+        """Shorten the archive path length to a Windows-safe limit.
 
         Windows' built-in ZIP tool doesn't like files whose
-        total path exceeds ~260 chars. Here we progressively
-        shorten the total until it matches that constraint.
+        extracted path exceeds ~260 chars. Since the extraction
+        target folder also contributes to that limit, we keep a
+        safety margin for the archive entry path itself.
         """
         result = []
         total_len = sum(len(seg) for seg in segments) + len(segments) - 1
-        excess = (total_len - 255) if total_len > 255 else 0
+        excess = (total_len - self._MAX_ARCHIVE_PATH_LENGTH) if total_len > self._MAX_ARCHIVE_PATH_LENGTH else 0
 
         for seg in reversed(segments):
             fname, ext = os.path.splitext(seg)
@@ -642,33 +711,100 @@ class ZipGeneratorMixin:
         return reversed(result)
 
     def _iter_items(self, files_holder):
-        for f in files_holder:
-            yield f
+        yield from files_holder
 
-    def _generate_zip_file(self, files_holder, name_prefix='material', name_suffix=None):
+    def _get_item_path(self, item):
+        return item.get_local_path()
+
+    def _generate_zip_file(self, files_holder, name_prefix='material', name_suffix=None, return_file=False):
         """Generate a zip file containing the files passed.
 
         :param files_holder: An iterable (or an iterable containing) object that
                              contains the files to be added in the zip file.
         :param name_prefix: The prefix to the zip file name
         :param name_suffix: The suffix to the zip file name
-        :return: The generated zip file.
+        :param return_file: Return the temp file instead of a response
         """
-
-        temp_file = NamedTemporaryFile(suffix='indico.tmp', dir=config.TEMP_DIR)
+        temp_file = NamedTemporaryFile(suffix='.zip', dir=config.TEMP_DIR, delete=False)  # noqa: SIM115
         with ZipFile(temp_file.name, 'w', allowZip64=True) as zip_handler:
             self.used_filenames = set()
             for item in self._iter_items(files_holder):
                 name = self._prepare_folder_structure(item)
                 self.used_filenames.add(name)
-                with item.storage.get_local_path(item.storage_file_id) as filepath:
-                    zip_handler.write(filepath.encode('utf-8'), name)
+                with self._get_item_path(item) as filepath:
+                    if isinstance(filepath, BytesIO):
+                        zip_handler.writestr(name, filepath.getvalue())
+                    else:
+                        zip_handler.write(filepath, name)
 
-        temp_file.delete = False
-        zip_file_name = '{}-{}.zip'.format(name_prefix, name_suffix) if name_suffix else '{}.zip'.format(name_prefix)
+        zip_file_name = f'{name_prefix}-{name_suffix}.zip' if name_suffix else f'{name_prefix}.zip'
         chmod_umask(temp_file.name)
+        if return_file:
+            return temp_file
         return send_file(zip_file_name, temp_file.name, 'application/zip', inline=False)
 
     def _prepare_folder_structure(self, item):
-        file_name = secure_filename('{}_{}'.format(unicode(item.id), item.filename), item.filename)
+        file_name = secure_filename(f'{item.id}_{item.filename}', str(item.id))
         return os.path.join(*self._adjust_path_length([file_name]))
+
+
+@memoize_request
+def get_all_user_roles(event, user):
+    event_roles = set(
+        EventRole.query.with_parent(event)
+        .filter(EventRole.members.any(User.id == user.id))
+    )
+    category_roles = set(
+        CategoryRole.query
+        .join(event.category.chain_query.subquery())
+        .filter(CategoryRole.members.any(User.id == user.id))
+    )
+    return event_roles, category_roles
+
+
+def should_show_draft_warning(event):
+    return (event.type_ == EventType.conference and
+            not contribution_settings.get(event, 'published') and
+            (TimetableEntry.query.with_parent(event).has_rows() or
+             Contribution.query.with_parent(event).has_rows()))
+
+
+def format_log_ref(ref):
+    return f'{ref.reference_type.name}:{ref.value}'
+
+
+def _get_venue_room_name(data):
+    venue_name = data['venue'].name if data.get('venue') else data.get('venue_name', '')
+    room_name = data['room'].full_name if data.get('room') else data.get('room_name', '')
+    return venue_name, room_name
+
+
+def _format_location(data):
+    venue_name = data[0]
+    room_name = data[1]
+    if venue_name and room_name:
+        return f'{venue_name}: {room_name}'
+    elif venue_name or room_name:
+        return venue_name or room_name
+    else:
+        return None
+
+
+def split_log_location_changes(changes: dict) -> dict:
+    """Re-process change dict to include readable location information (for logging)."""
+    res = dict(changes)
+
+    if (location_changes := res.pop('location_data', None)) is None:
+        return res
+
+    if location_changes[0]['address'] != location_changes[1]['address']:
+        res['address'] = (location_changes[0]['address'], location_changes[1]['address'])
+    venue_room_changes = (_get_venue_room_name(location_changes[0]), _get_venue_room_name(location_changes[1]))
+    if venue_room_changes[0] != venue_room_changes[1]:
+        res['venue_room'] = list(map(_format_location, venue_room_changes))
+
+    return res
+
+
+def format_log_person(data):
+    return f'{data.full_name} <{data.email}>' if data.email else data.full_name

@@ -1,36 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db.sqlalchemy import db
 from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
+from indico.core.db.sqlalchemy.protection import ProtectionManagersMixin
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii, text_to_repr
+from indico.util.string import format_repr, text_to_repr
 
 
-def _get_next_position(context):
+def get_next_position(context):
+    from indico.modules.events.tracks.models.groups import TrackGroup
+
     event_id = context.current_parameters['event_id']
-    res = db.session.query(db.func.max(Track.position)).filter_by(event_id=event_id).one()
-    return (res[0] or 0) + 1
+    track_max_position = (db.session.query(db.func.max(Track.position))
+                          .filter(Track.event_id == event_id)
+                          .scalar())
+    track_group_max_position = (db.session.query(db.func.max(TrackGroup.position))
+                                .filter(TrackGroup.event_id == event_id)
+                                .scalar())
+    pos = max(track_max_position or 0, track_group_max_position or 0)
+    return pos + 1
 
 
-class Track(DescriptionMixin, db.Model):
+class Track(DescriptionMixin, ProtectionManagersMixin, db.Model):
     __tablename__ = 'tracks'
     __table_args__ = {'schema': 'events'}
+
+    disable_protection_mode = True
+    is_track_group = False
 
     possible_render_modes = {RenderMode.markdown}
     default_render_mode = RenderMode.markdown
@@ -57,7 +58,7 @@ class Track(DescriptionMixin, db.Model):
     position = db.Column(
         db.Integer,
         nullable=False,
-        default=_get_next_position
+        default=get_next_position
     )
     default_session_id = db.Column(
         db.Integer,
@@ -65,7 +66,12 @@ class Track(DescriptionMixin, db.Model):
         index=True,
         nullable=True
     )
-
+    track_group_id = db.Column(
+        db.Integer,
+        db.ForeignKey('events.track_groups.id', ondelete='SET NULL'),
+        index=True,
+        nullable=True
+    )
     event = db.relationship(
         'Event',
         lazy=True,
@@ -76,32 +82,27 @@ class Track(DescriptionMixin, db.Model):
             order_by=position
         )
     )
-    abstract_reviewers = db.relationship(
-        'User',
-        secondary='events.track_abstract_reviewers',
-        collection_class=set,
+    acl_entries = db.relationship(
+        'TrackPrincipal',
         lazy=True,
-        backref=db.backref(
-            'abstract_reviewer_for_tracks',
-            collection_class=set,
-            lazy=True
-        )
-    )
-    conveners = db.relationship(
-        'User',
-        secondary='events.track_conveners',
+        cascade='all, delete-orphan',
         collection_class=set,
-        lazy=True,
-        backref=db.backref(
-            'convener_for_tracks',
-            collection_class=set,
-            lazy=True
-        )
+        backref='track'
     )
     default_session = db.relationship(
         'Session',
         lazy=True,
         backref='default_for_tracks'
+    )
+    track_group = db.relationship(
+        'TrackGroup',
+        lazy=True,
+        backref=db.backref(
+            'tracks',
+            order_by=position,
+            lazy=True,
+            passive_deletes=True
+        )
     )
 
     # relationship backrefs:
@@ -114,17 +115,28 @@ class Track(DescriptionMixin, db.Model):
 
     @property
     def short_title(self):
-        return self.code if self.code else self.title
+        return self.code or self.title
 
     @property
     def full_title(self):
-        return '{} - {}'.format(self.code, self.title) if self.code else self.title
+        return f'{self.code} - {self.title}' if self.code else self.title
+
+    @property
+    def title_with_group(self):
+        return f'{self.track_group.title}: {self.title}' if self.track_group else self.title
+
+    @property
+    def short_title_with_group(self):
+        return f'{self.track_group.title}: {self.short_title}' if self.track_group else self.short_title
+
+    @property
+    def full_title_with_group(self):
+        return f'{self.track_group.title}: {self.full_title}' if self.track_group else self.full_title
 
     @locator_property
     def locator(self):
         return dict(self.event.locator, track_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', _text=text_to_repr(self.title))
 
@@ -136,21 +148,15 @@ class Track(DescriptionMixin, db.Model):
             return False
         elif not self.event.can_manage(user, permission='abstract_reviewer', explicit_permission=True):
             return False
-        elif user in self.event.global_abstract_reviewers:
+        elif self.event.can_manage(user, permission='review_all_abstracts', explicit_permission=True):
             return True
-        elif user in self.abstract_reviewers:
-            return True
-        else:
-            return False
+        return self.can_manage(user, permission='review', explicit_permission=True)
 
     def can_convene(self, user):
         if not user:
             return False
         elif not self.event.can_manage(user, permission='track_convener', explicit_permission=True):
             return False
-        elif user in self.event.global_conveners:
+        elif self.event.can_manage(user, permission='convene_all_abstracts', explicit_permission=True):
             return True
-        elif user in self.conveners:
-            return True
-        else:
-            return False
+        return self.can_manage(user, permission='convene', explicit_permission=True)

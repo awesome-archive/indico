@@ -34,9 +34,11 @@
 
 {% macro render_overview(stats) %}
     {% set height = stats.countries|length * 24 + 28 %}
-    {% set badges = [(_("Registrations"),  stats.registrations|length),
-                     (_("Days left<br>to register"), stats.days_left),
-                     (_("Countries"), stats.num_countries)]%}
+    {% set badges = [
+        (ngettext('Registration', 'Registrations', stats.registrations|length), stats.registrations|length),
+        (ngettext('Day left<br>to register', 'Days left<br>to register', stats.days_left), stats.days_left),
+        (ngettext('Country', 'Countries', stats.num_countries), stats.num_countries)
+    ] %}
     {% set taken, total, progress = stats.availability %}
 
     {% call stats_box(title=stats.title, subtitle=stats.subtitle,
@@ -47,7 +49,7 @@
                 <span>{% trans %}Availability{% endtrans %}</span>
                 <span>
                     <span class="i-progress">
-                        <span class="i-progress-bar" data-progress={{ '{:%}'.format(progress) }}></span>
+                        <span class="i-progress-bar" data-progress="{{ '{:%}'.format(progress) }}"></span>
                         <span class="i-progress-label">
                             {%- if total == taken %}
                                 {%- trans %}event full{% endtrans -%}
@@ -63,7 +65,7 @@
             <div class="stats-item">
                 <span>{% trans %}Registrants per country{% endtrans %}</span><span></span>
             </div>
-            <div id="countriesPlot" style="width:500px; height:{{height}}px;"></div>
+            <div id="countriesPlot" style="width:500px; height:{{ height }}px;"></div>
             <script>
                 $(document).ready(function generateBasicStats() {
                     var countries = {{ stats.countries|tojson }};
@@ -205,7 +207,7 @@
 
 {% macro _generate_cell(cell) %}
     <td
-        {%- if cell.colspan > 1 %} colspan="{{cell.colspan}}" {%- endif -%}
+        {%- if cell.colspan > 1 %} colspan="{{ cell.colspan }}" {%- endif -%}
         {%- if cell.qtip %} title="{{ cell.qtip }}" {%- endif -%}
         {%- if cell.classes %} class="{{ ' '.join(cell.classes) }}" {%- endif -%}>
     {{- caller() -}}

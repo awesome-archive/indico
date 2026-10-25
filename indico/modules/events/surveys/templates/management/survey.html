@@ -6,30 +6,22 @@
     {% if survey.private and survey.state.name in ('active_and_clean', 'active_and_answered') %}
         <div class="action-box highlight">
             <div class="section">
-                <div class="icon icon-lock"></div>
+                <div class="icon icon-lock-center"></div>
                 <div class="text">
                     <div class="label">
                         {%- trans %}The survey is private{% endtrans -%}
                     </div>
-                    {% set link_start %}
-                        <a href="{{ url_for('.display_survey_form', survey, survey.locator.token, _external=True) }}"
-                           class="js-copy-to-clipboard"
-                           title="{% trans %}Copy link to clipboard{% endtrans %}"
-                           data-clipboard-text="{{ url_for('.display_survey_form', survey, survey.locator.token, _external=True) }}"
-                           data-clipboard-action="copy">
-                    {% endset %}
-                    {% set link_end = '</a>'|safe %}
                     {% trans -%}
-                        The survey is accessible only by people with this {{ link_start }}link{{ link_end }}
+                        Share the secret link with anyone you want to submit a response.
                     {%- endtrans %}
                 </div>
                 <div class="toolbar">
-                    <a href="#" class="i-button icon-mail right highlight js-requires-selected-row send-mails-btn"
-                       data-href="{{ url_for('surveys.send_links', survey) }}"
-                       data-title="{% trans %}Send survey links{% endtrans %}"
-                       data-method="POST"
-                       data-ajax-dialog>
-                        {%- trans %}Send links{% endtrans -%}
+                    <a href="{{ url_for('.display_survey_form', survey, survey.locator.token, _external=true) }}"
+                       class="js-copy-to-clipboard i-button highlight icon-copy"
+                       title="{% trans %}Copy link to clipboard{% endtrans %}"
+                       data-clipboard-text="{{ url_for('.display_survey_form', survey, survey.locator.token, _external=true) }}"
+                       data-clipboard-action="copy">
+                        {% trans %}Copy secret link{% endtrans %}
                     </a>
                 </div>
             </div>
@@ -44,6 +36,8 @@
         {% include 'events/surveys/management/survey_actions/active.html' %}
     {% elif survey.state.name == 'finished' %}
         {% include 'events/surveys/management/survey_actions/finished.html' %}
+    {% elif survey.state.name == 'limit_reached' %}
+        {% include 'events/surveys/management/survey_actions/limit_reached.html' %}
     {% endif %}
 
     <div class="action-box">
@@ -52,18 +46,18 @@
                 <div class="icon icon-settings"></div>
                 <div class="text">
                     <div class="label">
-                        {% trans %}General settings{% endtrans %}
+                        {% trans %}General Settings{% endtrans %}
                     </div>
                     {% trans %}Edit settings for this survey.{% endtrans %}
                 </div>
                 <div class="toolbar">
-                    <a href="#" class="i-button icon-edit"
-                       data-href="{{ url_for('.edit_survey', survey) }}"
-                       data-title="{% trans %}Edit survey{% endtrans %}"
-                       data-ajax-dialog
-                       data-reload-after>
+                    <button class="i-button icon-edit"
+                            data-href="{{ url_for('.edit_survey', survey) }}"
+                            data-title="{% trans %}Edit survey{% endtrans %}"
+                            data-ajax-dialog
+                            data-reload-after>
                         {% trans %}Edit{% endtrans %}
-                    </a>
+                    </button>
                 </div>
             </div>
         {% endif %}
@@ -84,6 +78,20 @@
                 </div>
             </div>
         {% endif %}
+        <div class="section">
+            <div class="icon icon-mail"></div>
+            <div class="text">
+                <div class="label">
+                    {% trans %}Contact event participants{% endtrans %}
+                </div>
+                {% trans %}Send an email to the event participants about this survey.{% endtrans %}
+            </div>
+            <div class="toolbar">
+                <div id="email-submission-container" class="i-button-wrapper" data-event-id="{{ event.id }}"
+                     data-survey-id="{{ survey.id }}" {% if survey.is_active %}data-survey-active{% endif %}>
+                </div>
+            </div>
+        </div>
     </div>
 
     <h2>
@@ -93,24 +101,25 @@
     {% if submitted_surveys %}
         <div class="toolbars space-after">
             <div class="toolbar">
-                <a class="i-button icon-checkbox-checked arrow js-dropdown" data-toggle="dropdown"></a>
-                <ul class="dropdown">
-                    <li><a href="#" id="select-all">
-                        {% trans %}All{% endtrans %}
-                    </a></li>
-                    <li><a href="#" id="select-none">
-                        {% trans %}None{% endtrans %}
-                    </a></li>
+                <button class="i-button icon-checkbox-checked arrow js-dropdown" data-toggle="dropdown"></button>
+                <ul class="i-dropdown">
+                    <li>
+                        <a href="#" id="select-all">{% trans 'Selection' %}All{% endtrans %}</a>
+                    </li>
+                    <li>
+                        <a href="#" id="select-none">{% trans 'Selection' %}None{% endtrans %}</a>
+                    </li>
                 </ul>
             </div>
             <div class="toolbar">
                 <a href="{{ url_for('.survey_results', survey) }}" class="i-button icon-chart">
                     {% trans %}Results{% endtrans %}
                 </a>
-                <a class="i-button arrow js-dropdown" data-toggle="dropdown">
+                <button class="i-button arrow js-dropdown"
+                        data-toggle="dropdown">
                     {%- trans %}Export{% endtrans -%}
-                </a>
-                <ul class="dropdown">
+                </button>
+                <ul class="i-dropdown">
                     <li>
                         <a href="#" data-href="{{ url_for('.export_submissions_csv', survey) }}"
                            class="icon-file-spreadsheet js-submission-action js-export-submissions">
@@ -162,6 +171,9 @@
             </div>
         </div>
     {% endif %}
+    <script>
+        setupEmailSurveyParticipantsButton('#email-submission-container');
+    </script>
 {% endblock %}
 
 {% macro _render_submission_row(submission) %}
@@ -188,11 +200,21 @@
             </td>
         {% endif %}
         <td>
+            {% set data_confirm %}
+                {% trans %}Are you sure you want to remove this submission?{% endtrans %}
+                {% if submission.is_anonymous %}
+                    {% trans %}
+                        Note: Authenticated users will not be able to submit an anonymous survey again
+                        even if you delete their submission.
+                    {% endtrans %}
+                {% endif %}
+            {% endset %}
             <a href="#" class="icon-remove right js-delete-submission hide-if-locked"
                data-href="{{ url_for('.delete_submissions', survey) }}"
                data-method="DELETE"
-               data-title="{% trans %}Remove submission?{% endtrans %}"
-               data-confirm="{% trans %}Are you sure you want to remove this submission?{% endtrans %}"
+               data-title
+               title="{% trans %}Remove submission{% endtrans %}"
+               data-confirm="{{ data_confirm }}"
                data-submission-id="{{ submission.id }}"></a>
         </td>
     </tr>

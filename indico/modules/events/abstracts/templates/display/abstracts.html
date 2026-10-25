@@ -25,11 +25,11 @@
         <div class="list abstracts">
             <div class="toolbars space-after">
                 <div class="toolbar">
-                    <a class="icon-checkbox-checked i-button arrow left icon-only" aria-hidden="true" href="#"
-                       data-toggle="dropdown"></a>
-                    <ul class="dropdown">
-                        <li><a href="#" id="select-all">{% trans %}All{% endtrans %}</a></li>
-                        <li><a href="#" id="select-none">{% trans %}None{% endtrans %}</a></li>
+                    <button class="icon-checkbox-checked i-button arrow left icon-only"
+                            aria-hidden="true" data-toggle="dropdown"></button>
+                    <ul class="i-dropdown">
+                        <li><a href="#" id="select-all">{% trans 'Selection' %}All{% endtrans %}</a></li>
+                        <li><a href="#" id="select-none">{% trans 'Selection' %}None{% endtrans %}</a></li>
                     </ul>
                     <button class="i-button icon-settings js-dialog-action js-customize-list highlight"
                             data-href="{{ url_for('.display_customize_abstract_list', event, track) }}"
@@ -40,22 +40,25 @@
                         {%- trans %}Customize list{% endtrans -%}
                     </button>
                     {% if can_download_attachments %}
-                        <a href="#" class="i-button icon-attachment js-requires-selected-row disabled js-submit-list-form"
-                           data-href="{{ url_for('.display_download_attachments', track) }}">
+                        <button class="i-button icon-attachment js-requires-selected-row disabled js-submit-list-form"
+                                data-href="{{ url_for('.display_download_attachments', track) }}">
                             {%- trans %}Download attachments{%- endtrans %}
-                        </a>
+                        </button>
                     {% endif %}
-                    <a class="i-button arrow button js-requires-selected-row disabled" data-toggle="dropdown">
+                    <button class="i-button arrow button js-requires-selected-row disabled"
+                            data-toggle="dropdown">
                         {%- trans %}Export{% endtrans -%}
-                    </a>
-                    <ul class="dropdown">
-                        <li>
-                            <a href="#"
-                               class="icon-file-pdf js-requires-selected-row disabled js-submit-list-form"
-                               data-href="{{ url_for('.display_abstracts_pdf_export', track) }}">
-                                PDF
-                            </a>
-                        </li>
+                    </button>
+                    <ul class="i-dropdown">
+                        {% if indico_config.LATEX_ENABLED %}
+                            <li>
+                                <a href="#"
+                                   class="icon-file-pdf js-requires-selected-row disabled js-submit-list-form"
+                                   data-href="{{ url_for('.display_abstracts_pdf_export', track) }}">
+                                    PDF
+                                </a>
+                            </li>
+                        {% endif %}
                         <li>
                             <a href="#"
                                class="icon-file-spreadsheet js-requires-selected-row disabled js-submit-list-form"
@@ -71,18 +74,28 @@
                             </a>
                         </li>
                     </ul>
+                    <div class="group">
+                        <button class="i-button button change-columns-width" title="{% trans %}Adapt columns width{% endtrans %}"></button>
+                    </div>
                 </div>
                 <div class="toolbar">
-                    <div id="filter-statistics">
-                        {{ render_displayed_entries_fragment(abstracts|length, total_abstracts) }}
+                    <div class="group">
+                        <div id="filter-statistics">
+                            {{ render_displayed_entries_fragment(abstracts|length, total_abstracts) }}
+                        </div>
+                    </div>
+                    <div class="group">
+                        <div class="i-button label icon-search"></div>
+                        <input type="text" id="search-input" placeholder="{% trans %}Search by #id or string{% endtrans %}">
                     </div>
                 </div>
             </div>
-            <div id="abstract-list">
+            <div class="list-content" id="abstract-list">
                 {{ render_abstract_list(abstracts, dynamic_columns, static_columns, total_abstracts, track, reviewed_abstracts) }}
             </div>
+            <div id="filter-placeholder"></div>
             <script>
-                setupListGenerator();
+                setupAbstractList();
             </script>
         </div>
     {% endif %}

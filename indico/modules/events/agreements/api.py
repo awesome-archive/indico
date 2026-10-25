@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from itertools import islice
 from operator import attrgetter
@@ -34,7 +23,7 @@ class AgreementExportHook(HTTPAPIHook):
     VALID_FORMATS = ('json', 'jsonp', 'xml')
 
     def _getParams(self):
-        super(AgreementExportHook, self)._getParams()
+        super()._getParams()
         type_ = self._pathParams['agreement_type']
         try:
             self._definition = get_agreement_definitions()[type_]
@@ -49,7 +38,7 @@ class AgreementExportHook(HTTPAPIHook):
 
     def export_agreements(self, user):
         sent_agreements = {a.identifier: a for a in self.event.agreements.filter_by(type=self._definition.name)}
-        for person in islice(sorted(self._definition.get_people(self.event).itervalues(),
+        for person in islice(sorted(self._definition.get_people(self.event).values(),
                                     key=attrgetter('name', 'identifier')),
                              self._offset, self._offset + self._limit):
             agreement = sent_agreements.get(person.identifier)

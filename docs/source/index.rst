@@ -11,7 +11,7 @@ Welcome to Indico's documentation!
 
 .. epigraph:: *The effortless open source tool for event organization, archival and collaboration.*
 
-|build-status| |license| |pypi-ver|
+|build-status| |license| |pypi-ver| |cern-foss|
 
 Welcome to Indico's documentation. This documentation is split into several parts, from `installing Indico <installation/>`_ to developing `Indico plugins <plugins>`_.
 To dive into the internals of Indico, check out the `API documentation <api>`_. Read more about Indico in our `official website <https://getindico.io>`_.
@@ -39,6 +39,24 @@ Configuration
     config/index.rst
 
 
+Building
+++++++++
+
+.. toctree::
+    :maxdepth: 2
+
+    building/index.rst
+
+
+Search
+++++++
+
+.. toctree::
+    :maxdepth: 2
+
+    search-engine/index.rst
+
+
 Plugins
 +++++++
 
@@ -53,12 +71,23 @@ Plugins
 HTTP API
 ++++++++
 
-.. include:: http_api/_intro.rst
+.. include:: http-api/_intro.rst
 
 .. toctree::
     :maxdepth: 2
 
-    HTTP API <http_api/index.rst>
+    HTTP API <http-api/index.rst>
+
+
+Translating Indico
+++++++++++++++++++
+
+.. include:: translations/_intro.rst
+
+.. toctree::
+    :maxdepth: 2
+
+    translations/index.rst
 
 
 API reference
@@ -97,12 +126,15 @@ Contact
     contact/index.rst
 
 
-.. |build-status| image:: https://travis-ci.org/indico/indico.png?branch=master
-                   :alt: Travis Build Status
-                   :target: https://travis-ci.org/indico/indico
+.. |build-status| image:: https://github.com/indico/indico/workflows/CI/badge.svg
+                   :alt: CI Build Status
+                   :target: https://github.com/indico/indico/actions
 .. |pypi-ver| image:: https://img.shields.io/pypi/v/indico.png
                    :alt: Available on PyPI
                    :target: https://pypi.python.org/pypi/indico/
 .. |license| image:: https://img.shields.io/github/license/indico/indico.png
                    :alt: License
-                   :target: https://github.com/indico/indico/blob/master/COPYING
+                   :target: https://github.com/indico/indico/blob/master/LICENSE
+.. |cern-foss| image:: https://img.shields.io/badge/CERN-Open%20Source-%232980b9.svg
+                   :alt: Made at CERN!
+                   :target: https://home.cern

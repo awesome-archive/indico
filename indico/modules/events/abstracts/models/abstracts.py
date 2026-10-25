@@ -1,26 +1,17 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import division, unicode_literals
-
-from collections import defaultdict
+import statistics
+from collections import Counter, defaultdict
 from itertools import chain
 from operator import attrgetter
 
 from sqlalchemy import inspect
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
 
@@ -28,34 +19,37 @@ from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
 from indico.core.db.sqlalchemy.util.models import auto_table_args
-from indico.modules.events.abstracts.models.review_questions import AbstractReviewQuestion
-from indico.modules.events.abstracts.models.review_ratings import AbstractReviewRating
-from indico.modules.events.abstracts.models.reviews import AbstractAction, AbstractReview
+from indico.modules.events.abstracts.models.reviews import AbstractAction
+from indico.modules.events.abstracts.settings import AllowEditingType
 from indico.modules.events.contributions.models.contributions import CustomFieldsMixin, _get_next_friendly_id
+from indico.modules.events.contributions.models.persons import AuthorType
 from indico.modules.events.models.persons import AuthorsSpeakersMixin
 from indico.modules.events.models.reviews import ProposalMixin, ProposalRevisionMixin
 from indico.util.date_time import now_utc
-from indico.util.i18n import _
+from indico.util.enum import IndicoIntEnum, RichIntEnum
+from indico.util.i18n import _, pgettext
 from indico.util.locators import locator_property
-from indico.util.string import MarkdownText, format_repr, return_ascii, text_to_repr
-from indico.util.struct.enum import IndicoEnum, RichIntEnum
+from indico.util.string import MarkdownText, format_repr, text_to_repr
 
 
 class AbstractState(RichIntEnum):
-    __titles__ = [None, _("Submitted"), _("Withdrawn"), _("Accepted"), _("Rejected"), _("Merged"), _("Duplicate")]
-    __css_classes__ = [None, '', 'outline dashed', 'success', 'error', 'visited', 'strong']
+    __titles__ = [None, pgettext('Abstract', 'Submitted'), pgettext('Abstract', 'Withdrawn'),
+                  pgettext('Abstract', 'Accepted'), pgettext('Abstract', 'Rejected'), pgettext('Abstract', 'Merged'),
+                  pgettext('Abstract', 'Duplicate'), pgettext('Abstract', 'Invited')]
+    __css_classes__ = [None, '', 'outline dashed', 'success', 'error', 'visited', 'strong', 'warning']
     submitted = 1
     withdrawn = 2
     accepted = 3
     rejected = 4
     merged = 5
     duplicate = 6
+    invited = 7
 
 
 class AbstractPublicState(RichIntEnum):
-    __titles__ = {i: title for i, title in enumerate(AbstractState.__titles__[2:], 2)}
-    __titles__.update({-1: _("Awaiting Review"), -2: _("Under Review")})
-    __css_classes__ = {i: css_class for i, css_class in enumerate(AbstractState.__css_classes__[2:], 2)}
+    __titles__ = dict(enumerate(AbstractState.__titles__[2:], 2))
+    __titles__.update({-1: _('Awaiting Review'), -2: _('Under Review')})
+    __css_classes__ = dict(enumerate(AbstractState.__css_classes__[2:], 2))
     __css_classes__.update({-1: '', -2: 'highlight'})
     # regular states (must match AbstractState!)
     withdrawn = 2
@@ -63,13 +57,14 @@ class AbstractPublicState(RichIntEnum):
     rejected = 4
     merged = 5
     duplicate = 6
+    invited = 7
     # special states
     awaiting = -1
     under_review = -2
 
 
 class AbstractReviewingState(RichIntEnum):
-    __titles__ = [_("Not Started"), _("In progress"), _("Positive"), _("Conflicting"), _("Negative"), _("Mixed")]
+    __titles__ = [_('Not Started'), _('In progress'), _('Positive'), _('Conflicting'), _('Negative'), _('Mixed')]
     __css_classes__ = ['', '', 'success', '', 'error', 'warning']
     not_started = 0
     in_progress = 1
@@ -79,7 +74,7 @@ class AbstractReviewingState(RichIntEnum):
     mixed = 5
 
 
-class EditTrackMode(int, IndicoEnum):
+class EditTrackMode(IndicoIntEnum):
     none = 0
     both = 1
     reviewed_for = 2
@@ -87,31 +82,29 @@ class EditTrackMode(int, IndicoEnum):
 
 class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFieldsMixin, AuthorsSpeakersMixin,
                db.Model):
-    """Represents an abstract that can be associated to a Contribution."""
+    """An abstract that can be associated to a Contribution."""
 
     __tablename__ = 'abstracts'
     __auto_table_args = (db.Index(None, 'friendly_id', 'event_id', unique=True,
                                   postgresql_where=db.text('NOT is_deleted')),
-                         db.CheckConstraint('(state = {}) OR (accepted_track_id IS NULL)'
-                                            .format(AbstractState.accepted),
+                         db.CheckConstraint(f'(state = {AbstractState.accepted}) OR (accepted_track_id IS NULL)',
                                             name='accepted_track_id_only_accepted'),
-                         db.CheckConstraint('(state = {}) OR (accepted_contrib_type_id IS NULL)'
-                                            .format(AbstractState.accepted),
+                         db.CheckConstraint(f'(state = {AbstractState.accepted}) OR (accepted_contrib_type_id IS NULL)',
                                             name='accepted_contrib_type_id_only_accepted'),
-                         db.CheckConstraint('(state = {}) = (merged_into_id IS NOT NULL)'
-                                            .format(AbstractState.merged),
+                         db.CheckConstraint(f'(state = {AbstractState.merged}) = (merged_into_id IS NOT NULL)',
                                             name='merged_into_id_only_merged'),
-                         db.CheckConstraint('(state = {}) = (duplicate_of_id IS NOT NULL)'
-                                            .format(AbstractState.duplicate),
+                         db.CheckConstraint(f'(state = {AbstractState.duplicate}) = (duplicate_of_id IS NOT NULL)',
                                             name='duplicate_of_id_only_duplicate'),
-                         db.CheckConstraint('(state IN ({}, {}, {}, {})) = (judge_id IS NOT NULL)'
+                         db.CheckConstraint('(state IN ({}, {}, {}, {})) = (judge_id IS NOT NULL)'  # noqa: UP032
                                             .format(AbstractState.accepted, AbstractState.rejected,
                                                     AbstractState.merged, AbstractState.duplicate),
                                             name='judge_if_judged'),
-                         db.CheckConstraint('(state IN ({}, {}, {}, {})) = (judgment_dt IS NOT NULL)'
+                         db.CheckConstraint('(state IN ({}, {}, {}, {})) = (judgment_dt IS NOT NULL)'  # noqa: UP032
                                             .format(AbstractState.accepted, AbstractState.rejected,
                                                     AbstractState.merged, AbstractState.duplicate),
                                             name='judgment_dt_if_judged'),
+                         db.CheckConstraint(f'(state != {AbstractState.invited}) OR (uuid IS NOT NULL)',
+                                            name='uuid_if_invited'),
                          {'schema': 'event_abstracts'})
 
     possible_render_modes = {RenderMode.markdown}
@@ -138,6 +131,12 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
     id = db.Column(
         db.Integer,
         primary_key=True
+    )
+    uuid = db.Column(
+        UUID,
+        index=True,
+        unique=True,
+        nullable=True
     )
     friendly_id = db.Column(
         db.Integer,
@@ -410,6 +409,8 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
     def edit_track_mode(self):
         if not inspect(self).persistent:
             return EditTrackMode.both
+        elif self.state == AbstractState.invited:
+            return EditTrackMode.both
         elif self.state not in {AbstractState.submitted, AbstractState.withdrawn}:
             return EditTrackMode.none
         elif (self.public_state in (AbstractPublicState.awaiting, AbstractPublicState.withdrawn) and
@@ -433,15 +434,15 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
             return AbstractReviewingState.not_started
         track_states = {x: self.get_track_reviewing_state(x) for x in self.reviewed_for_tracks}
         positiveish_states = {AbstractReviewingState.positive, AbstractReviewingState.conflicting}
-        if any(x == AbstractReviewingState.not_started for x in track_states.itervalues()):
+        if any(x == AbstractReviewingState.not_started for x in track_states.values()):
             return AbstractReviewingState.in_progress
-        elif all(x == AbstractReviewingState.negative for x in track_states.itervalues()):
+        elif all(x == AbstractReviewingState.negative for x in track_states.values()):
             return AbstractReviewingState.negative
-        elif all(x in positiveish_states for x in track_states.itervalues()):
+        elif all(x in positiveish_states for x in track_states.values()):
             if len(self.reviewed_for_tracks) > 1:
                 # Accepted for more than one track
                 return AbstractReviewingState.conflicting
-            elif any(x == AbstractReviewingState.conflicting for x in track_states.itervalues()):
+            elif any(x == AbstractReviewingState.conflicting for x in track_states.values()):
                 # The only accepted track is in conflicting state
                 return AbstractReviewingState.conflicting
             else:
@@ -457,12 +458,36 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
         return sum(scores) / len(scores)
 
     @property
+    def score_std(self) -> float | None:
+        scores = [x.score for x in self.reviews if x.score is not None]
+        if not scores:
+            return None
+        return statistics.pstdev(scores)
+
+    @property
+    def track_question_scores(self):
+        sums = defaultdict(Counter)
+        lens = defaultdict(Counter)
+        for r in self.reviews:
+            if not r.track:
+                continue
+            sums[r.track.id] += Counter(r.scores)
+            lens[r.track.id] += Counter(r.scores.keys())
+        return {track: {question: score / lens[track][question]
+                        for question, score in scores.items()}
+                for track, scores in sums.items()}
+
+    @property
     def data_by_field(self):
         return {value.contribution_field_id: value for value in self.field_values}
 
     @locator_property
     def locator(self):
         return dict(self.event.locator, abstract_id=self.id)
+
+    @locator.token
+    def locator(self):
+        return dict(self.event.locator, uuid=self.uuid)
 
     @hybrid_property
     def judgment_comment(self):
@@ -478,13 +503,16 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
 
     @property
     def verbose_title(self):
-        return '#{} ({})'.format(self.friendly_id, self.title)
+        return f'#{self.friendly_id} ({self.title})'
 
     @property
     def is_in_final_state(self):
         return self.state != AbstractState.submitted
 
-    @return_ascii
+    @property
+    def modification_ended(self):
+        return self.event.cfa.modification_ended
+
     def __repr__(self):
         return format_repr(self, 'id', 'event_id', is_deleted=False, _text=text_to_repr(self.title))
 
@@ -493,7 +521,7 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
             return False
         if self.submitter == user:
             return True
-        if self.event.can_manage(user):
+        if self.event.can_manage(user, permission='abstracts'):
             return True
         if any(x.person.user == user for x in self.person_links):
             return True
@@ -513,14 +541,12 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
     def can_convene(self, user):
         if not user:
             return False
-        elif not self.event.can_manage(user, permission='track_convener', explicit_permission=True):
+        if not self.event.can_manage(user, permission='track_convener', explicit_permission=True):
             return False
-        elif self.event in user.global_convener_for_events:
+        if self.event.can_manage(user, permission='convene_all_abstracts', explicit_permission=True):
             return True
-        elif user.convener_for_tracks & self.reviewed_for_tracks:
-            return True
-        else:
-            return False
+        return any(track.can_manage(user, permission='convene', explicit_permission=True)
+                   for track in self.reviewed_for_tracks)
 
     def can_review(self, user, check_state=False):
         # The total number of tracks/events a user is a reviewer for (indico-wide)
@@ -529,47 +555,72 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
         # repeating it when performing this check on many abstracts.
         if not user:
             return False
-        elif check_state and self.public_state not in (AbstractPublicState.under_review, AbstractPublicState.awaiting):
+        if check_state and self.public_state not in (AbstractPublicState.under_review, AbstractPublicState.awaiting):
             return False
-        elif not self.event.can_manage(user, permission='abstract_reviewer', explicit_permission=True):
+        if not self.event.can_manage(user, permission='abstract_reviewer', explicit_permission=True):
             return False
-        elif self.event in user.global_abstract_reviewer_for_events:
+        if self.event.can_manage(user, permission='review_all_abstracts', explicit_permission=True):
             return True
-        elif user.abstract_reviewer_for_tracks & self.reviewed_for_tracks:
-            return True
-        else:
-            return False
+        return any(track.can_manage(user, permission='review', explicit_permission=True)
+                   for track in self.reviewed_for_tracks)
 
     def can_judge(self, user, check_state=False):
         if not user:
             return False
         elif check_state and self.state != AbstractState.submitted:
             return False
-        elif self.event.can_manage(user):
+        elif self.event.can_manage(user, permission='abstracts'):
             return True
         elif self.event.cfa.allow_convener_judgment and self.can_convene(user):
             return True
         else:
             return False
 
+    def can_change_tracks(self, user, check_state=False):
+        if check_state and self.is_in_final_state:
+            return False
+        if self.event.cfa.allow_convener_track_change and self.can_convene(user):
+            return True
+        return self.can_judge(user)
+
     def can_edit(self, user):
         if not user:
             return False
-        is_manager = self.event.can_manage(user)
-        if not self.user_owns(user) and not is_manager:
-            return False
-        elif is_manager and self.public_state in (AbstractPublicState.under_review, AbstractPublicState.withdrawn):
+
+        manager_edit_states = (
+            AbstractPublicState.under_review,
+            AbstractPublicState.withdrawn,
+            AbstractPublicState.awaiting,
+            AbstractPublicState.invited,
+        )
+        if self.public_state in manager_edit_states and self.event.can_manage(user, permission='abstracts'):
             return True
-        elif (self.public_state == AbstractPublicState.awaiting and
-                (is_manager or self.event.cfa.can_edit_abstracts(user))):
-            return True
-        else:
+        elif self.public_state not in (AbstractPublicState.awaiting, AbstractPublicState.invited):
             return False
+        elif not self.user_owns(user) or not self.event.cfa.can_edit_abstracts(user):
+            return False
+
+        editing_allowed = self.event.cfa.allow_editing
+        author_type = next((x.author_type for x in self.person_links if x.person.user == user), None)
+        is_primary = author_type == AuthorType.primary
+        is_secondary = author_type == AuthorType.secondary
+        if user == self.submitter:
+            return True
+        elif editing_allowed == AllowEditingType.submitter_all:
+            return True
+        elif editing_allowed == AllowEditingType.submitter_primary and is_primary:
+            return True
+        elif editing_allowed == AllowEditingType.submitter_authors and (is_primary or is_secondary):
+            return True
+        return False
 
     def can_withdraw(self, user, check_state=False):
         if not user:
             return False
-        elif self.event.can_manage(user) and (not check_state or self.state != AbstractState.withdrawn):
+        elif (
+            self.event.can_manage(user, permission='abstracts') and
+            (not check_state or self.state != AbstractState.withdrawn)
+        ):
             return True
         elif user == self.submitter and (not check_state or self.state == AbstractState.submitted):
             return True
@@ -586,7 +637,7 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
 
     def get_track_reviewing_state(self, track):
         if track not in self.reviewed_for_tracks:
-            raise ValueError("Abstract not in review for given track")
+            raise ValueError('Abstract not in review for given track')
         reviews = self.get_reviews(group=track)
         if not reviews:
             return AbstractReviewingState.not_started
@@ -604,32 +655,17 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
         else:
             return AbstractReviewingState.mixed
 
-    def get_track_question_scores(self):
-        query = (db.session.query(AbstractReview.track_id,
-                                  AbstractReviewQuestion,
-                                  db.func.avg(AbstractReviewRating.value.op('#>>')('{}').cast(db.Integer)))
-                 .join(AbstractReviewRating.review)
-                 .join(AbstractReviewRating.question)
-                 .filter(AbstractReview.abstract == self,
-                         AbstractReviewQuestion.field_type == 'rating',
-                         db.func.json_typeof(AbstractReviewRating.value) == 'null',
-                         ~AbstractReviewQuestion.is_deleted,
-                         ~AbstractReviewQuestion.no_score)
-                 .group_by(AbstractReview.track_id, AbstractReviewQuestion.id))
-        scores = defaultdict(lambda: defaultdict(lambda: None))
-        for track_id, question, score in query:
-            scores[track_id][question] = score
-        return scores
-
     def get_reviewed_for_groups(self, user, include_reviewed=False):
-        already_reviewed = {each.track for each in self.get_reviews(user=user)} if include_reviewed else set()
-        if self.event in user.global_abstract_reviewer_for_events:
+        already_reviewed = {x.track for x in self.get_reviews(user=user) if x.track} if include_reviewed else set()
+        if self.event.can_manage(user, permission='review_all_abstracts', explicit_permission=True):
             return self.reviewed_for_tracks | already_reviewed
-        return (self.reviewed_for_tracks & user.abstract_reviewer_for_tracks) | already_reviewed
+        reviewer_tracks = {track for track in self.reviewed_for_tracks
+                           if track.can_manage(user, permission='review', explicit_permission=True)}
+        return reviewer_tracks | already_reviewed
 
     def get_track_score(self, track):
         if track not in self.reviewed_for_tracks:
-            raise ValueError("Abstract not in review for given track")
+            raise ValueError('Abstract not in review for given track')
         reviews = [x for x in self.reviews if x.track == track]
         scores = [x.score for x in reviews if x.score is not None]
         if not scores:
@@ -650,3 +686,7 @@ class Abstract(ProposalMixin, ProposalRevisionMixin, DescriptionMixin, CustomFie
         if not user:
             return None
         return user == self.submitter or any(x.person.user == user for x in self.person_links)
+
+    def log(self, *args, **kwargs):
+        """Log with prefilled metadata for the abstract."""
+        return self.event.log(*args, meta={'abstract_id': self.id}, **kwargs)

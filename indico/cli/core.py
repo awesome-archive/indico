@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import click
 from flask.cli import AppGroup, pass_script_info
@@ -26,7 +15,6 @@ from flask.cli import AppGroup, pass_script_info
 from indico.cli.util import IndicoFlaskGroup, LazyGroup
 
 
-click.disable_unicode_literals_warning = True
 __all__ = ('cli_command', 'cli_group')
 
 
@@ -43,14 +31,14 @@ def _get_indico_version(ctx, param, value):
     if not value or ctx.resilient_parsing:
         return
     import indico
-    message = 'Indico v{}'.format(indico.__version__)
+    message = f'Indico v{indico.__version__}'
     click.echo(message, ctx.color)
     ctx.exit()
 
 
 @click.group(cls=IndicoFlaskGroup)
 @click.option('--version', '-v', expose_value=False, callback=_get_indico_version, is_flag=True, is_eager=True,
-              help='Show the flask version',)
+              help='Show the flask version')
 def cli():
     """
     This script lets you control various aspects of Indico from the
@@ -90,11 +78,23 @@ def db():
     """Perform database operations."""
 
 
+@cli.group(cls=LazyGroup, import_name='indico.cli.maintenance:cli')
+def maint():
+    """Perform maintenance operations."""
+
+
 @cli.command(context_settings={'ignore_unknown_options': True, 'allow_extra_args': True}, add_help_option=False)
+@click.option('--watchfiles', is_flag=True, help='Run celery inside watchfiles auto-reloader')
 @click.pass_context
-def celery(ctx):
+def celery(ctx, watchfiles=False):
     """Manage the Celery task daemon."""
     from indico.core.celery.cli import celery_cmd
+
+    if watchfiles:
+        from .devserver import run_watchfiles
+        run_watchfiles()
+        return
+
     celery_cmd(ctx.args)
 
 
@@ -119,7 +119,7 @@ def resend_email(paths):
 @click.option('--temp', is_flag=True, help='Delete old files in the temp dir')
 @click.option('--cache', is_flag=True, help='Delete old files in the cache dir')
 @click.option('--verbose', '-v', is_flag=True, help="Be verbose and show what's being deleted")
-@click.option('--dry-run', '-n', is_flag=True, help="Do not delete anything (implies --verbose)")
+@click.option('--dry-run', '-n', is_flag=True, help='Do not delete anything (implies --verbose)')
 @click.option('--min-age', type=click.IntRange(1), default=1, metavar='N',
               help='Delete files at least N days old (default: 1)')
 def cleanup(temp, cache, verbose, dry_run, min_age):
@@ -143,8 +143,8 @@ def cleanup(temp, cache, verbose, dry_run, min_age):
 @click.option('--evalex-from', multiple=True,
               help='Restrict the debugger shell to the given ips (can be used multiple times)')
 @click.option('--proxy', is_flag=True, help='Use the ip and protocol provided by the proxy.')
-@click.option('--reloader', 'reloader_type', type=click.Choice(['auto', 'none', 'stat', 'watchdog']), default='auto',
-              help='The type of auto-reloader to use.')
+@click.option('--reloader', 'reloader_type', type=click.Choice(['none', 'watchfiles']),
+              default='watchfiles', help='The type of auto-reloader to use.')
 @pass_script_info
 def run(info, **kwargs):
     """Run the development webserver.

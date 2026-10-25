@@ -4,12 +4,27 @@
     {% extends 'events/registration/display/_meeting_registration_base.html' %}
 {% endif %}
 
+{% from 'message_box.html' import message_box %}
+
 {% block subtitle %}
     {% trans %}Available forms{% endtrans %}
 {% endblock %}
 
+{% block description %}
+    {% if description %}
+        {{ description | markdown }}
+    {% endif %}
+{% endblock %}
+
 {% block content %}
-{% set any_published_registrations = regforms|selectattr('publish_registration_count')|any %}
+    {% set any_published_registrations = regforms|selectattr('publish_registration_count')|any %}
+    {% if is_restricted_access %}
+        {% call message_box('warning') %}
+            {% trans -%}
+                Access to the rest of this event is restricted to registered participants.
+            {%- endtrans %}
+        {% endcall %}
+    {% endif %}
     <table id="regforms-list" class="i-table-widget">
         <thead>
             <tr>
@@ -26,7 +41,8 @@
             {% for regform in regforms %}
                 {% set button_text -%}
                     {% if regform.moderation_enabled %}
-                        {%- trans %}Apply{% endtrans %}
+                        {# i18n: Apply for participation (analogous to 'Register' but 'Apply' is used when the registration form is moderated) #}
+                        {%- trans 'Registration' %}Apply{% endtrans %}
                     {%- else %}
                         {%- trans %}Register{% endtrans %}
                     {%- endif %}
@@ -54,11 +70,16 @@
                         {% endif %}
                     {% endif %}
                     <td class="regform-actions">
-                        {% if session.user and regform.id in user_registrations %}
+                        {% if user_registrations[regform] %}
                             <a href="{{ url_for('.display_regform', regform) }}"
                                class="i-button highlight"
                                title="{% trans %}You have already registered{% endtrans %}">
                                 {% trans %}Check details{% endtrans %}
+                            </a>
+                        {% elif regform.is_purged %}
+                            <a class="i-button highlight disabled"
+                               title="{% trans %}Registration is disabled due to an expired retention period{% endtrans %}">
+                                {{ button_text }}
                             </a>
                         {% elif not regform.is_open %}
                             <a class="i-button highlight disabled"
@@ -86,7 +107,7 @@
             {% endfor %}
         </tbody>
     </table>
-    {% if event.type != 'conference' %}
+    {% if event.type != 'conference' and event.can_access(session.user) %}
         <p>
             <a href="{{ event.url }}" class="i-button">
                 {%- trans %}Back to the event{% endtrans -%}

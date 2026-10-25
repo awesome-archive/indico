@@ -1,31 +1,20 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.modules.events.features.util import get_feature_definitions
 from indico.util.decorators import cached_classproperty
 
 
-class EventFeature(object):
+class EventFeature:
     """Base class for event features.
 
     To create a new feature, subclass this class and register
     it using the `event.get_feature_definitions` signal.
-    Feature classes are never instatiated.
+    Feature classes are never instantiated.
 
     You have multiple ways of requiring a feature to be enabled:
 
@@ -62,23 +51,21 @@ class EventFeature(object):
 
     @classmethod
     def is_default_for_event(cls, event):  # pragma: no cover
-        """Checks if the feature should be enabled by default"""
+        """Check if the feature should be enabled by default."""
         return False
 
     @classmethod
     def is_allowed_for_event(cls, event):  # pragma: no cover
-        """Check if the feature can be enabled in an event"""
+        """Check if the feature can be enabled in an event."""
         return True
 
     @classmethod
-    def enabled(cls, event):  # pragma: no cover
-        """Called when the feature is enabled for an event"""
-        pass
+    def enabled(cls, event, cloning):  # pragma: no cover
+        """Called when the feature is enabled for an event."""
 
     @classmethod
     def disabled(cls, event):  # pragma: no cover
-        """Called when the feature is disabled for an event"""
-        pass
+        """Called when the feature is disabled for an event."""
 
     @cached_classproperty
     @classmethod
@@ -105,4 +92,4 @@ class EventFeature(object):
         this feature.
         """
         # This is not very efficient, but it runs exactly one on a not-very-large set
-        return {feature.name for feature in get_feature_definitions().itervalues() if cls.name in feature.requires_deep}
+        return {feature.name for feature in get_feature_definitions().values() if cls.name in feature.requires_deep}

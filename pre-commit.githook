@@ -4,11 +4,10 @@
 # Interesting post on max line length:
 # http://stackoverflow.com/questions/88942/why-should-python-pep-8-specify-a-maximum-line-length-of-79-characters
 
-PEP8_CMD='pycodestyle'
-PEP8_OPTIONS='--max-line-length=120'
+RUFF_CMD='ruff check --output-format concise'
 ESLINT_CMD='npx eslint'
-SASSLINT_CMD='npx sass-lint'
-
+BIOME_CMD='npx @biomejs/biome format --colors=force'
+STYLELINT_CMD='npx stylelint'
 
 RED=$(echo -e $"\033[1;31m")
 YELLOW=$(echo -e $"\033[0;33m")
@@ -31,10 +30,10 @@ _get_files() {
 # Most spammy checks first so the most likely useful ones are at the
 # bottom and thus less likely to scroll out of view immediately
 
-# SASSLint
-_get_files '*.scss'
+# Stylelint
+_get_files '*.scss' '*.css'
 if [[ ${#FILES[@]} -ne 0 ]]; then
-    if ! RESULT=$(FORCE_COLOR=1 $SASSLINT_CMD -vq "${FILES[@]}"); then
+    if ! RESULT=$(FORCE_COLOR=1 $STYLELINT_CMD -q "${FILES[@]}"); then
         STATUS=1
         echo "${RED}There are SCSS errors in your code:${RESET}"
         echo "$RESULT"
@@ -46,8 +45,8 @@ if [[ ${#FILES[@]} -ne 0 ]]; then
 fi
 
 
-# ESLint
-_get_files '*.js' '*.jsx'
+# ESLint + Biome
+_get_files '*.js' '*.jsx' '*.ts' '*.tsx' '*.mjs'
 if [[ ${#FILES[@]} -ne 0 ]]; then
     if ! RESULT=$($ESLINT_CMD --color "${FILES[@]}"); then
         STATUS=1
@@ -58,28 +57,37 @@ if [[ ${#FILES[@]} -ne 0 ]]; then
         echo "${BRIGHTYELLOW}There are JS warnings in your code:${RESET}"
         echo "$RESULT"
     fi
+
+    if ! RESULT=$($BIOME_CMD "${FILES[@]}" 2>&1); then
+        STATUS=1
+        echo "${RED}There are formatting issues in your code:${RESET}"
+        echo "$RESULT"
+        echo
+    fi
 fi
 
 
-# PEP8
-if ! RESULT=$(git diff -U0 --staged --no-prefix | $PEP8_CMD --diff $PEP8_OPTIONS); then
-    echo "${RED}There are PEP8 issues in your code:${RESET}"
-    STATUS=1
-fi
-if [[ -n "$RESULT" ]] ; then
-    echo "$RESULT" | sed -e "$RE"
-    echo
+# ruff
+_get_files '*.py'
+if [[ ${#FILES[@]} -ne 0 ]]; then
+    if ! RESULT=$(CLICOLOR_FORCE=1 $RUFF_CMD "${FILES[@]}"); then
+        STATUS=1
+        echo "${RED}There are ruff python issues in your code:${RESET}"
+        echo "$RESULT"
+        echo
+    fi
 fi
 
 
 # isort
-if ! RESULT=$(python -c 'import sys; from isort.hooks import git_hook; sys.exit(git_hook(strict=True))'); then
+if ! RESULT=$(python -c 'import sys; from isort.hooks import git_hook; sys.exit(git_hook(strict=True))' 2>&1); then
     STATUS=1
+    echo
     echo "${RED}There are isort issues in your code:${RESET}"
     echo "$RESULT"
     echo
     echo "${CYAN}Run this command to sort the imports:${RESET}"
-    echo "git diff --staged --name-only --diff-filter d '*.py' | xargs isort"
+    echo "git diff --staged --name-only --diff-filter d '*.py' | xargs -d'\n' isort"
 fi
 
 

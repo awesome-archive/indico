@@ -1,24 +1,13 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import itertools
 import posixpath
-from urlparse import urlparse
+from urllib.parse import urlparse
 
 from flask import current_app, g, render_template, request, session
 from markupsafe import Markup
@@ -26,13 +15,14 @@ from pytz import common_timezones, common_timezones_set
 
 from indico.core import signals
 from indico.core.config import config
-from indico.legacy.webinterface.wcomponents import render_header
+from indico.modules.core.settings import core_settings
 from indico.modules.legal import legal_settings
 from indico.util.decorators import classproperty
 from indico.util.i18n import _, get_all_locales
 from indico.util.signals import values_from_signal
-from indico.util.string import to_unicode
 from indico.web.flask.templating import get_template_module
+from indico.web.flask.util import url_for
+from indico.web.menu import build_menu_structure
 from indico.web.util import jsonify_template
 
 
@@ -45,7 +35,19 @@ def _get_timezone_display(local_tz, timezone, force=False):
         return timezone
 
 
-def render_session_bar(protected_object=None, local_tz=None, force_local_tz=False):
+def render_header(category=None, protected_object=None, local_tz=None, force_local_tz=False):
+    top_menu_items = build_menu_structure('top-menu')
+    return render_template('header.html',
+                           category=category,
+                           top_menu_items=top_menu_items,
+                           protected_object=protected_object,
+                           local_tz=local_tz,
+                           force_local_tz=force_local_tz,
+                           force_locale=None)
+
+
+def render_session_bar(protected_object=None, local_tz=None, force_local_tz=False, force_locale=None,
+                       force_locale_alts=None):
     protection_disclaimers = {
         'network': legal_settings.get('network_protected_disclaimer'),
         'restricted': legal_settings.get('restricted_disclaimer')
@@ -65,7 +67,7 @@ def render_session_bar(protected_object=None, local_tz=None, force_local_tz=Fals
     active_tz = _get_timezone_display(local_tz, session.timezone, force_local_tz)
     timezones = common_timezones
     if active_tz not in common_timezones_set:
-        timezones = list(common_timezones) + [active_tz]
+        timezones = [*common_timezones, active_tz]
     timezone_data = {
         'disabled': force_local_tz,
         'user_tz': user_tz,
@@ -77,11 +79,13 @@ def render_session_bar(protected_object=None, local_tz=None, force_local_tz=Fals
     rv = tpl.render_session_bar(protected_object=protected_object,
                                 protection_disclaimers=protection_disclaimers,
                                 timezone_data=timezone_data,
-                                languages=get_all_locales())
+                                languages=get_all_locales(),
+                                force_locale=force_locale,
+                                force_locale_alts=force_locale_alts)
     return Markup(rv)
 
 
-class WPJinjaMixin(object):
+class WPJinjaMixin:
     """Mixin for WPs backed by Jinja templates.
 
     This allows you to use a single WP class and its layout, CSS,
@@ -91,7 +95,7 @@ class WPJinjaMixin(object):
     To avoid collisions between blueprint and application templates,
     your blueprint template folders should have a subfolder named like
     the blueprint. To avoid writing it all the time, you can store it
-    as `template_prefix` (with a trailing slash) in yor WP class.
+    as `template_prefix` (with a trailing slash) in your WP class.
     This only applies to the indico core as plugins always use a separate
     template namespace!
     """
@@ -107,9 +111,9 @@ class WPJinjaMixin(object):
 
     @classmethod
     def render_template(cls, template_name_or_list=None, *wp_args, **context):
-        """Renders a jinja template inside the WP
+        """Render a jinja template inside the WP.
 
-        :param template_name_or_list: the name of the template - if unsed, the
+        :param template_name_or_list: the name of the template - if unset, the
                                       `_template` attribute of the class is used.
                                       can also be a list containing multiple
                                       templates (the first existing one is used)
@@ -126,7 +130,7 @@ class WPJinjaMixin(object):
 
     @classmethod
     def render_string(cls, html, *wp_args):
-        """Renders a string inside the WP
+        """Render a string inside the WP.
 
         :param html: a string containing html
         :param wp_args: list of arguments to be passed to the WP's' constructor
@@ -135,7 +139,9 @@ class WPJinjaMixin(object):
 
     @classmethod
     def _prefix_template(cls, template):
-        if isinstance(template, basestring):
+        if cls.template_prefix and cls.template_prefix[-1] != '/':
+            raise ValueError('template_prefix needs to end with a slash')
+        if isinstance(template, str):
             return cls.template_prefix + template
         else:
             templates = []
@@ -144,7 +150,7 @@ class WPJinjaMixin(object):
                 templates.append(tpl[:pos] + cls.template_prefix + tpl[pos:])
             return templates
 
-    def _getPageContent(self, params):
+    def _get_page_content(self, params):
         html = params.pop('_html', None)
         if html is not None:
             return html
@@ -153,116 +159,9 @@ class WPJinjaMixin(object):
         return self.render_template_func(template, **params)
 
 
-class WPBundleMixin(object):
-    print_bundles = tuple()
-
-    @property
-    def additional_bundles(self):
-        """Additional bundle objects that will be included."""
-        return {
-            'screen': (),
-            'print': ()
-        }
-
-    def _resolve_bundles(self):
-        """Add up all bundles, following the MRO."""
-        seen_bundles = set()
-        for class_ in reversed(self.__class__.mro()[:-1]):
-            attr = class_.__dict__.get('bundles', ())
-            if isinstance(attr, classproperty):
-                attr = attr.__get__(None, class_)
-            elif isinstance(attr, property):
-                attr = attr.fget(self)
-
-            for bundle in attr:
-                if config.DEBUG and bundle in seen_bundles:
-                    raise Exception("Duplicate bundle found in {}: '{}'".format(class_.__name__, bundle))
-                seen_bundles.add(bundle)
-                yield bundle
-
-
-class WPBase(WPBundleMixin):
-    title = ''
-
-    #: Whether the WP is used for management (adds suffix to page title)
-    MANAGEMENT = False
-
-    def __init__(self, rh, **kwargs):
-        self._rh = rh
-        self._kwargs = kwargs
-
-    def get_extra_css_files(self):
-        """Return CSS urls that will be included after all other CSS"""
-        return []
-
-    @classproperty
-    @classmethod
-    def bundles(cls):
-        _bundles = ('common.css', 'common.js', 'jquery.css', 'jquery.js', 'main.css', 'main.js', 'module_core.js',
-                    'module_events.creation.js', 'module_attachments.js')
-        if not g.get('static_site'):
-            _bundles += ('ckeditor.js',)
-        return _bundles
-
-    def _getHeadContent(self):
-        """
-        Returns _additional_ content between <head></head> tags.
-        Please note that <title>, <meta> and standard CSS are always included.
-
-        Override this method to add your own, page-specific loading of
-        JavaScript, CSS and other legal content for HTML <head> tag.
-        """
-        return ""
-
-    def _fix_path(self, path):
-        url_path = urlparse(config.BASE_URL).path or '/'
-        # append base path only if not absolute already
-        # and not in 'static site' mode (has to be relative)
-        if path[0] != '/' and not g.get('static_site'):
-            path = posixpath.join(url_path, path)
-        return path
-
-    def _display(self, params):
-        raise NotImplementedError
-
-    def display(self, **params):
-        from indico.modules.admin import RHAdminBase
-        from indico.modules.core.settings import core_settings, social_settings
-
-        title_parts = [self.title]
-        if self.MANAGEMENT:
-            title_parts.insert(0, _('Management'))
-        elif isinstance(self._rh, RHAdminBase):
-            title_parts.insert(0, _('Administration'))
-
-        injected_bundles = values_from_signal(signals.plugin.inject_bundle.send(self.__class__), as_list=True,
-                                              multi_value_types=list)
-        custom_js = list(current_app.manifest['__custom.js'])
-        custom_css = list(current_app.manifest['__custom.css'])
-        css_files = map(self._fix_path, self.get_extra_css_files() + custom_css)
-        js_files = map(self._fix_path, custom_js)
-
-        body = to_unicode(self._display(params))
-        bundles = itertools.chain((current_app.manifest[x] for x in self._resolve_bundles()
-                                   if x in current_app.manifest._entries),
-                                  self.additional_bundles['screen'], injected_bundles)
-        print_bundles = itertools.chain((current_app.manifest[x] for x in self.print_bundles),
-                                        self.additional_bundles['print'])
-
-        return render_template('indico_base.html',
-                               css_files=css_files, js_files=js_files,
-                               bundles=bundles, print_bundles=print_bundles,
-                               site_name=core_settings.get('site_title'),
-                               social=social_settings.get_all(),
-                               page_title=' - '.join(unicode(x) for x in title_parts if x),
-                               head_content=to_unicode(self._getHeadContent()),
-                               body=body)
-
-
-class WPNewBase(WPJinjaMixin):
-    title = ''
-    bundles = ()
-    print_bundles = tuple()
+class WPBundleMixin:
+    bundles = ('exports.js', 'common-runtime.js')
+    print_bundles = ()
 
     @classproperty
     @classmethod
@@ -286,9 +185,116 @@ class WPNewBase(WPJinjaMixin):
 
             for bundle in attr:
                 if config.DEBUG and bundle in seen_bundles:
-                    raise Exception("Duplicate bundle found in {}: '{}'".format(class_.__name__, bundle))
+                    raise Exception(f"Duplicate bundle found in {class_.__name__}: '{bundle}'")
                 seen_bundles.add(bundle)
                 yield bundle
+
+    @classproperty
+    @classmethod
+    def page_metadata(cls):
+        site_name = core_settings.get('site_title')
+        return {
+            'og': {
+                'site_name': (site_name + ' (Indico)') if site_name != 'Indico' else site_name,
+                'image': url_for('assets.image', filename='indico_square.png', _external=True)
+            }
+        }
+
+    @classproperty
+    @classmethod
+    def tinymce_content_css_urls(cls):
+        tinymce_css_bundles = ('common.css', 'react.css', 'semantic-ui.css', 'jquery.css', 'main.css')
+        return list(itertools.chain.from_iterable(current_app.manifest[x] for x in tinymce_css_bundles))
+
+
+class WPBase(WPBundleMixin):
+    title = ''
+
+    #: Whether the WP is used for management (adds suffix to page title)
+    MANAGEMENT = False
+
+    def __init__(self, rh, **kwargs):
+        self._rh = rh
+        self._kwargs = kwargs
+
+    def get_extra_css_files(self):
+        """Return CSS urls that will be included after all other CSS."""
+        return []
+
+    def get_extra_js_files(self):
+        """Return JS urls that will be included after all other JS."""
+        return []
+
+    @classproperty
+    @classmethod
+    def bundles(cls):
+        return ('common.css', 'common.js', 'react.css', 'react.js', 'semantic-ui.js', 'semantic-ui.css',
+                'jquery.css', 'jquery.js', 'main.css', 'main.js', 'module_core.js', 'module_events.creation.js',
+                'module_attachments.js', 'outdatedbrowser.js', 'outdatedbrowser.css')
+
+    def _get_head_content(self):
+        """Return _additional_ content between <head></head> tags.
+
+        Please note that <title>, <meta> and standard CSS are always included.
+        Override this method to add your own, page-specific loading of
+        JavaScript, CSS and other legal content for HTML <head> tag.
+        """
+        return ''
+
+    def _fix_path(self, path):
+        url_path = urlparse(config.BASE_URL).path or '/'
+        # append base path only if not absolute already
+        # and not in 'static site' mode (has to be relative)
+        if path[0] != '/' and not g.get('static_site'):
+            path = posixpath.join(url_path, path)
+        return path
+
+    def _display(self, params):
+        raise NotImplementedError
+
+    @property
+    def _extra_title_parts(self):
+        return ()
+
+    def display(self, **params):
+        from indico.modules.admin import RHAdminBase
+        from indico.modules.core.settings import core_settings
+
+        title_parts = [*self._extra_title_parts, self.title]
+        if self.MANAGEMENT:
+            title_parts.insert(0, _('Management'))
+        elif isinstance(self._rh, RHAdminBase):
+            title_parts.insert(0, _('Administration'))
+
+        injected_bundles = values_from_signal(signals.plugin.inject_bundle.send(self.__class__), as_list=True,
+                                              multi_value_types=list)
+        custom_js = list(current_app.manifest['__custom.js'])
+        custom_css = list(current_app.manifest['__custom.css'])
+        css_files = list(map(self._fix_path, self.get_extra_css_files() + custom_css))
+        js_files = list(map(self._fix_path, self.get_extra_js_files() + custom_js))
+
+        body = self._display(params)
+        bundles = itertools.chain((current_app.manifest[x] for x in self._resolve_bundles()
+                                   if x in current_app.manifest._entries),
+                                  self.additional_bundles['screen'], injected_bundles)
+        print_bundles = itertools.chain((current_app.manifest[x] for x in self.print_bundles),
+                                        self.additional_bundles['print'])
+
+        return render_template('indico_base.html',
+                               css_files=css_files, js_files=js_files,
+                               bundles=bundles, print_bundles=print_bundles,
+                               tinymce_content_css_urls=self.tinymce_content_css_urls,
+                               site_name=core_settings.get('site_title'),
+                               page_metadata=self.page_metadata,
+                               page_title=' - '.join(str(x) for x in title_parts if x),
+                               head_content=self._get_head_content(),
+                               body=body, wp_class=type(self))
+
+
+class WPNewBase(WPBundleMixin, WPJinjaMixin):
+    title = ''
+    bundles = ('outdatedbrowser.js', 'outdatedbrowser.css')
+    print_bundles = ()
 
     #: Whether the WP is used for management (adds suffix to page title)
     MANAGEMENT = False
@@ -309,7 +315,7 @@ class WPNewBase(WPJinjaMixin):
     @classmethod
     def display(cls, template_name, **params):
         from indico.modules.admin import RHAdminBase
-        from indico.modules.core.settings import core_settings, social_settings
+        from indico.modules.core.settings import core_settings
 
         title_parts = [cls.title]
         if cls.MANAGEMENT:
@@ -321,8 +327,8 @@ class WPNewBase(WPJinjaMixin):
                                               multi_value_types=list)
         custom_js = list(current_app.manifest['__custom.js'])
         custom_css = list(current_app.manifest['__custom.css'])
-        css_files = map(cls._fix_path, custom_css)
-        js_files = map(cls._fix_path, custom_js)
+        css_files = list(map(cls._fix_path, custom_css))
+        js_files = list(map(cls._fix_path, custom_js))
 
         bundles = itertools.chain((current_app.manifest[x] for x in cls._resolve_bundles()
                                    if x in current_app.manifest._entries),
@@ -332,48 +338,35 @@ class WPNewBase(WPJinjaMixin):
         template = cls._prefix_template(template_name)
         return render_template(template,
                                css_files=css_files, js_files=js_files,
+                               page_metadata=cls.page_metadata,
                                bundles=bundles, print_bundles=print_bundles,
+                               tinymce_content_css_urls=cls.tinymce_content_css_urls,
                                site_name=core_settings.get('site_title'),
-                               social=social_settings.get_all(),
-                               page_title=' - '.join(unicode(x) for x in title_parts if x),
+                               page_title=' - '.join(str(x) for x in title_parts if x),
+                               wp_class=cls,
                                **params)
 
 
 class WPDecorated(WPBase):
     sidemenu_option = None
 
-    def _getHeader(self):
+    def _get_header(self):
         return render_header()
 
-    def _getTabControl(self):
-        return None
+    def _get_footer(self):
+        return render_template('footer.html')
 
-    def _getFooter(self):
-        return render_template('footer.html').encode('utf-8')
-
-    def _applyDecoration(self, body):
+    def _apply_decoration(self, body):
         breadcrumbs = self._get_breadcrumbs()
-        return '<div class="header">{}</div>\n<div class="main">{}<div>{}</div></div>\n{}'.format(
-            to_unicode(self._getHeader()), breadcrumbs, to_unicode(body), to_unicode(self._getFooter()))
+        header = self._get_header()
+        footer = self._get_footer()
+        return f'<div class="header">{header}</div>\n<main class="main">{breadcrumbs}<div>{body}</div></main>\n{footer}'
 
     def _display(self, params):
-        params = dict(params, **self._kwargs)
-        return self._applyDecoration(self._getBody(params))
+        return self._apply_decoration(self._get_body(params | self._kwargs))
 
-    def _getBody(self, params):
+    def _get_body(self, params):
         raise NotImplementedError
-
-    def _get_breadcrumbs(self):
-        return ''
-
-
-class WPNotDecorated(WPBase):
-    def _display(self, params):
-        params = dict(params, **self._kwargs)
-        return self._getBody(params)
-
-    def _getBody(self, params):
-        pass
 
     def _get_breadcrumbs(self):
         return ''
@@ -385,12 +378,9 @@ class WPError(WPDecorated, WPJinjaMixin):
         self._message = message
         self._description = description
 
-    def _getBody(self, params):
-        return self._getPageContent({
+    def _get_body(self, params):
+        return self._get_page_content({
             '_jinja_template': 'error.html',
             'error_message': self._message,
             'error_description': self._description
         })
-
-    def getHTML(self):
-        return self.display()

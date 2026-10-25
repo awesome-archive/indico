@@ -1,38 +1,32 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from warnings import warn
 
+from flask import g
 from flask_multipass import MultipassException
 from werkzeug.utils import cached_property
 
 from indico.core.auth import multipass
+from indico.core.cache import make_scoped_cache
+from indico.core.config import config
 from indico.core.db import db
 from indico.core.db.sqlalchemy.principals import PrincipalType
-from indico.legacy.common.cache import GenericCache
 from indico.modules.auth import Identity
 from indico.modules.groups.models.groups import LocalGroup
 from indico.util.caching import memoize_request
-from indico.util.string import return_ascii
 
 
-class GroupProxy(object):
-    """Provides a generic interface for both local and multipass groups.
+group_membership_cache = make_scoped_cache('group-membership')
+DEFAULT_GROUP_CACHE_TTL = 1800
+
+
+class GroupProxy:
+    """Provide a generic interface for both local and multipass groups.
 
     Creating an instance of this class actually creates either a
     ``LocalGroupProxy`` or a ``MultipassGroupProxy``, but they expose
@@ -43,15 +37,10 @@ class GroupProxy(object):
     :param provider: The provider of a multipass group
     """
 
-    # Useful when dealing with both users and groups in the same code
-    is_group = True
-    is_network = False
-    is_single_person = False
-    is_event_role = False
     principal_order = 3
 
     def __new__(cls, name_or_id, provider=None, _group=None):
-        """Creates the correct GroupProxy for the group type"""
+        """Create the correct GroupProxy for the group type."""
         if provider is None or provider == 'indico':
             obj = object.__new__(_LocalGroupProxy)
             obj.id = int(name_or_id)
@@ -80,12 +69,12 @@ class GroupProxy(object):
 
     @cached_property
     def group(self):
-        """The underlying group object"""
+        """The underlying group object."""
         raise NotImplementedError
 
     @cached_property
     def as_principal(self):
-        """The serializable principal identifier of this group"""
+        """The serializable principal identifier of this group."""
         raise NotImplementedError
 
     @property
@@ -93,44 +82,29 @@ class GroupProxy(object):
         provider, id_or_name = self.as_principal[1]
         return 'Group:{}:{}'.format(provider or '', id_or_name)
 
-    @cached_property
-    def as_legacy_group(self):
-        """The legacy-style group wrapper"""
-        # TODO: remove once groups are gone from ZODB
-        raise NotImplementedError
-
     @property
-    def as_legacy(self):
-        return self.as_legacy_group
+    def persistent_identifier(self):
+        """A persistent version of this object's identifier.
+
+        This is currently identical to the regular identifier, since it does not
+        contain any signatures or similar data that could change.
+        """
+        return self.identifier
 
     def has_member(self, user):
-        """Checks if the user is a member of the group.
+        """Check if the user is a member of the group.
 
         This can also be accessed using the ``in`` operator.
         """
         raise NotImplementedError
 
     def get_members(self):
-        """Gets the list of users who are members of the group"""
+        """Get the list of users who are members of the group."""
         raise NotImplementedError
 
     @classmethod
-    def get_named_default_group(cls, name):
-        """Gets the group with the matching name from the default group provider.
-
-        If there is no default group provider, local groups will be
-        used and `name` is the group's ID.
-
-        This method should only be used for legacy code or code that
-        gets the group name from an external source which does not
-        contain a provider identifier.
-        """
-        group_provider = multipass.default_group_provider
-        return cls(name, group_provider.name if group_provider else None)
-
-    @classmethod
     def search(cls, name, exact=False, providers=None):
-        """Searches for groups
+        """Search for groups.
 
         :param name: The group name to search for.
         :param exact: If only exact matches should be found (much faster)
@@ -147,8 +121,8 @@ class GroupProxy(object):
         else:
             criterion = db.func.lower(LocalGroup.name).contains(name.lower())
         result = set()
-        if providers is None or 'indico' in providers:
-            result |= {g.proxy for g in LocalGroup.find(criterion)}
+        if (providers is None or 'indico' in providers) and config.LOCAL_GROUPS:
+            result |= {g.proxy for g in LocalGroup.query.filter(criterion)}
         result |= {GroupProxy(g.name, g.provider.name, _group=g)
                    for g in multipass.search_groups(name, providers=providers, exact=exact)}
         return sorted(result, key=lambda x: x.name.lower())
@@ -166,23 +140,24 @@ class _LocalGroupProxy(GroupProxy):
 
     @property
     def name(self):
-        return self.group.name if self.group else '({})'.format(self.id)
+        return self.group.name if self.group else f'({self.id})'
 
     @cached_property
     def group(self):
-        """The underlying :class:`.LocalGroup`"""
+        """The underlying :class:`.LocalGroup`."""
+        if not config.LOCAL_GROUPS:
+            # pretend local groups do not exist if they are disabled
+            # this way they'll be rejected in acl fields
+            return None
         return LocalGroup.get(self.id)
 
     @cached_property
     def as_principal(self):
         return 'Group', (None, self.id)
 
-    @cached_property
-    def as_legacy_group(self):
-        from indico.modules.groups.legacy import LocalGroupWrapper
-        return LocalGroupWrapper(self.id)
-
     def has_member(self, user):
+        if not config.LOCAL_GROUPS:
+            return False
         return user and self.group in user.local_groups
 
     def get_members(self):
@@ -196,12 +171,11 @@ class _LocalGroupProxy(GroupProxy):
     def __hash__(self):
         return hash(self.id)
 
-    @return_ascii
     def __repr__(self):
         if not self.group:
-            return '<LocalGroupProxy({} [missing])>'.format(self.id)
+            return f'<LocalGroupProxy({self.id} [missing])>'
         else:
-            return '<LocalGroupProxy({}, {})>'.format(self.id, self.group.name)
+            return f'<LocalGroupProxy({self.id}, {self.group.name})>'
 
 
 class _MultipassGroupProxy(GroupProxy):
@@ -214,51 +188,71 @@ class _MultipassGroupProxy(GroupProxy):
 
     @property
     def supports_member_list(self):
-        return multipass.identity_providers[self.provider].group_class.supports_member_list
+        try:
+            return multipass.identity_providers[self.provider].group_class.supports_member_list
+        except KeyError:
+            return False
 
     @cached_property
     def group(self):
-        """The underlying :class:`~flask_multipass.Group`"""
+        """The underlying :class:`~flask_multipass.Group`."""
         try:
             return multipass.get_group(self.provider, self.name)
         except MultipassException as e:
-            warn('Could not retrieve group {}:{}: {}'.format(self.provider, self.name, e))
+            warn(f'Could not retrieve group {self.provider}:{self.name}: {e}', stacklevel=3)
             return None
 
     @cached_property
     def as_principal(self):
         return 'Group', (self.provider, self.name)
 
-    @cached_property
-    def as_legacy_group(self):
-        from indico.modules.groups.legacy import LDAPGroupWrapper
-        return LDAPGroupWrapper(self.name)
-
     @property
     def provider_title(self):
-        return multipass.identity_providers[self.provider].title
+        try:
+            return multipass.identity_providers[self.provider].title
+        except KeyError:
+            return self.provider.title()
+
+    def get_membership_cache_ttl(self, value):
+        try:
+            ttl = multipass.identity_providers[self.provider].settings['group_cache_ttl']
+            if ttl is None or isinstance(ttl, int):
+                return ttl
+            else:
+                # allow separate caches for positive/negative results
+                return ttl[0] if value else ttl[1]
+        except KeyError:
+            # provider not found or setting not found
+            return DEFAULT_GROUP_CACHE_TTL
 
     def has_member(self, user):
         if not user:
             return False
-        cache = GenericCache('group-membership')
-        key = '{}:{}:{}'.format(self.provider, self.name, user.id)
-        rv = cache.get(key)
+        key = f'{self.provider}:{self.name}:{user.id}'
+        # Before hitting the redis-based cache, check if we have it cached on `g`; that way
+        # we greatly improve performance whenever we have a very large amount of membership
+        # checks, e.g. when someone exports a large category to iCal, and the Indico instance
+        # makes heavy use of multipass groups for event/category access control.
+        if (rv := g.setdefault('group_membership_cache', {}).get(key)) is not None:
+            return rv
+        rv = group_membership_cache.get(key)
         if rv is not None:
             return rv
         elif self.group is None:
-            warn('Tried to check if {} is in invalid group {}'.format(user, self))
+            warn(f'Tried to check if {user} is in invalid group {self}', stacklevel=2)
             rv = False
         else:
             rv = any(x[1] in self.group for x in user.iter_identifiers(check_providers=True, providers={self.provider}))
-        cache.set(key, rv, 1800)
+        g.group_membership_cache[key] = rv
+        if ttl := self.get_membership_cache_ttl(rv):
+            group_membership_cache.set(key, rv, timeout=ttl)
         return rv
 
     @memoize_request
     def get_members(self):
         from indico.modules.users.models.users import User
         if self.group is None:
-            warn('Tried to get members for invalid group {}'.format(self))
+            warn(f'Tried to get members for invalid group {self}', stacklevel=2)
             return set()
         # We actually care about Users, not identities here!
         emails = set()
@@ -271,7 +265,7 @@ class _MultipassGroupProxy(GroupProxy):
         return set(User.query.outerjoin(Identity).filter(
             ~User.is_deleted,
             db.or_(
-                User.all_emails.contains(db.func.any(list(emails))),
+                User.all_emails.in_(list(emails)),
                 db.and_(
                     Identity.provider == self.provider,
                     Identity.identifier.in_(identifiers)
@@ -286,6 +280,5 @@ class _MultipassGroupProxy(GroupProxy):
     def __hash__(self):
         return hash(self.name) ^ hash(self.provider)
 
-    @return_ascii
     def __repr__(self):
-        return '<MultipassGroupProxy({}, {})>'.format(self.provider, self.name)
+        return f'<MultipassGroupProxy({self.provider}, {self.name})>'

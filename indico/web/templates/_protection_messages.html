@@ -24,9 +24,14 @@
                 <div class="label">
                     {% trans %}Protected{% endtrans %}
                 </div>
-                <div>
+                <div class="has-acl">
                     {% trans -%}
-                        This object is <strong>only</strong> accessible by the <strong>users specified</strong> below and the <strong>managers</strong> of <strong>parent resources</strong>.
+                        This object is <strong>only</strong> accessible by the <strong>users specified</strong> above and the <strong>managers</strong> of <strong>parent resources</strong>.
+                    {%- endtrans %}
+                </div>
+                <div class="no-acl">
+                    {% trans -%}
+                        This object is <strong>only</strong> accessible by the <strong>managers</strong> of <strong>parent resources</strong>.
                     {%- endtrans %}
                 </div>
             </div>
@@ -58,6 +63,25 @@
                         {%- endtrans %}
                     </div>
                 {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="inheriting-acl-message"></div>
+{%- endmacro %}
+
+{% macro render_unlisted_event_protection_message() -%}
+    <div class="action-box for-form protection-message unlisted-event-protection-message danger">
+        <div class="section">
+            <div class="icon icon-lock"></div>
+            <div class="text">
+                <div class="label">
+                    {% trans %}Unlisted event{% endtrans %}
+                </div>
+                <div>
+                    {% trans -%}
+                        This object is <strong>only</strong> accessible by the <strong>users specified</strong> above. The protection mode can be configured once the event has been published in a category.
+                    {%- endtrans %}
+                </div>
             </div>
         </div>
     </div>

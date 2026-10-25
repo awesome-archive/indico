@@ -1,32 +1,21 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-import cPickle
 import fcntl
 import logging.handlers
 import os
+import pickle
 import pprint
 import re
 import signal
-import SocketServer
 import struct
 import termios
 import textwrap
+from socketserver import StreamRequestHandler, ThreadingTCPServer
 from threading import Lock
 
 import click
@@ -37,12 +26,11 @@ from pygments.lexers.agile import PythonLexer, PythonTracebackLexer
 from pygments.lexers.sql import SqlLexer
 
 
-click.disable_unicode_literals_warning = True
 ignored_line_re = re.compile(r'^(?:(?P<frame>\d+):)?(?P<file>.+?)(?::(?P<line>\d+))?$')
 output_lock = Lock()
 
 
-class LogRecordStreamHandler(SocketServer.StreamRequestHandler):
+class LogRecordStreamHandler(StreamRequestHandler):
     def handle(self):
         while True:
             chunk = self.connection.recv(4)
@@ -51,8 +39,8 @@ class LogRecordStreamHandler(SocketServer.StreamRequestHandler):
             size = struct.unpack(b'>L', chunk)[0]
             chunk = self.connection.recv(size)
             while len(chunk) < size:
-                chunk = chunk + self.connection.recv(size - len(chunk))
-            obj = cPickle.loads(chunk)
+                chunk += self.connection.recv(size - len(chunk))
+            obj = pickle.loads(chunk)  # noqa: S301
             self.handle_log(obj)
 
     def _check_ignored_sources(self, source):
@@ -81,18 +69,18 @@ class LogRecordStreamHandler(SocketServer.StreamRequestHandler):
         sql_log_type = obj.get('sql_log_type')
         if sql_log_type == 'start_request':
             with output_lock:
-                print '\n' * 5
+                print('\n' * 5)
                 print_linesep(True, 10)
-                print '\x1b[38;5;70mBegin request\x1b[0m  {}'.format(self._format_request(obj))
+                print(f'\x1b[38;5;70mBegin request\x1b[0m  {self._format_request(obj)}')
                 print_linesep()
             return
         elif sql_log_type == 'end_request':
             with output_lock:
                 fmt = '\x1b[38;5;202mEnd request\x1b[0m    {} [{} queries ({}) | {}]'
-                print fmt.format(self._format_request(obj),
+                print(fmt.format(self._format_request(obj),
                                  prettify_count(obj['sql_query_count']),
                                  prettify_duration(obj['req_query_duration'], True),
-                                 prettify_duration(obj['req_duration'], True))
+                                 prettify_duration(obj['req_duration'], True)))
                 print_linesep(True, 196)
             return
         # XXX: `WITH` queries could be something different from SELECT but so far
@@ -103,8 +91,8 @@ class LogRecordStreamHandler(SocketServer.StreamRequestHandler):
         if ignored:
             if sql_log_type == 'end':
                 with output_lock:
-                    print '\x1b[38;5;216mIgnored query\x1b[0m   {} [{:.06f}s]'.format(ignored['file'],
-                                                                                      obj['sql_duration'])
+                    print('\x1b[38;5;216mIgnored query\x1b[0m   {} [{:.06f}s]'.format(ignored['file'],
+                                                                                      obj['sql_duration']))
                     print_linesep()
             return
         if sql_log_type == 'start':
@@ -113,28 +101,28 @@ class LogRecordStreamHandler(SocketServer.StreamRequestHandler):
             params = prettify_params(obj['sql_params']) if obj['sql_params'] else None
             with output_lock:
                 if source:
-                    print prettify_caption('Source')
-                    print source
-                    print
-                print prettify_caption('Statement')
-                print statement
+                    print(prettify_caption('Source'))
+                    print(source)
+                    print()
+                print(prettify_caption('Statement'))
+                print(statement)
                 if params:
-                    print
-                    print prettify_caption('Params')
-                    print params
+                    print()
+                    print(prettify_caption('Params'))
+                    print(params)
         elif sql_log_type == 'end':
             with output_lock:
-                print
-                print prettify_caption('Duration')
-                print '    {}'.format(prettify_duration(obj['sql_duration']))
+                print()
+                print(prettify_caption('Duration'))
+                print('    {}'.format(prettify_duration(obj['sql_duration'])))
                 print_linesep()
 
 
-class LogRecordSocketReceiver(SocketServer.ThreadingTCPServer):
+class LogRecordSocketReceiver(ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, host, port, traceback_frames, ignore_selects, ignored_sources, ignored_request_paths):
-        SocketServer.ThreadingTCPServer.__init__(self, (host, port), LogRecordStreamHandler)
+        ThreadingTCPServer.__init__(self, (host, port), LogRecordStreamHandler)
         self.timeout = 1
         self.traceback_frames = traceback_frames
         self.ignore_selects = ignore_selects
@@ -143,21 +131,21 @@ class LogRecordSocketReceiver(SocketServer.ThreadingTCPServer):
 
     def _process_path(self, path):
         regex = path[1:] if path[0] == '~' else re.escape(path)
-        return re.compile('^{}$'.format(regex))
+        return re.compile(f'^{regex}$')
 
 
 def terminal_size():
-    h, w, hp, wp = struct.unpack(b'HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, struct.pack(b'HHHH', 0, 0, 0, 0)))
+    h, w, _hp, _wp = struct.unpack(b'HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, struct.pack(b'HHHH', 0, 0, 0, 0)))
     return w, h
 
 
 def print_linesep(double=False, color=None):
-    char = u'\N{BOX DRAWINGS DOUBLE HORIZONTAL}' if double else u'\N{BOX DRAWINGS LIGHT HORIZONTAL}'
+    char = '\N{BOX DRAWINGS DOUBLE HORIZONTAL}' if double else '\N{BOX DRAWINGS LIGHT HORIZONTAL}'
     sep = terminal_size()[0] * char
     if color is None:
-        print sep
+        print(sep)
     else:
-        print u'\x1b[38;5;{}m{}\x1b[0m'.format(color, sep)
+        print(f'\x1b[38;5;{color}m{sep}\x1b[0m')
 
 
 def indent(msg, level=4):
@@ -166,7 +154,7 @@ def indent(msg, level=4):
 
 
 def prettify_caption(caption):
-    return '\x1b[38;5;75;04m{}\x1b[0m'.format(caption)
+    return f'\x1b[38;5;75;04m{caption}\x1b[0m'
 
 
 def prettify_duration(duration, is_total=False):
@@ -175,22 +163,22 @@ def prettify_duration(duration, is_total=False):
     else:
         thresholds = [(0.25, 196), (0.1, 202), (0.05, 226), (0.005, 46), (None, 123)]
     color = next(c for t, c in thresholds if t is None or duration >= t)
-    return '\x1b[38;5;{}m{:.06f}s\x1b[0m'.format(color, duration)
+    return f'\x1b[38;5;{color}m{duration:.06f}s\x1b[0m'
 
 
 def prettify_count(count):
     thresholds = [(50, 196), (30, 202), (20, 226), (10, 46), (None, 123)]
     color = next(c for t, c in thresholds if t is None or count >= t)
-    return '\x1b[38;5;{}m{}\x1b[0m'.format(color, count)
+    return f'\x1b[38;5;{color}m{count}\x1b[0m'
 
 
 def prettify_source(source, traceback_frames):
     if not traceback_frames:
         return None
     msg = 'Traceback (most recent call last):\n'
-    frame_msg = textwrap.dedent("""
+    frame_msg = textwrap.dedent('''
     File "{}", line {}, in {}
-      {}\n""").strip()
+      {}\n''').strip()
     msg += indent('\n'.join(frame_msg.format(*frame) for frame in source[:traceback_frames]), 2)
     highlighted = highlight(msg, PythonTracebackLexer(), Terminal256Formatter(style='native'))
     # Remove first line (just needed for PythonTracebackLexer)
@@ -209,7 +197,7 @@ def prettify_params(args):
 
 
 def sigint(*unused):
-    print '\rTerminating'
+    print('\rTerminating')
     os._exit(1)
 
 
@@ -227,14 +215,14 @@ def sigint(*unused):
                    '/assets/js-vars/user.js). Prefix with ~ to use a regex match instead of an exact string match.')
 def main(port, traceback_frames, ignore_selects, ignored_sources, ignored_request_paths):
     signal.signal(signal.SIGINT, sigint)
-    print 'Listening on 127.0.0.1:{}'.format(port)
+    print(f'Listening on 127.0.0.1:{port}')
     server = LogRecordSocketReceiver('localhost', port, traceback_frames=traceback_frames,
                                      ignore_selects=ignore_selects, ignored_sources=ignored_sources,
                                      ignored_request_paths=ignored_request_paths)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print
+        print()
 
 
 if __name__ == '__main__':

@@ -1,38 +1,36 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from uuid import UUID
 
 from flask import request, session
-from werkzeug.exceptions import Forbidden
+from werkzeug.exceptions import Forbidden, NotFound
 
 from indico.modules.events.abstracts.models.abstracts import Abstract
 from indico.modules.events.controllers.base import RHDisplayEventBase
 from indico.modules.events.management.controllers.base import ManageEventMixin
 from indico.modules.events.util import check_event_locked
+from indico.util.decorators import classproperty
 
 
 class SpecificAbstractMixin:
-    """Mixin for RHs that deal with a specific abstract"""
+    """Mixin for RHs that deal with a specific abstract."""
 
-    normalize_url_spec = {
-        'locators': {
-            lambda self: self.abstract
+    # whether the RH should use Abstract's UUID when querying
+    USE_ABSTRACT_UUID = False
+
+    @classproperty
+    @classmethod
+    def normalize_url_spec(cls):
+        return {
+            'locators': {
+                lambda self: self.abstract.locator.token if cls.USE_ABSTRACT_UUID else self.abstract
+            }
         }
-    }
 
     _abstract_query_options = ()
 
@@ -44,7 +42,16 @@ class SpecificAbstractMixin:
         return query
 
     def _process_args(self):
-        self.abstract = self._abstract_query.filter_by(id=request.view_args['abstract_id'], is_deleted=False).one()
+        filters = {'is_deleted': False}
+        if self.USE_ABSTRACT_UUID:
+            try:
+                UUID(request.view_args['uuid'])
+            except ValueError:
+                raise NotFound
+            filters['uuid'] = request.view_args['uuid']
+        else:
+            filters['id'] = request.view_args['abstract_id']
+        self.abstract = self._abstract_query.filter_by(**filters).one()
 
     def _check_access(self):
         if not self._check_abstract_protection():
@@ -55,34 +62,35 @@ class SpecificAbstractMixin:
 
 
 class RHAbstractsBase(RHDisplayEventBase):
-    """Base class for all abstract-related RHs"""
+    """Base class for all abstract-related RHs."""
 
     EVENT_FEATURE = 'abstracts'
 
     def _check_access(self):
         RHDisplayEventBase._check_access(self)
-        # Only let event managers access the management versions.
-        if self.management and not self.event.can_manage(session.user):
+        # Only let abstract managers access the management versions.
+        if self.management and not self.event.can_manage(session.user, permission='abstracts'):
             raise Forbidden
         check_event_locked(self, self.event)
 
     @property
     def management(self):
-        """Whether the RH is currently used in the management area"""
+        """Whether the RH is currently used in the management area."""
         return request.view_args.get('management', False)
 
 
 class RHManageAbstractsBase(ManageEventMixin, RHAbstractsBase):
     """
     Base class for all abstract-related RHs that require full event
-    management permissions
+    management permissions.
     """
 
     DENY_FRAMES = True
+    PERMISSION = 'abstracts'
 
     @property
     def management(self):
-        """Whether the RH is currently used in the management area"""
+        """Whether the RH is currently used in the management area."""
         return request.view_args.get('management', True)
 
 

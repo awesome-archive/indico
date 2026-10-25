@@ -4,6 +4,7 @@
 *.py[co]
 __pycache__/
 .pytest_cache/
+.venv/
 
 # configs
 *.conf
@@ -15,9 +16,14 @@ logging.yaml
 *.egg-info
 
 # generated stuff
-*.mo
 indico/web/static/dist
 url_map.json
+indico/translations/*/LC_MESSAGES/messages.po
+indico/translations/*/LC_MESSAGES/messages-js.po
+indico/translations/*/LC_MESSAGES/messages-react.po
+indico/translations/*/LC_MESSAGES/*.mo
+indico/translations/*/LC_MESSAGES/messages-react.json
+!indico/translations/en_US/LC_MESSAGES/messages.po
 
 # fetched external dependencies
 indico/htdocs/*/lib/
@@ -27,11 +33,12 @@ node_modules
 # IDE files
 .idea/
 *.sublime-*
-.vscode/
-jsconfig.json
+.vscode/*
+!.vscode/extensions.json
 
 # testing
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 /.cache/
@@ -44,5 +51,4 @@ htmlcov/
 
 # node/webpack
 webpack-build-config.json
-package-lock.json
 *.lock

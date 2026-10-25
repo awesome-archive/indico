@@ -1,25 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask_pluginengine import plugin_context
 from wtforms.fields import SubmitField, TextAreaField
 
+from indico.core.config import config
 from indico.core.db import db
+from indico.core.notifications import make_email
 from indico.modules.events.requests.notifications import (notify_accepted_request, notify_new_modified_request,
                                                           notify_rejected_request, notify_withdrawn_request)
 from indico.modules.events.requests.views import WPRequestsEventManagement
@@ -33,7 +24,7 @@ class RequestFormBase(IndicoForm):
     def __init__(self, *args, **kwargs):
         self.event = kwargs.pop('event')
         self.request = kwargs.pop('request')
-        super(RequestFormBase, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class RequestManagerForm(IndicoForm):
@@ -46,8 +37,8 @@ class RequestManagerForm(IndicoForm):
     action_reject = SubmitField(_('Reject'))
 
 
-class RequestDefinitionBase(object):
-    """Defines a service request which can be sent by event managers."""
+class RequestDefinitionBase:
+    """A service request which can be sent by event managers."""
 
     #: the plugin containing this request definition - assigned automatically
     plugin = None
@@ -64,7 +55,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def render_form(cls, event, **kwargs):
-        """Renders the request form
+        """Render the request form.
 
         :param event: the event the request is for
         :param kwargs: arguments passed to the template
@@ -74,7 +65,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def create_form(cls, event, existing_request=None):
-        """Creates the request form
+        """Create the request form.
 
         :param event: the event the request is for
         :param existing_request: the :class:`Request` if there's an existing request of this type
@@ -86,7 +77,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def create_manager_form(cls, req):
-        """Creates the request management form
+        """Create the request management form.
 
         :param req: the :class:`Request` of the request
         :return: an instance of an :class:`IndicoForm` subclass
@@ -97,7 +88,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def get_notification_template(cls, name, **context):
-        """Gets the template module for a notification email
+        """Get the template module for a notification email.
 
         :param name: the template name
         :param context: data passed to the template
@@ -107,33 +98,70 @@ class RequestDefinitionBase(object):
         return get_template_module(tpl, **context)
 
     @classmethod
+    def make_notification_email(cls, req, template, *, to_request_managers: bool):
+        """Make a notification email.
+
+        :param req: the :class:`Request` of the request
+        :param template: the template module for the notification
+        :param to_request_managers: whether the email is sent to request managers
+                                    (event managers if False)
+        """
+        recipients = cls.get_manager_notification_emails(req) if to_request_managers else req.event.all_manager_emails
+        from_addr = cls.get_notification_from_email(req, to_request_managers=to_request_managers)
+        reply_addr = cls.get_notification_reply_email(req, to_request_managers=to_request_managers)
+        if not recipients:
+            return None
+        return make_email(recipients, sender_address=from_addr, reply_address=reply_addr, template=template)
+
+    @classmethod
+    def get_manager_notification_emails(cls, req):
+        """Return the email addresses of users who manage requests of this type.
+
+        The email addresses are used only for notifications.
+        It usually makes sense to return the email addresses of the users who
+        pass the :method:`can_be_managed` check.
+
+        :param req: the :class:`Request` of the request
+        :return: set of email addresses
+        """
+        return set()
+
+    @classmethod
+    def get_notification_from_email(cls, req, *, to_request_managers: bool):
+        """Return the *From* e-mail address for notifications.
+
+        :param req: the :class:`Request` of the request
+        :param to_request_managers: whether the email is sent to request managers
+                                    (event managers if False)
+        """
+        return config.NO_REPLY_EMAIL
+
+    @classmethod
+    def get_notification_reply_email(cls, req, *, to_request_managers: bool):
+        """Return the *Reply-To* e-mail address for notifications.
+
+        :param req: the :class:`Request` of the request
+        :param to_request_managers: whether the email is sent to request managers
+                                    (event managers if False)
+        """
+        return config.SUPPORT_EMAIL
+
+    @classmethod
     def can_be_managed(cls, user):
-        """Checks whether the user is allowed to manage this request type
+        """Check whether the user is allowed to manage this request type.
 
         :param user: a :class:`.User`
         """
         raise NotImplementedError
 
     @classmethod
-    def get_manager_notification_emails(cls):
-        """Returns the email addresses of users who manage requests of this type
-
-        The email addresses are used only for notifications.
-        It usually makes sense to return the email addresses of the users who
-        pass the :method:`can_be_managed` check.
-
-        :return: set of email addresses
-        """
-        return set()
-
-    @classmethod
     def send(cls, req, data):
-        """Sends a new/modified request
+        """Send a new/modified request.
 
         :param req: the :class:`Request` of the request
         :param data: the form data from the request form
         """
-        req.data = dict(req.data or {}, **data)
+        req.data = (req.data or {}) | data
         is_new = req.id is None
         if is_new:
             db.session.add(req)
@@ -142,18 +170,19 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def withdraw(cls, req, notify_event_managers=True):
-        """Withdraws the request
+        """Withdraw the request.
 
         :param req: the :class:`Request` of the request
         :param notify_event_managers: if event managers should be notified
         """
         from indico.modules.events.requests.models.requests import RequestState
         req.state = RequestState.withdrawn
-        notify_withdrawn_request(req, notify_event_managers)
+        if not req.event.has_ended:
+            notify_withdrawn_request(req, notify_event_managers)
 
     @classmethod
     def accept(cls, req, data, user):
-        """Accepts the request
+        """Accept the request.
 
         To ensure that additional data is saved, this method should
         call :method:`manager_save`.
@@ -171,7 +200,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def reject(cls, req, data, user):
-        """Rejects the request
+        """Reject the request.
 
         To ensure that additional data is saved, this method should
         call :method:`manager_save`.
@@ -189,7 +218,7 @@ class RequestDefinitionBase(object):
 
     @classmethod
     def manager_save(cls, req, data):
-        """Saves management-specific data
+        """Save management-specific data.
 
         This method is called when the management form is submitted without
         accepting/rejecting the request (which is guaranteed to be already

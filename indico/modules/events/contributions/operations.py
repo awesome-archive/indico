@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
@@ -23,18 +12,21 @@ from indico.core.db import db
 from indico.core.db.sqlalchemy.util.session import no_autoflush
 from indico.modules.attachments.models.attachments import Attachment, AttachmentFile, AttachmentType
 from indico.modules.attachments.models.folders import AttachmentFolder
+from indico.modules.events.abstracts.settings import SubmissionRightsType
 from indico.modules.events.contributions import contribution_settings, logger
 from indico.modules.events.contributions.models.contributions import Contribution
-from indico.modules.events.contributions.models.persons import ContributionPersonLink
+from indico.modules.events.contributions.models.persons import AuthorType, ContributionPersonLink
 from indico.modules.events.contributions.models.subcontributions import SubContribution
-from indico.modules.events.logs.models.entries import EventLogKind, EventLogRealm
 from indico.modules.events.timetable.operations import (delete_timetable_entry, schedule_contribution,
                                                         update_timetable_entry)
-from indico.modules.events.util import set_custom_fields
+from indico.modules.events.util import format_log_person, format_log_ref, set_custom_fields, split_log_location_changes
+from indico.modules.logs.models.entries import EventLogRealm, LogKind
+from indico.modules.logs.util import make_diff_log
+from indico.util.signals import make_interceptable
 
 
 def _ensure_consistency(contrib):
-    """Unschedule contribution if not consistent with timetable
+    """Unschedule contribution if not consistent with timetable.
 
     A contribution that has no session assigned, may not be scheduled
     inside a session.  A contribution that has a session assigned may
@@ -61,6 +53,7 @@ def _ensure_consistency(contrib):
     return False
 
 
+@make_interceptable
 def create_contribution(event, contrib_data, custom_fields_data=None, session_block=None, extend_parent=False):
     user = session.user if session else None
     start_dt = contrib_data.pop('start_dt', None)
@@ -71,16 +64,19 @@ def create_contribution(event, contrib_data, custom_fields_data=None, session_bl
     db.session.flush()
     if start_dt is not None:
         schedule_contribution(contrib, start_dt=start_dt, session_block=session_block, extend_parent=extend_parent)
-    signals.event.contribution_created.send(contrib)
+    signals.event.contribution_created.send(contrib, cloned_from=None)
     logger.info('Contribution %s created by %s', contrib, user)
-    contrib.event.log(EventLogRealm.management, EventLogKind.positive, 'Contributions',
-                      'Contribution "{}" has been created'.format(contrib.title), user)
+    contrib.log(EventLogRealm.management, LogKind.positive, 'Contributions',
+                f'Contribution {contrib.verbose_title} has been created', user)
+    # Note: If you ever add more stuff here that should run for any new contribution, make sure
+    # to also add it to ContributionCloner.clone_single_contribution
     return contrib
 
 
+@make_interceptable
 @no_autoflush
-def update_contribution(contrib, contrib_data, custom_fields_data=None):
-    """Update a contribution
+def update_contribution(contrib: Contribution, contrib_data: dict, custom_fields_data=None, *, _extra_log_fields=None):
+    """Update a contribution.
 
     :param contrib: The `Contribution` to update
     :param contrib_data: A dict containing the data to update
@@ -98,7 +94,12 @@ def update_contribution(contrib, contrib_data, custom_fields_data=None):
     start_dt = contrib_data.pop('start_dt', None)
     if start_dt is not None:
         update_timetable_entry(contrib.timetable_entry, {'start_dt': start_dt})
+    old_person_links = contrib.sorted_person_links[:]
     changes = contrib.populate_from_dict(contrib_data)
+    changes.pop('person_link_data', None)
+    visible_person_link_changes = contrib.sorted_person_links != old_person_links
+    if visible_person_link_changes or 'person_link_data' in contrib_data:
+        changes['person_links'] = (old_person_links, contrib.sorted_person_links)
     if custom_fields_data:
         changes.update(set_custom_fields(contrib, custom_fields_data))
     if 'session' in contrib_data:
@@ -113,8 +114,8 @@ def update_contribution(contrib, contrib_data, custom_fields_data=None):
     if changes:
         signals.event.contribution_updated.send(contrib, changes=changes)
         logger.info('Contribution %s updated by %s', contrib, session.user)
-        contrib.event.log(EventLogRealm.management, EventLogKind.change, 'Contributions',
-                          'Contribution "{}" has been updated'.format(contrib.title), session.user)
+        log_contribution_update(contrib, changes, _extra_log_fields,
+                                visible_person_link_changes=visible_person_link_changes)
     return rv
 
 
@@ -125,8 +126,8 @@ def delete_contribution(contrib):
     db.session.flush()
     signals.event.contribution_deleted.send(contrib)
     logger.info('Contribution %s deleted by %s', contrib, session.user)
-    contrib.event.log(EventLogRealm.management, EventLogKind.negative, 'Contributions',
-                      'Contribution "{}" has been deleted'.format(contrib.title), session.user)
+    contrib.log(EventLogRealm.management, LogKind.negative, 'Contributions',
+                f'Contribution {contrib.verbose_title} has been deleted', session.user)
 
 
 def create_subcontribution(contrib, data):
@@ -134,10 +135,11 @@ def create_subcontribution(contrib, data):
     subcontrib.populate_from_dict(data)
     contrib.subcontributions.append(subcontrib)
     db.session.flush()
-    signals.event.subcontribution_created.send(subcontrib)
+    signals.event.subcontribution_created.send(subcontrib, cloned_from=None)
     logger.info('Subcontribution %s created by %s', subcontrib, session.user)
-    subcontrib.event.log(EventLogRealm.management, EventLogKind.positive, 'Subcontributions',
-                         'Subcontribution "{}" has been created'.format(subcontrib.title), session.user)
+    subcontrib.event.log(EventLogRealm.management, LogKind.positive, 'Subcontributions',
+                         f'Subcontribution "{subcontrib.title}" has been created', session.user,
+                         meta={'subcontribution_id': subcontrib.id})
     return subcontrib
 
 
@@ -146,8 +148,9 @@ def update_subcontribution(subcontrib, data):
     db.session.flush()
     signals.event.subcontribution_updated.send(subcontrib)
     logger.info('Subcontribution %s updated by %s', subcontrib, session.user)
-    subcontrib.event.log(EventLogRealm.management, EventLogKind.change, 'Subcontributions',
-                         'Subcontribution "{}" has been updated'.format(subcontrib.title), session.user)
+    subcontrib.event.log(EventLogRealm.management, LogKind.change, 'Subcontributions',
+                         f'Subcontribution "{subcontrib.title}" has been updated', session.user,
+                         meta={'subcontribution_id': subcontrib.id})
 
 
 def delete_subcontribution(subcontrib):
@@ -155,8 +158,9 @@ def delete_subcontribution(subcontrib):
     db.session.flush()
     signals.event.subcontribution_deleted.send(subcontrib)
     logger.info('Subcontribution %s deleted by %s', subcontrib, session.user)
-    subcontrib.event.log(EventLogRealm.management, EventLogKind.negative, 'Subcontributions',
-                         'Subcontribution "{}" has been deleted'.format(subcontrib.title), session.user)
+    subcontrib.event.log(EventLogRealm.management, LogKind.negative, 'Subcontributions',
+                         f'Subcontribution "{subcontrib.title}" has been deleted', session.user,
+                         meta={'subcontribution_id': subcontrib.id})
 
 
 @no_autoflush
@@ -171,12 +175,17 @@ def create_contribution_from_abstract(abstract, contrib_session=None):
         link = ContributionPersonLink(person=abstract_person_link.person)
         link.populate_from_attrs(abstract_person_link, person_link_attrs)
         contrib_person_links.add(link)
-
     if contrib_session:
         duration = contrib_session.default_contribution_duration
     else:
         duration = contribution_settings.get(event, 'default_duration')
-    custom_fields_data = {'custom_{}'.format(field_value.contribution_field.id): field_value.data for
+    all_authors_can_submit = (event.cfa.contribution_submitters == SubmissionRightsType.all)
+    primary_authors_can_submit = (event.cfa.contribution_submitters == SubmissionRightsType.speakers_primary)
+    person_link_data = {link: (all_authors_can_submit or
+                               (primary_authors_can_submit and link.author_type == AuthorType.primary) or
+                               link.is_speaker)
+                        for link in contrib_person_links}
+    custom_fields_data = {f'custom_{field_value.contribution_field.id}': field_value.data for
                           field_value in abstract.field_values}
     contrib = create_contribution(event, {'friendly_id': abstract.friendly_id,
                                           'title': abstract.title,
@@ -185,7 +194,7 @@ def create_contribution_from_abstract(abstract, contrib_session=None):
                                           'type': abstract.accepted_contrib_type,
                                           'track': abstract.accepted_track,
                                           'session': contrib_session,
-                                          'person_link_data': {link: True for link in contrib_person_links}},
+                                          'person_link_data': person_link_data},
                                   custom_fields_data=custom_fields_data)
     if abstracts_settings.get(event, 'copy_attachments') and abstract.files:
         folder = AttachmentFolder.get_or_create_default(contrib)
@@ -198,3 +207,79 @@ def create_contribution_from_abstract(abstract, contrib_session=None):
                 attachment.file.save(fd)
     db.session.flush()
     return contrib
+
+
+def log_contribution_update(contrib, changes, extra_log_fields=None, *, visible_person_link_changes=False):
+    if not changes:
+        return
+
+    log_fields = {
+        'title': {'title': 'Title', 'type': 'string'},
+        'description': 'Description',
+        'address': 'Address',
+        'venue_room': {'title': 'Location', 'type': 'string'},
+        'keywords': 'Keywords',
+        'board_number': {'title': 'Board number', 'type': 'string'},
+        'code': {'title': 'Program code', 'type': 'string'},
+        'duration': 'Duration',
+        'protection_mode': 'Protection mode',
+        'references': {
+            'title': 'External IDs',
+            'convert': lambda changes: [list(map(format_log_ref, refs)) for refs in changes]
+        },
+        'person_links': {
+            'title': 'Persons',
+            'convert': lambda changes: [list(map(format_log_person, persons)) for persons in changes]
+        },
+        'track': {
+            'title': 'Track',
+            'type': 'string',
+            'convert': lambda changes: [x.full_title if x else None for x in changes]
+        },
+        'session': {
+            'title': 'Session',
+            'type': 'string',
+            'convert': lambda changes: [x.title if x else None for x in changes]
+        },
+        'session_block': {
+            'title': 'Session Block',
+            'type': 'string',
+            'convert': lambda changes: [x.full_title if x else None for x in changes]
+        },
+        'type': {
+            'title': 'Type',
+            'type': 'string',
+            'convert': lambda changes: [x.name if x else None for x in changes]
+        },
+        **(extra_log_fields or {})
+    }
+    changes = split_log_location_changes(changes)
+    if not visible_person_link_changes:
+        # Don't log a person link change with no visible changes (changes
+        # on an existing link or reordering). It would look quite weird in
+        # the event log.
+        # TODO: maybe use a separate signal for such changes to log them
+        # anyway and allow other code to act on them?
+        changes.pop('person_links', None)
+
+    for field_name in changes:
+        if not field_name.startswith('custom_') or not any(changes):
+            continue
+        field_id = int(field_name.removeprefix('custom_'))
+        field = contrib.event.get_contribution_field(field_id)
+        field_impl = field.field
+        log_fields[field_name] = {
+            'title': field.title,
+            'type': field_impl.log_type,
+            'convert': lambda change, field_impl=field_impl: list(map(field_impl.get_friendly_value, change))
+        }
+    if changes:
+        extra = ''
+        if len(changes) == 1:
+            what = log_fields[list(changes.keys())[0]]
+            if isinstance(what, dict):
+                what = what['title']
+            extra = f' ({what})'
+        contrib.log(EventLogRealm.management, LogKind.change, 'Contributions',
+                    f'Contribution {contrib.verbose_title} has been updated{extra}', session.user,
+                    data={'Changes': make_diff_log(changes, log_fields)})

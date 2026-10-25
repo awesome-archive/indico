@@ -32,10 +32,10 @@ def _make_names_unique():
         WHERE attr.location_id != %s
     ''', (default_location_id,))
     for row in res:
-        conflict = conn.execute("SELECT COUNT(*) FROM roombooking.room_attributes WHERE id != %s AND name = %s",
+        conflict = conn.execute('SELECT COUNT(*) FROM roombooking.room_attributes WHERE id != %s AND name = %s',
                                 (row.id, row.name)).scalar()
         if conflict:
-            new_name = '{} ({})'.format(row.name, row.location)
+            new_name = f'{row.name} ({row.location})'
             conn.execute('UPDATE roombooking.room_attributes SET name = %s WHERE id = %s', (new_name, row.id))
 
 
@@ -58,7 +58,14 @@ def downgrade():
     if default_location_id is None:
         if conn.execute('SELECT COUNT(*) FROM roombooking.locations').scalar():
             raise Exception('Please set a default location')
-    default_location = unicode(default_location_id) if default_location_id is not None else None
+        else:
+            # The 'room acls' revision downgrade always creates those attributes, but if the database does
+            # not contain any locations, those attributes did not exist before the upgrade step of this
+            # revision and cannot exist when performing this downgrade since there is no location to link
+            # them to. But when there are no locations no rooms can exist, so these attributes were always
+            # unused anyway.
+            conn.execute('DELETE FROM roombooking.room_attributes')
+    default_location = str(default_location_id) if default_location_id is not None else None
     op.add_column('room_attributes', sa.Column('location_id', sa.Integer(), nullable=False,
                                                server_default=default_location),
                   schema='roombooking')

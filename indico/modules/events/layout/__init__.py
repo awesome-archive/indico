@@ -1,42 +1,52 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 from jinja2.filters import do_filesizeformat
 
 from indico.core import signals
+from indico.core.db.sqlalchemy.protection import make_acl_log_fn
 from indico.core.logger import Logger
+from indico.core.settings.converters import EnumConverter
 from indico.modules.events.features.base import EventFeature
-from indico.modules.events.logs import EventLogKind, EventLogRealm
+from indico.modules.events.layout.models.menu import MenuEntry
+from indico.modules.events.layout.models.principals import MenuEntryPrincipal
 from indico.modules.events.models.events import EventType
 from indico.modules.events.settings import EventSettingsProxy, ThemeSettingsProxy
+from indico.modules.logs import EventLogRealm, LogKind
+from indico.modules.users import NameFormat
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
 
+
+# Log ACL changes
+signals.acl.entry_changed.connect(make_acl_log_fn(MenuEntry), sender=MenuEntry, weak=False)
+
+EVENT_BANNER_WIDTH = 950
+EVENT_LOGO_WIDTH = 200
+
+# Theme settings that can be overridden via theme user settings. This works bidirectionally,
+# ie if a theme's settings has all the keys set to True, then the user setting will default
+# to True as well.
+OVERRIDABLE_THEME_SETTINGS = {
+    'inline_minutes': {'show_notes'},
+    'numbered_contributions': {'hide_duration', 'hide_session_block_time', 'hide_end_time', 'number_contributions'}
+}
 
 logger = Logger.get('events.layout')
 layout_settings = EventSettingsProxy('layout', {
     'is_searchable': True,
     'show_nav_bar': True,
     'show_social_badges': True,
+    'name_format': None,
     'show_banner': False,
     'header_text_color': '',
+    'header_logo_as_banner': True,
     'header_background_color': '',
     'announcement': None,
     'show_announcement': False,
@@ -47,21 +57,46 @@ layout_settings = EventSettingsProxy('layout', {
     'use_custom_menu': False,
     'timetable_by_room': False,
     'timetable_detailed': False,
+    'show_vc_rooms': False,
+}, converters={
+    'name_format': EnumConverter(NameFormat)
 })
 
 theme_settings = ThemeSettingsProxy()
 
 
+def get_theme_global_settings(event, theme):
+    """Get the global settings for a theme.
+
+    Some global theme settings such as 'show_notes' may be overridden by the
+    event-specific user settings ('user_settings' in themes.yaml).
+    These are saved in the event's layout settings under timetable_theme_settings.
+    """
+    settings = theme_settings.themes[theme].get('settings', {})
+    # Ignore user settings when the selected theme does not match the event's theme
+    if event.theme != theme:
+        return settings
+
+    # Override global settings with user settings, if present
+    settings = settings.copy()
+    event_user_settings = layout_settings.get(event, 'timetable_theme_settings')
+    for user_key, theme_keys in OVERRIDABLE_THEME_SETTINGS.items():
+        if user_key not in event_user_settings:
+            continue
+        settings.update(dict.fromkeys(theme_keys, event_user_settings[user_key]))
+    return settings
+
+
 @signals.event.created.connect
 def _event_created(event, **kwargs):
-    defaults = event.category.default_event_themes
-    if not layout_settings.get(event, 'timetable_theme') and event.type_.name in defaults:
+    defaults = event.category.default_event_themes if event.category else None
+    if not layout_settings.get(event, 'timetable_theme') and defaults and event.type_.name in defaults:
         layout_settings.set(event, 'timetable_theme', defaults[event.type_.name])
 
 
 @signals.event.type_changed.connect
 def _event_type_changed(event, **kwargs):
-    theme = event.category.default_event_themes.get(event.type_.name)
+    theme = event.category.default_event_themes.get(event.type_.name) if event.category else None
     if theme is None:
         layout_settings.delete(event, 'timetable_theme')
     else:
@@ -103,8 +138,8 @@ def _get_feature_definitions(sender, **kwargs):
 
 @signals.event_management.image_created.connect
 def _log_image_created(image, user, **kwargs):
-    image.event.log(EventLogRealm.management, EventLogKind.positive, 'Layout',
-                    'Added image "{}"'.format(image.filename), user, data={
+    image.event.log(EventLogRealm.management, LogKind.positive, 'Layout',
+                    f'Added image "{image.filename}"', user, data={
                         'File name': image.filename,
                         'File type': image.content_type,
                         'File size': do_filesizeformat(image.size)
@@ -113,10 +148,15 @@ def _log_image_created(image, user, **kwargs):
 
 @signals.event_management.image_deleted.connect
 def _log_image_deleted(image, user, **kwargs):
-    image.event.log(EventLogRealm.management, EventLogKind.negative, 'Layout',
-                    'Deleted image "{}"'.format(image.filename), user, data={
+    image.event.log(EventLogRealm.management, LogKind.negative, 'Layout',
+                    f'Deleted image "{image.filename}"', user, data={
                         'File name': image.filename
                     })
+
+
+@signals.users.merged.connect
+def _merge_users(target, source, **kwargs):
+    MenuEntryPrincipal.merge_users(target, source, 'menu_entry')
 
 
 class ImagesFeature(EventFeature):

@@ -1,42 +1,34 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 from sqlalchemy.orm import undefer
 
 from indico.core.db.sqlalchemy.protection import ProtectionMode
 from indico.modules.categories import Category
+from indico.modules.categories.models.categories import EventCreationMode
 
 
-@pytest.mark.parametrize(('protection_mode', 'creation_restricted', 'acl', 'allowed'), (
+@pytest.mark.parametrize(('protection_mode', 'creation_mode', 'acl', 'allowed'), (
     # not restricted
-    (ProtectionMode.public, False, None, True),
-    (ProtectionMode.protected, False, None, False),
-    (ProtectionMode.protected, False, {'read_access': True}, True),
+    (ProtectionMode.public, EventCreationMode.open, None, True),
+    (ProtectionMode.protected, EventCreationMode.open, None, False),
+    (ProtectionMode.protected, EventCreationMode.open, {'read_access': True}, True),
     # restricted - authorized
-    (ProtectionMode.protected, True, {'full_access': True}, True),
-    (ProtectionMode.protected, True, {'permissions': {'create'}}, True),
+    (ProtectionMode.protected, EventCreationMode.restricted, {'full_access': True}, True),
+    (ProtectionMode.protected, EventCreationMode.restricted, {'permissions': {'create'}}, True),
     # restricted - not authorized
-    (ProtectionMode.public, True, None, False),
-    (ProtectionMode.protected, True, None, False),
-    (ProtectionMode.protected, True, {'read_access': True}, False)
+    (ProtectionMode.public, EventCreationMode.restricted, None, False),
+    (ProtectionMode.protected, EventCreationMode.restricted, None, False),
+    (ProtectionMode.protected, EventCreationMode.restricted, {'read_access': True}, False)
 ))
-def test_can_create_events(dummy_category, dummy_user, protection_mode, creation_restricted, acl, allowed):
+def test_can_create_events(dummy_category, dummy_user, protection_mode, creation_mode, acl, allowed):
     dummy_category.protection_mode = protection_mode
-    dummy_category.event_creation_restricted = creation_restricted
+    dummy_category.event_creation_mode = creation_mode
     if acl:
         dummy_category.update_principal(dummy_user, **acl)
     assert dummy_category.can_create_events(dummy_user) == allowed
@@ -48,7 +40,7 @@ def test_can_create_events_no_user(dummy_category):
 
 def test_effective_protection_mode(db):
     def _cat(id_, protection_mode=ProtectionMode.inheriting, children=None):
-        return Category(id=id_, title='cat-{}'.format(id_), protection_mode=protection_mode, children=children or [])
+        return Category(id=id_, title=f'cat-{id_}', protection_mode=protection_mode, children=children or [])
     root = Category.get_root()
     root.protection_mode = ProtectionMode.protected
     root.children = [
@@ -113,14 +105,18 @@ def test_nth_parent(category_family):
     assert sibling.nth_parent(1) == son.nth_parent(1)
     assert sibling.nth_parent(2) == son.nth_parent(2)
 
-    pytest.raises(IndexError, grandpa.nth_parent, 1)
-    pytest.raises(IndexError, dad.nth_parent, 2)
-    pytest.raises(IndexError, son.nth_parent, 3)
-    pytest.raises(IndexError, grandpa.nth_parent, 100)
+    with pytest.raises(IndexError):
+        grandpa.nth_parent(1)
+    with pytest.raises(IndexError):
+        dad.nth_parent(2)
+    with pytest.raises(IndexError):
+        son.nth_parent(3)
+    with pytest.raises(IndexError):
+        grandpa.nth_parent(100)
 
 
 def test_is_descendant_of(category_family):
-    grandpa, dad, son, sibling = category_family
+    grandpa, dad, son = category_family[:3]
 
     assert not dad.is_descendant_of(dad)
     assert not dad.is_descendant_of(son)
@@ -130,7 +126,7 @@ def test_is_descendant_of(category_family):
 
 
 def test_visibility_horizon_default(category_family):
-    grandpa, dad, son, sibling = category_family
+    grandpa, dad, son = category_family[:3]
 
     # default settings, no overriding
     assert son.own_visibility_horizon == grandpa

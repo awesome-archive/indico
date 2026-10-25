@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
-#
-# cds-indico documentation build configuration file, created by
+# indico documentation build configuration file, created by
 # sphinx-quickstart on Sun Nov 29 13:19:24 2009.
 #
 # This file is execfile()d with the current directory set to its containing dir.
@@ -11,14 +9,16 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
+# ruff: noqa: FURB101, A001
+
 import ast
 import os
 import re
 import sys
 import warnings
 
-import sphinx_rtd_theme
 from sqlalchemy.exc import SAWarning
+
 
 # silence sqlalchemy SAWarning
 warnings.simplefilter('ignore', SAWarning)
@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.abspath('.'))
 
 def _get_version():
     _version_re = re.compile(r'__version__\s+=\s+(.*)')
-    with open('../../indico/__init__.py', 'rb') as f:
-        version = str(ast.literal_eval(_version_re.search(f.read().decode('utf-8')).group(1)))
+    with open('../../indico/__init__.py') as f:
+        version = str(ast.literal_eval(_version_re.search(f.read()).group(1)))
     short_version = re.match(r'^(\d+(?:\.\d+)*).*?$', version).group(1)
     return short_version, version
 
@@ -45,16 +45,21 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.imgmath',
               'sphinx.ext.intersphinx',
               'sphinx_issues',
-              'exec_directive']
+              'sphinxcontrib.jquery',
+              'sphinxcontrib.mermaid',
+              'exec_directive',
+              'indico_uml_directive',
+              'sphinx_reredirects']
 
 # sphinx-issues config
+issues_user_uri = 'https://github.com/{user}'
 issues_github_path = 'indico/indico'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
 # The suffix of source filenames.
-source_suffix = '.rst'
+source_suffix = {'.rst': 'restructuredtext'}
 
 # The encoding of source files.
 source_encoding = 'utf-8'
@@ -63,8 +68,8 @@ source_encoding = 'utf-8'
 master_doc = 'index'
 
 # General information about the project.
-project = u'Indico'
-copyright = u'2017, Indico Team'
+project = 'Indico'
+copyright = '2021, Indico Team'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -111,12 +116,12 @@ pygments_style = 'sphinx'
 #modindex_common_prefix = []
 
 # include __init__() as well
-autoclass_content = "both"
+autoclass_content = 'both'
 autodoc_default_flags = ['show-inheritance']
 
 # Intersphinx urls
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/2.7/', None),
+    'python': ('https://docs.python.org/3.12/', None),
     'celery': ('http://docs.celeryproject.org/en/stable/', None),
 }
 
@@ -130,10 +135,6 @@ html_theme = 'sphinx_rtd_theme'
 # further.  For a list of options available for each theme, see the
 # documentation.
 # html_theme_options = {}
-
-
-# Add any paths that contain custom themes here, relative to this directory.
-html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".
@@ -166,7 +167,7 @@ html_static_path = ['_static']
 
 # Custom sidebar templates, maps document names to template names.
 html_sidebars = {
-   '**': ['about.html', 'navigation.html', 'searchbox.html']
+    '**': ['about.html', 'navigation.html', 'searchbox.html']
 }
 # Additional templates that should be rendered to pages, maps page names to
 # template names.
@@ -207,8 +208,7 @@ htmlhelp_basename = 'indicodoc'
 # Grouping the document tree into LaTeX files. List of tuples
 # (source start file, target name, title, author, documentclass [howto/manual]).
 latex_documents = [
-  ('index', 'indico.tex', u'Indico Documentation',
-   u'Indico Team', 'manual'),
+    ('index', 'indico.tex', 'Indico Documentation', 'Indico Team', 'manual'),
 ]
 
 # The name of an image file (relative to this directory) to place at the top of
@@ -229,3 +229,27 @@ latex_documents = [
 #latex_use_modindex = True
 
 todo_include_todos = True
+
+indico_uml_prelude = '''skinparam shadowing false
+skinparam defaultFontColor motivation
+skinparam defaultFontName Helvetica
+skinparam class {
+    FontColor tomato
+    BackgroundColor moccasin
+    BorderColor moccasin
+    ArrowColor slategray
+}
+skinparam classStereotypeFontSize 1'''
+
+mermaid_version = '10.2.3'
+mermaid_verbose = True
+
+redirects = {
+    'installation/production/centos': '../rpm',
+    'installation/production/debian': '../deb',
+    'installation/production/centos/apache': '../../rpm/apache',
+    'installation/production/centos/nginx': '../../rpm/nginx',
+    'installation/production/debian/apache': '../../deb/apache',
+    'installation/production/debian/nginx': '../../deb/nginx',
+    'installation/latex': '../pdf_generation',
+}

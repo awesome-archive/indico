@@ -1,29 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime, timedelta
 
 from flask import request
 from pytz import utc
-from wtforms.fields import BooleanField, HiddenField, IntegerField, SelectField, StringField, TextAreaField
-from wtforms.validators import DataRequired, InputRequired, NumberRange, ValidationError
-from wtforms.widgets.html5 import NumberInput
-from wtforms_components import TimeField
+from wtforms.fields import BooleanField, HiddenField, StringField, TextAreaField
+from wtforms.validators import DataRequired, InputRequired, ValidationError
 
 from indico.modules.events.contributions import contribution_settings
 from indico.modules.events.contributions.forms import ContributionForm
@@ -31,23 +18,24 @@ from indico.modules.events.sessions.forms import SessionBlockForm
 from indico.modules.events.timetable.models.entries import TimetableEntryType
 from indico.modules.events.timetable.util import find_next_start_dt
 from indico.util.i18n import _
+from indico.util.spreadsheets import CSVFieldDelimiter
 from indico.web.forms.base import FormDefaults, IndicoForm, generated_data
 from indico.web.forms.colors import get_colors
-from indico.web.forms.fields import (FileField, IndicoLocationField, IndicoPalettePickerField,
-                                     IndicoSelectMultipleCheckboxBooleanField, TimeDeltaField)
-from indico.web.forms.util import get_form_field_names
-from indico.web.forms.validators import HiddenUnless, MaxDuration
+from indico.web.forms.fields import (FileField, IndicoEnumSelectField, IndicoLocationField, IndicoPalettePickerField,
+                                     IndicoSelectMultipleCheckboxBooleanField, IndicoTimeField)
+from indico.web.forms.fields.datetime import IndicoDurationField
+from indico.web.forms.validators import MaxDuration
 from indico.web.forms.widgets import SwitchWidget
 
 
-class EntryFormMixin(object):
+class EntryFormMixin:
     _entry_type = None
     _default_duration = None
     _display_fields = None
 
-    time = TimeField(_("Start time"), [InputRequired()])
-    duration = TimeDeltaField(_("Duration"), [DataRequired(), MaxDuration(timedelta(hours=24))],
-                              units=('minutes', 'hours'))
+    time = IndicoTimeField(_('Start time'), [InputRequired()])
+    duration = IndicoDurationField(_('Duration'), [DataRequired(), MaxDuration(timedelta(hours=24))],
+                                   default=timedelta(minutes=20))
 
     def __init__(self, *args, **kwargs):
         self.event = kwargs['event']
@@ -62,11 +50,11 @@ class EntryFormMixin(object):
                 else:
                     defaults.duration = self._default_duration
                 kwargs['obj'] = defaults
-        super(EntryFormMixin, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     @property
     def data(self):
-        data = super(EntryFormMixin, self).data
+        data = super().data
         del data['time']
         return data
 
@@ -81,7 +69,7 @@ class EntryFormMixin(object):
             return
         end_dt = self.start_dt.data + field.data
         if end_dt.astimezone(self.event.tzinfo).date() > self.event.end_dt_local.date():
-            raise ValidationError(_("{} exceeds current day. Adjust start time or duration.")
+            raise ValidationError(_('{} exceeds current day. Adjust start time or duration.')
                                   .format(self._entry_type.title.capitalize()))
 
     def _get_default_time(self):
@@ -103,10 +91,10 @@ class BreakEntryForm(EntryFormMixin, IndicoForm):
     _default_duration = timedelta(minutes=20)
     _display_fields = ('title', 'description', 'time', 'duration', 'location_data', 'colors')
 
-    title = StringField(_("Title"), [DataRequired()])
-    description = TextAreaField(_("Description"))
-    location_data = IndicoLocationField(_("Location"))
-    colors = IndicoPalettePickerField(_('Colours'), color_list=get_colors())
+    title = StringField(_('Title'), [DataRequired()])
+    description = TextAreaField(_('Description'))
+    location_data = IndicoLocationField(_('Location'))
+    colors = IndicoPalettePickerField(_('Colors'), color_list=get_colors())
 
 
 class ContributionEntryForm(EntryFormMixin, ContributionForm):
@@ -116,7 +104,7 @@ class ContributionEntryForm(EntryFormMixin, ContributionForm):
 
     def __init__(self, *args, **kwargs):
         kwargs['to_schedule'] = kwargs.get('to_schedule', True)
-        super(ContributionEntryForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     @property
     def _default_duration(self):
@@ -126,32 +114,32 @@ class ContributionEntryForm(EntryFormMixin, ContributionForm):
 class SessionBlockEntryForm(EntryFormMixin, SessionBlockForm):
     _entry_type = TimetableEntryType.SESSION_BLOCK
     _default_duration = timedelta(minutes=60)
-    _display_fields = ('title', 'time', 'duration', 'person_links', 'location_data')
+    _display_fields = ('title', 'time', 'duration', 'person_links', 'location_data', 'code')
 
     @staticmethod
     def _validate_duration(entry, field, start_dt):
         if entry.children and start_dt.data is not None:
             end_dt = start_dt.data + field.data
             if end_dt < max(x.end_dt for x in entry.children):
-                raise ValidationError(_("This duration is too short to fit the entries within."))
+                raise ValidationError(_('This duration is too short to fit the entries within.'))
 
     def validate_duration(self, field):
-        super(SessionBlockEntryForm, self).validate_duration(field)
+        super().validate_duration(field)
         if self.session_block and self.start_dt.data:
             self._validate_duration(self.session_block.timetable_entry, field, self.start_dt)
 
 
 class BaseEntryForm(EntryFormMixin, IndicoForm):
-    shift_later = BooleanField(_('Shift down'), widget=SwitchWidget(),
-                               description=_("Shift down everything else that starts after this"))
+    shift_later = BooleanField(_('Shift'), widget=SwitchWidget(),
+                               description=_('Shift all entries after this one up or down'))
 
     def __init__(self, *args, **kwargs):
         self.entry = kwargs.pop('entry')
         self._entry_type = self.entry.type
-        super(BaseEntryForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def validate_duration(self, field):
-        super(BaseEntryForm, self).validate_duration(field)
+        super().validate_duration(field)
         if self.entry.type == TimetableEntryType.SESSION_BLOCK and self.entry.children:
             SessionBlockEntryForm._validate_duration(self.entry, field, self.start_dt)
 
@@ -159,12 +147,10 @@ class BaseEntryForm(EntryFormMixin, IndicoForm):
 _DOCUMENT_SETTINGS_CHOICES = [('showCoverPage', _('Include cover page')),
                               ('showTableContents', _('Include table of contents')),
                               ('showSessionTOC', _('Show list of sessions in the table of contents'))]
-_CONTRIBUTION_CHOICES = [('showContribId', _('Print the ID of each contribution')),
-                         ('showAbstract', _('Print abstract content of all contributions')),
+_CONTRIBUTION_CHOICES = [('showAbstract', _('Print abstract content of all contributions')),
                          ('dontShowPosterAbstract', _('Do not print the abstract content for poster sessions')),
                          ('showLengthContribs', _('Include length of the contributions'))]
 _SESSION_CHOICES = [('newPagePerSession', _('Print each session on a separate page')),
-                    ('useSessionColorCodes', _('Use session color codes')),
                     ('showSessionDescription', _('Include session description')),
                     ('printDateCloseToSessions', _('Print the start date close to session title'))]
 _VISIBLE_ENTRIES_CHOICES = [('showContribsAtConfLevel', _('Include top-level contributions')),
@@ -174,42 +160,22 @@ _OTHER_CHOICES = [('showSpeakerTitle', _('Show speaker title')),
 
 
 class TimetablePDFExportForm(IndicoForm):
-    _pdf_options_fields = {'pagesize', 'firstPageNumber'}
-
-    advanced = BooleanField(_("Advanced timetable"), widget=SwitchWidget(),
-                            description=_("Advanced customization options"))
-    document_settings = IndicoSelectMultipleCheckboxBooleanField(_('Document settings'), [HiddenUnless('advanced')],
+    document_settings = IndicoSelectMultipleCheckboxBooleanField(_('Document settings'),
                                                                  choices=_DOCUMENT_SETTINGS_CHOICES)
-    contribution_info = IndicoSelectMultipleCheckboxBooleanField(_('Contributions related info'),
-                                                                 [HiddenUnless('advanced')],
+    contribution_info = IndicoSelectMultipleCheckboxBooleanField(_('Contributions'),
                                                                  choices=_CONTRIBUTION_CHOICES)
-    session_info = IndicoSelectMultipleCheckboxBooleanField(_('Sessions related info'), [HiddenUnless('advanced')],
+    session_info = IndicoSelectMultipleCheckboxBooleanField(_('Sessions'),
                                                             choices=_SESSION_CHOICES)
-    visible_entries = IndicoSelectMultipleCheckboxBooleanField(_('Breaks and contributions'),
-                                                               [HiddenUnless('advanced')],
+    visible_entries = IndicoSelectMultipleCheckboxBooleanField(_('Top-level items'),
                                                                choices=_VISIBLE_ENTRIES_CHOICES)
     other = IndicoSelectMultipleCheckboxBooleanField(_('Miscellaneous'), choices=_OTHER_CHOICES)
-    pagesize = SelectField(_('Page size'), choices=[('A0', 'A0'), ('A1', 'A1'), ('A2', 'A2'), ('A3', 'A3'),
-                                                    ('A4', 'A4'), ('A5', 'A5'), ('Letter', 'Letter')], default='A4')
-    firstPageNumber = IntegerField(_('Number for the first page'), [NumberRange(min=1)], default=1,
-                                   widget=NumberInput(step=1))
     submitted = HiddenField()
 
     def is_submitted(self):
         return 'submitted' in request.args
 
-    @property
-    def data_for_format(self):
-        if not self.advanced.data:
-            fields = ('visible_entries',)
-        else:
-            fields = set(get_form_field_names(TimetablePDFExportForm)) - self._pdf_options_fields - {'csrf_token',
-                                                                                                     'advanced'}
-        data = {}
-        for fieldname in fields:
-            data.update(getattr(self, fieldname).data)
-        return data
-
 
 class ImportContributionsForm(IndicoForm):
-    source_file = FileField(_("Source File"), [DataRequired()], accepted_file_types='.csv')
+    source_file = FileField(_('Source File'), [DataRequired(_('You need to upload a CSV file.'))],
+                            accepted_file_types='.csv')
+    delimiter = IndicoEnumSelectField(_('CSV field delimiter'), enum=CSVFieldDelimiter, default=CSVFieldDelimiter.comma)

@@ -5,7 +5,7 @@
 {% macro invisible_field(field) -%}
     {% set field_value = field._value() if field._value else field.data %}
     {% set data = [field_value] if field_value is string else ([field_value|tojson] if field_value is mapping else field_value) %}
-    {% for value in data %}
+    {% for value in data if field.short_name != 'refresh_users' or field.data %}
         <input type="hidden" name="{{ field.name }}" value="{{ value | forceescape }}">
     {% endfor %}
 {%- endmacro %}
@@ -88,12 +88,9 @@
                     {{ invisible_fields(form, skip=visible_fields) }}
                     {% if form.repeatability.data != 'once' %}
                         {% call message_box('info', fixed_width=true, id='event-count') -%}
-                            {% set count %}
-                                <span class="count"></span>
-                            {% endset %}
+                            <span class="count-text"></span>
                             {% trans link='<a class="event-list">'|safe, endlink='</a>'|safe,
                                      lastday='<span class="last-day">'|safe, endlastday='</span>'|safe -%}
-                                {{ count }} new events will be created.
                                 {{ lastday -}}
                                     <strong>All cloned events will occur on the last day of the month.</strong>
                                 {{- endlastday }}

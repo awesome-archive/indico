@@ -1,46 +1,44 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from io import BytesIO
 
-from flask import jsonify, request, session
+from flask import jsonify, redirect, request, session
 from sqlalchemy.orm import joinedload, load_only
 from werkzeug.exceptions import Forbidden, NotFound
 
+from indico.core.config import config
 from indico.core.db import db
-from indico.legacy.pdfinterface.conference import ContribsToPDF, ContribToPDF
+from indico.legacy.pdfinterface.latex import ContribsToPDF, ContribToPDF, generate_cached_pdf
 from indico.modules.events.abstracts.util import filter_field_values
+from indico.modules.events.contributions import contribution_settings
+from indico.modules.events.contributions.ical import contribution_to_ical
 from indico.modules.events.contributions.lists import ContributionDisplayListGenerator
 from indico.modules.events.contributions.models.contributions import Contribution
 from indico.modules.events.contributions.models.persons import AuthorType, ContributionPersonLink
 from indico.modules.events.contributions.models.subcontributions import SubContribution
-from indico.modules.events.contributions.util import (get_contribution_ical_file,
-                                                      get_contributions_with_user_as_submitter)
-from indico.modules.events.contributions.views import WPAuthorList, WPContributions, WPMyContributions, WPSpeakerList
+from indico.modules.events.contributions.util import has_contributions_with_user_as_submitter
+from indico.modules.events.contributions.views import (WPAuthorList, WPContributions, WPMyContributions, WPMyTimetable,
+                                                       WPSpeakerList)
 from indico.modules.events.controllers.base import RHDisplayEventBase
 from indico.modules.events.layout.util import is_menu_entry_enabled
+from indico.modules.events.models.events import EventType
 from indico.modules.events.models.persons import EventPerson
-from indico.modules.events.util import get_base_ical_parameters
-from indico.web.flask.util import jsonify_data, send_file
-from indico.web.rh import RH
+from indico.util.i18n import _
+from indico.web.flask.util import jsonify_data, send_file, url_for
+from indico.web.rh import RH, allow_signed_url
 from indico.web.util import jsonify_template
 
 
 def _get_persons(event, condition):
-    """Queries event persons linked to contributions in the event, filtered using the condition provided."""
+    """
+    Query event persons linked to contributions in the event,
+    filtered using the condition provided.
+    """
     return (event.persons.filter(EventPerson.contribution_links.any(
             db.and_(condition,
                     ContributionPersonLink.contribution.has(~Contribution.is_deleted))))
@@ -53,31 +51,63 @@ def _author_page_active(event):
 
 
 class RHContributionDisplayBase(RHDisplayEventBase):
+    """Base class for contribution-related endpoints.
+
+    This requires the user to have access to see the contribution, but not necessarily
+    to be logged in.
+    """
+
     normalize_url_spec = {
         'locators': {
             lambda self: self.contrib
         }
     }
 
+    def _can_view_unpublished(self):
+        return (self.event.can_manage(session.user, permission='contributions') or
+                self.contrib.is_user_associated(session.user))
+
     def _check_access(self):
-        RHDisplayEventBase._check_access(self)
         if not self.contrib.can_access(session.user):
+            # perform event access check since it may send the user to the access key or registration page
+            RHDisplayEventBase._check_access(self)
             raise Forbidden
+        published = contribution_settings.get(self.event, 'published')
+        if not published and not self._can_view_unpublished():
+            raise NotFound(_('The contributions of this event have not been published yet.'))
 
     def _process_args(self):
         RHDisplayEventBase._process_args(self)
-        self.contrib = Contribution.get_one(request.view_args['contrib_id'], is_deleted=False)
+        self.contrib = Contribution.get_or_404(request.view_args['contrib_id'], is_deleted=False)
+
+
+class RHAuthenticatedContributionDisplayBase(RHContributionDisplayBase):
+    """Base class for contribution-related endpoints that require the user to be logged in.
+
+    Like :class:`RHContributionDisplayBase this requires the user to have access to see
+    the contribution, but they also need to be authenticated.
+    """
+
+    def _check_access(self):
+        RHContributionDisplayBase._check_access(self)
+        if not session.user:
+            raise Forbidden
 
 
 class RHDisplayProtectionBase(RHDisplayEventBase):
     def _check_access(self):
         RHDisplayEventBase._check_access(self)
+        published = contribution_settings.get(self.event, 'published')
+        can_manage = self.event.can_manage(session.user, permission='contributions')
+        if not published and not can_manage and not has_contributions_with_user_as_submitter(self.event, session.user):
+            raise NotFound(_('The contributions of this event have not been published yet.'))
+
         if not is_menu_entry_enabled(self.MENU_ENTRY_NAME, self.event):
             self._forbidden_if_not_admin()
 
 
 class RHMyContributions(RHDisplayProtectionBase):
-    """Display list of current user contributions"""
+    """Display list of current user contributions."""
 
     MENU_ENTRY_NAME = 'my_contributions'
 
@@ -87,13 +117,25 @@ class RHMyContributions(RHDisplayProtectionBase):
             raise Forbidden
 
     def _process(self):
-        contributions = get_contributions_with_user_as_submitter(self.event, session.user)
-        return WPMyContributions.render_template('display/user_contribution_list.html', self.event,
-                                                 contributions=contributions)
+        return WPMyContributions.render_template('display/user_contribution_list.html', self.event)
+
+
+class RHMyTimetable(RHDisplayProtectionBase):
+    """Display list of contributions added to the user's timetable."""
+
+    MENU_ENTRY_NAME = 'my_timetable'
+
+    def _check_access(self):
+        RHDisplayProtectionBase._check_access(self)
+        if not session.user:
+            raise Forbidden
+
+    def _process(self):
+        return WPMyTimetable.render_template('display/user_timetable.html', self.event)
 
 
 class RHContributionList(RHDisplayProtectionBase):
-    """Display list of event contributions"""
+    """Display list of event contributions."""
 
     MENU_ENTRY_NAME = 'contributions'
     view_class = WPContributions
@@ -105,17 +147,16 @@ class RHContributionList(RHDisplayProtectionBase):
     def _process(self):
         return self.view_class.render_template('display/contribution_list.html', self.event,
                                                timezone=self.event.display_tzinfo,
+                                               published=contribution_settings.get(self.event, 'published'),
                                                **self.list_generator.get_list_kwargs())
 
 
 class RHContributionDisplay(RHContributionDisplayBase):
-    """Display page with contribution details """
+    """Display page with contribution details."""
 
     view_class = WPContributions
 
     def _process(self):
-        ical_params = get_base_ical_parameters(session.user, 'contributions',
-                                               '/export/event/{0}.ics'.format(self.event.id))
         contrib = (Contribution.query
                    .filter_by(id=self.contrib.id)
                    .options(joinedload('type'),
@@ -123,15 +164,32 @@ class RHContributionDisplay(RHContributionDisplayBase):
                             joinedload('subcontributions'),
                             joinedload('timetable_entry').lazyload('*'))
                    .one())
-        can_manage = self.event.can_manage(session.user)
+        if self.event.type_ == EventType.meeting:
+            return redirect(url_for('events.display', self.event, _anchor=contrib.slug))
+        can_manage = self.event.can_manage(session.user, permission='contributions')
         owns_abstract = contrib.abstract.user_owns(session.user) if contrib.abstract else None
         field_values = filter_field_values(contrib.field_values, can_manage, owns_abstract)
+        is_favorite = session.user is not None and contrib in session.user.favorite_contributions
         return self.view_class.render_template('display/contribution_display.html', self.event,
                                                contribution=contrib,
                                                show_author_link=_author_page_active(self.event),
                                                field_values=field_values,
                                                page_title=contrib.title,
-                                               **ical_params)
+                                               published=contribution_settings.get(self.event, 'published'),
+                                               favorite=is_favorite)
+
+
+class RHContributionJSON(RHContributionDisplayBase):
+    """Return JSON data for a contribution."""
+
+    def _process(self):
+        from indico.modules.events.contributions.schemas import FullContributionSchema
+        can_manage = self.contrib.can_manage(session.user)
+        return FullContributionSchema(context={
+            'hide_restricted_data': not can_manage,
+            'user_can_manage': can_manage,
+            'user_owns_abstract': self.contrib.abstract.user_owns(session.user) if self.contrib.abstract else None,
+        }).jsonify(self.contrib)
 
 
 class RHAuthorList(RHDisplayProtectionBase):
@@ -153,7 +211,7 @@ class RHSpeakerList(RHDisplayProtectionBase):
 
 
 class RHContributionAuthor(RHContributionDisplayBase):
-    """Display info about an author"""
+    """Display info about an author."""
 
     normalize_url_spec = {
         'locators': {
@@ -168,16 +226,19 @@ class RHContributionAuthor(RHContributionDisplayBase):
 
     def _process_args(self):
         RHContributionDisplayBase._process_args(self)
-        self.author = (ContributionPersonLink.find_one(ContributionPersonLink.author_type != AuthorType.none,
-                                                       id=request.view_args['person_id'],
-                                                       contribution=self.contrib))
+        self.author = (ContributionPersonLink.query
+                       .filter(ContributionPersonLink.author_type != AuthorType.none,
+                               ContributionPersonLink.id == request.view_args['person_id'],
+                               ContributionPersonLink.contribution == self.contrib)
+                       .one())
 
     def _process(self):
+        # Show all contributions for the same person in the event
         author_contribs = (Contribution.query.with_parent(self.event)
                            .join(ContributionPersonLink)
                            .options(joinedload('event'))
                            .options(load_only('id', 'title'))
-                           .filter(ContributionPersonLink.id == self.author.id,
+                           .filter(ContributionPersonLink.person_id == self.author.person_id,
                                    ContributionPersonLink.author_type != AuthorType.none)
                            .all())
         return WPContributions.render_template('display/contribution_author.html', self.event,
@@ -186,36 +247,50 @@ class RHContributionAuthor(RHContributionDisplayBase):
 
 class RHContributionExportToPDF(RHContributionDisplayBase):
     def _process(self):
-        pdf = ContribToPDF(self.contrib)
-        return send_file('contribution.pdf', pdf.generate(), 'application/pdf')
+        if not config.LATEX_ENABLED:
+            raise NotFound
+        data = generate_cached_pdf(lambda c: ContribToPDF(c).generate(as_bytes=True), 'contrib', self.contrib)
+        return send_file('contribution.pdf', data, 'application/pdf')
 
 
 class RHContributionsExportToPDF(RHContributionList):
     def _process(self):
+        if not config.LATEX_ENABLED:
+            raise NotFound
         contribs = self.list_generator.get_list_kwargs()['contribs']
-        pdf = ContribsToPDF(self.event, contribs)
-        return send_file('contributions.pdf', pdf.generate(), 'application/pdf')
+        data = generate_cached_pdf(
+            lambda: ContribsToPDF(self.event, contribs).generate(as_bytes=True),
+            ('contribs', '-'.join(sorted(str(c.id) for c in contribs))),
+        )
+        return send_file('contributions.pdf', data, 'application/pdf')
 
 
+@allow_signed_url
 class RHContributionExportToICAL(RHContributionDisplayBase):
-    """Export contribution to ICS"""
+    """Export contribution to ICS."""
 
     def _process(self):
         if not self.contrib.is_scheduled:
             raise NotFound('This contribution is not scheduled')
-        return send_file('contribution.ics', get_contribution_ical_file(self.contrib), 'text/calendar')
+        return send_file('contribution.ics', BytesIO(contribution_to_ical(self.contrib)), 'text/calendar')
 
 
 class RHContributionListFilter(RHContributionList):
-    """Display dialog with filters"""
+    """Display dialog with filters."""
 
     def _process(self):
         return RH._process(self)
 
     def _process_GET(self):
+        list_config = self.list_generator._get_config()
         return jsonify_template('events/contributions/contrib_list_filter.html',
+                                visible_items=list_config.get('items', ()),
                                 filters=self.list_generator.list_config['filters'],
-                                static_items=self.list_generator.static_items)
+                                static_items=self.list_generator.static_items,
+                                contrib_fields=[],
+                                extra_filters=self.list_generator.extra_filters,
+                                has_types=self.event.contribution_types.has_rows(),
+                                management=False)
 
     def _process_POST(self):
         self.list_generator.store_configuration()
@@ -223,7 +298,7 @@ class RHContributionListFilter(RHContributionList):
 
 
 class RHContributionListDisplayStaticURL(RHContributionList):
-    """Generate static URL for the current set of filters"""
+    """Generate static URL for the current set of filters."""
 
     def _process(self):
         return jsonify(url=self.list_generator.generate_static_url())
@@ -238,14 +313,21 @@ class RHSubcontributionDisplay(RHDisplayEventBase):
     view_class = WPContributions
 
     def _check_access(self):
-        RHDisplayEventBase._check_access(self)
         if not self.subcontrib.can_access(session.user):
+            # perform event access check since it may send the user to the access key or registration page
+            RHDisplayEventBase._check_access(self)
             raise Forbidden
+        published = contribution_settings.get(self.event, 'published')
+        if (not published and not self.event.can_manage(session.user, permission='contributions')
+                and not self.subcontrib.is_user_associated(session.user)):
+            raise NotFound(_('The contributions of this event have not been published yet.'))
 
     def _process_args(self):
         RHDisplayEventBase._process_args(self)
-        self.subcontrib = SubContribution.get_one(request.view_args['subcontrib_id'], is_deleted=False)
+        self.subcontrib = SubContribution.get_or_404(request.view_args['subcontrib_id'], is_deleted=False)
 
     def _process(self):
+        if self.event.type_ == EventType.meeting:
+            return redirect(url_for('events.display', self.event, _anchor=self.subcontrib.slug))
         return self.view_class.render_template('display/subcontribution_display.html', self.event,
                                                subcontrib=self.subcontrib)

@@ -1,34 +1,24 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
 import pytest
 
 from indico.modules.events.contributions.models.contributions import Contribution
+from indico.modules.events.contributions.models.subcontributions import SubContribution
 
 
 @pytest.fixture
 def create_contribution(db):
-    """Returns a a callable that lets you create a contribution"""
+    """Return a callable that lets you create a contribution."""
 
-    def _create_contribution(event, title, duration):
-        entry = Contribution(event=event, title=title, duration=duration)
+    def _create_contribution(event, title, duration=timedelta(minutes=20), **kwargs):
+        entry = Contribution(event=event, title=title, duration=duration, **kwargs)
         db.session.add(entry)
         db.session.flush()
         return entry
@@ -38,4 +28,22 @@ def create_contribution(db):
 
 @pytest.fixture
 def dummy_contribution(create_contribution, dummy_event):
-    return create_contribution(dummy_event, "Dummy Contribution", timedelta(minutes=20))
+    return create_contribution(dummy_event, 'Dummy Contribution', id=420)
+
+
+@pytest.fixture
+def create_subcontribution(db):
+    """Return a callable that lets you create a subcontribution."""
+    def _create_subcontribution(contribution, title, duration=timedelta(minutes=10), **kwargs):
+        entry = SubContribution(contribution=contribution, title=title, duration=duration, **kwargs)
+        db.session.add(entry)
+        db.session.flush()
+        return entry
+
+    return _create_subcontribution
+
+
+@pytest.fixture
+def dummy_subcontribution(dummy_contribution, create_subcontribution):
+    """Create a dummy subcontribution."""
+    return create_subcontribution(dummy_contribution, 'Dummy SubContribution', id=420)

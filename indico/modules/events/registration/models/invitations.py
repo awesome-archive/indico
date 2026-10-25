@@ -1,45 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+import uuid
 from uuid import uuid4
 
 from sqlalchemy.dialects.postgresql import UUID
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
-from indico.util.i18n import L_
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import pgettext
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
-from indico.util.struct.enum import RichIntEnum
+from indico.util.string import format_repr
 
 
 class InvitationState(RichIntEnum):
-    __titles__ = [L_('Pending'), L_('Accepted'), L_('Declined')]
+    __titles__ = [pgettext('Invitation', 'Pending'), pgettext('Invitation', 'Accepted'),
+                  pgettext('Invitation', 'Declined')]
     pending = 0
     accepted = 1
     declined = 2
 
 
 class RegistrationInvitation(db.Model):
-    """An invitation for someone to register"""
+    """An invitation for someone to register."""
+
     __tablename__ = 'invitations'
-    __table_args__ = (db.CheckConstraint("(state = {state}) OR (registration_id IS NULL)"
-                                         .format(state=InvitationState.accepted), name='registration_state'),
+    __table_args__ = (db.CheckConstraint(f'(state = {InvitationState.accepted}) OR (registration_id IS NULL)',
+                                         name='registration_state'),
                       db.UniqueConstraint('registration_form_id', 'email'),
                       {'schema': 'event_registration'})
 
@@ -54,7 +46,7 @@ class RegistrationInvitation(db.Model):
         index=True,
         unique=True,
         nullable=False,
-        default=lambda: unicode(uuid4())
+        default=lambda: str(uuid4())
     )
     #: The ID of the registration form
     registration_form_id = db.Column(
@@ -79,6 +71,18 @@ class RegistrationInvitation(db.Model):
     )
     #: Whether registration moderation should be skipped
     skip_moderation = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False
+    )
+    #: Whether the event access check should be skipped
+    skip_access_check = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False
+    )
+    #: Whether the email address is bound to the invitation
+    lock_email = db.Column(
         db.Boolean,
         nullable=False,
         default=False
@@ -126,12 +130,31 @@ class RegistrationInvitation(db.Model):
     def locator(self):
         """A locator suitable for 'display' pages.
 
-        Instead of the numeric ID it uses the UUID
+        Instead of the numeric ID it uses the UUID.
         """
         assert self.uuid is not None
         return dict(self.registration_form.locator, invitation=self.uuid)
 
-    @return_ascii
     def __repr__(self):
-        full_name = '{} {}'.format(self.first_name, self.last_name)
+        full_name = f'{self.first_name} {self.last_name}'
         return format_repr(self, 'id', 'registration_form_id', 'email', 'state', _text=full_name)
+
+
+class MockRegistrationInvitation:
+    """Mock invitation class for email previews."""
+
+    def __init__(self, regform, first_name, last_name):
+        self.registration_form = regform
+        self.first_name = first_name
+        self.last_name = last_name
+        self.email = ''
+        self.affiliation = ''
+        self.uuid = uuid.UUID(int=0)
+
+    @locator_property
+    def locator(self):
+        raise NotImplementedError
+
+    @locator.uuid
+    def locator(self):
+        return dict(self.registration_form.locator, invitation=self.uuid)

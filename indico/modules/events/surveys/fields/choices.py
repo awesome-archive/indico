@@ -1,23 +1,12 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import division, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter
 from copy import deepcopy
 
 from indico.modules.events.surveys.fields.base import SurveyField
@@ -26,14 +15,14 @@ from indico.util.string import alpha_enum
 from indico.web.fields.choices import MultiSelectField, SingleChoiceField
 
 
-class _AddUUIDMixin(object):
+class _AddUUIDMixin:
     @staticmethod
     def process_imported_data(data):
-        """Generate the options' IDs"""
+        """Generate the options' IDs."""
         data = deepcopy(data)
         if 'options' in data:
             for option in data['options']:
-                option['id'] = unicode(uuid.uuid4())
+                option['id'] = str(uuid.uuid4())
         return data
 
 
@@ -42,15 +31,15 @@ class SurveySingleChoiceField(_AddUUIDMixin, SingleChoiceField, SurveyField):
         counter = Counter()
         for answer in self.object.answers:
             counter[answer.data] += 1
-        total = sum(counter.values())
+        total = len(self.object.answers)
         options = self.object.field_data['options']
         if counter[None]:
-            no_option = {'id': None, 'option': _("No selection")}
+            no_option = {'id': None, 'option': _('No selection')}
             options.append(no_option)
         return {'total': total,
-                'labels': [alpha_enum(val).upper() for val in xrange(len(options))],
-                'absolute': OrderedDict((opt['option'], counter[opt['id']]) for opt in options),
-                'relative': OrderedDict((opt['option'], counter[opt['id']] / total) for opt in options)}
+                'labels': [alpha_enum(val).upper() for val in range(len(options))],
+                'absolute': {opt['option']: counter[opt['id']] for opt in options},
+                'relative': {opt['option']: counter[opt['id']] / total for opt in options}}
 
 
 class SurveyMultiSelectField(_AddUUIDMixin, MultiSelectField, SurveyField):
@@ -58,9 +47,9 @@ class SurveyMultiSelectField(_AddUUIDMixin, MultiSelectField, SurveyField):
         counter = Counter()
         for answer in self.object.answers:
             counter.update(answer.data)
-        total = sum(counter.values())
+        total = len(self.object.answers)
         options = self.object.field_data['options']
         return {'total': total,
-                'labels': [alpha_enum(val).upper() for val in xrange(len(options))],
-                'absolute': OrderedDict((opt['option'], counter[opt['id']]) for opt in options),
-                'relative': OrderedDict((opt['option'], counter[opt['id']] / total if total else 0) for opt in options)}
+                'labels': [alpha_enum(val).upper() for val in range(len(options))],
+                'absolute': {opt['option']: counter[opt['id']] for opt in options},
+                'relative': {opt['option']: counter[opt['id']] / total if total else 0 for opt in options}}

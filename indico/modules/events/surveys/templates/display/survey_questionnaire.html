@@ -14,14 +14,13 @@
 {% endblock %}
 
 {% block description %}
-    {{ survey.introduction }}
+    {{ survey.introduction | markdown }}
 {% endblock %}
 
 {% block content %}
     {{ form_header(form, id='survey-questionnaire', orientation='vertical') }}
     {% for section in survey.sections if section.children %}
-        {% call form_fieldset(section.title, section.description|replace('\n', '<br>'|safe),
-                              render_as_fieldset=section.display_as_section) %}
+        {% call form_fieldset(section.title, section.description, render_as_fieldset=section.display_as_section) %}
             {% for item in section.children %}
                 {% if item.type.name == 'question' %}
                     {{ form_row(form['question_{}'.format(item.id)]) }}
@@ -35,14 +34,14 @@
     {% endfor %}
     {% call form_footer(form) %}
         {% if partial_completion and session.user %}
-            <a class="i-button big js-save-answers"
-               data-href="{{ url_for('.display_save_answers', survey.locator.token) }}"
-               data-method="POST"
-               data-params-selector="#survey-questionnaire input[name^=question_]:checked,
-                                     #survey-questionnaire [name^=question_]:not(:radio):not(:checkbox)"
-               data-ajax>
+            <button class="i-button big js-save-answers"
+                    data-href="{{ url_for('.display_save_answers', survey.locator.token) }}"
+                    data-method="POST"
+                    data-params-selector="#survey-questionnaire input[name^=question_]:checked,
+                                            #survey-questionnaire [name^=question_]:not(:radio):not(:checkbox)"
+                    data-ajax>
                 {%- trans %}Save answers{% endtrans -%}
-            </a>
+            </button>
         {% endif %}
         <input class="i-button big highlight" type="submit" value="{% trans %}Submit{% endtrans %}">
         {% if back_button_endpoint is not none %}

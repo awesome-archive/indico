@@ -1,22 +1,12 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from markupsafe import Markup, escape
+from flask import request
+from markupsafe import Markup
 
 from indico.modules.events.registration.models.items import PersonalDataType
 from indico.util.i18n import _
@@ -26,7 +16,7 @@ from indico.web.flask.util import url_for
 
 class FirstNamePlaceholder(Placeholder):
     name = 'first_name'
-    description = _("First name of the person")
+    description = _('First name of the person')
 
     @classmethod
     def render(cls, regform, registration):
@@ -35,36 +25,65 @@ class FirstNamePlaceholder(Placeholder):
 
 class LastNamePlaceholder(Placeholder):
     name = 'last_name'
-    description = _("Last name of the person")
+    description = _('Last name of the person')
 
     @classmethod
     def render(cls, regform, registration):
         return registration.last_name
 
 
+class PicturePlaceholder(Placeholder):
+    name = 'picture'
+    description = _('Picture of the person')
+    max_size = '250px'
+
+    @classmethod
+    def render(cls, regform, registration):
+        if not (picture_data := registration.get_personal_data_picture()):
+            return ''
+        style = ' '.join([
+            f'max-height: {cls.max_size};',
+            f'max-width: {cls.max_size};',
+            'white-space: normal;',
+            'padding-bottom: 10px;',
+            'object-fit: cover;',
+        ])
+        if request.endpoint == 'event_registration.email_registrants_preview':
+            url = url_for('event_registration.manage_registration_file', picture_data.locator.file)
+        else:
+            url = f'cid:{picture_data.attachment_cid}'
+        return Markup('<img alt="Registrant picture" src="{url}" style="{style}">').format(url=url, style=style)
+
+
 class EventTitlePlaceholder(Placeholder):
     name = 'event_title'
-    description = _("The title of the event")
+    description = _('The title of the event')
 
     @classmethod
     def render(cls, regform, registration):
         return registration.registration_form.event.title
 
 
-class EventLinkPlaceholder(Placeholder):
+class EventLinkPlaceholder(ParametrizedPlaceholder):
     name = 'event_link'
-    description = _("Link to the event")
+    param_friendly_name = 'link title'
 
     @classmethod
-    def render(cls, regform, registration):
-        regform = registration.registration_form
-        return Markup('<a href="{url}" title="{title}">{url}</a>'.format(url=regform.event.short_external_url,
-                                                                         title=escape(regform.event.title)))
+    def render(cls, param, regform, registration):
+        event = registration.registration_form.event
+        return Markup('<a href="{url}" title="{title}">{text}</a>').format(url=event.short_external_url,
+                                                                           title=event.title,
+                                                                           text=(param or event.short_external_url))
+
+    @classmethod
+    def iter_param_info(cls, **kwargs):
+        yield None, _('Link to the event')
+        yield 'custom-text', _('Custom link text instead of the full URL')
 
 
 class IDPlaceholder(Placeholder):
     name = 'id'
-    description = _("The ID of the registration")
+    description = _('The ID of the registration')
 
     @classmethod
     def render(cls, regform, registration):
@@ -73,12 +92,22 @@ class IDPlaceholder(Placeholder):
 
 class LinkPlaceholder(Placeholder):
     name = 'link'
-    description = _("The link to the registration details")
+    description = _('The link to the registration details')
 
     @classmethod
     def render(cls, regform, registration):
-        url = url_for('.display_regform', registration.registration_form, token=registration.uuid, _external=True)
-        return Markup('<a href="{url}">{url}</a>'.format(url=url))
+        url = url_for('event_registration.display_regform', registration.registration_form, token=registration.uuid,
+                      _external=True)
+        return Markup('<a href="{url}">{url}</a>').format(url=url)
+
+
+class RejectionReasonPlaceholder(Placeholder):
+    name = 'rejection_reason'
+    description = _('The reason why the registration was rejected')
+
+    @classmethod
+    def render(cls, regform, registration):
+        return registration.rejection_reason
 
 
 class FieldPlaceholder(ParametrizedPlaceholder):
@@ -105,10 +134,11 @@ class FieldPlaceholder(ParametrizedPlaceholder):
 
     @classmethod
     def iter_param_info(cls, regform, registration):
-        own_placeholder_types = {PersonalDataType.email, PersonalDataType.first_name, PersonalDataType.last_name}
+        own_placeholder_types = {PersonalDataType.email, PersonalDataType.first_name, PersonalDataType.last_name,
+                                 PersonalDataType.picture}
         for field in sorted(regform.active_fields, key=lambda x: (x.parent.position, x.position)):
             if field.personal_data_type in own_placeholder_types:
                 continue
             for key, description in field.field_impl.iter_placeholder_info():
-                name = unicode(field.id) if key is None else '{}:{}'.format(field.id, key)
+                name = str(field.id) if key is None else f'{field.id}:{key}'
                 yield name, description

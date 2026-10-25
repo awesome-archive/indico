@@ -1,31 +1,20 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import render_template
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
 from indico.core.db.sqlalchemy.custom.utcdatetime import UTCDateTime
 from indico.core.logger import Logger
 from indico.util.date_time import now_utc
-from indico.util.string import format_repr, return_ascii
-from indico.util.struct.enum import IndicoEnum
+from indico.util.enum import IndicoIntEnum
+from indico.util.string import format_repr
 
 
 class InvalidTransactionStatus(Exception):
@@ -48,14 +37,14 @@ class DoublePaymentTransaction(Exception):
     pass
 
 
-class TransactionAction(int, IndicoEnum):
+class TransactionAction(IndicoIntEnum):
     complete = 1
     cancel = 2
     pending = 3
     reject = 4
 
 
-class TransactionStatus(int, IndicoEnum):
+class TransactionStatus(IndicoIntEnum):
     #: payment attempt succeeded
     successful = 1
     #: payment cancelled manually
@@ -68,8 +57,7 @@ class TransactionStatus(int, IndicoEnum):
     rejected = 5
 
 
-class TransactionStatusTransition(object):
-
+class TransactionStatusTransition:
     initial_statuses = [TransactionStatus.cancelled, TransactionStatus.failed, TransactionStatus.rejected]
 
     @classmethod
@@ -82,7 +70,7 @@ class TransactionStatusTransition(object):
         elif transaction.status == TransactionStatus.pending:
             return cls._next_from_pending(action, manual)
         else:
-            raise InvalidTransactionStatus("Invalid transaction status code '{}'".format(transaction.status))
+            raise InvalidTransactionStatus(f"Invalid transaction status code '{transaction.status}'")
 
     @staticmethod
     def _next_from_initial(action, manual=False):
@@ -90,7 +78,7 @@ class TransactionStatusTransition(object):
             if action == TransactionAction.complete:
                 return TransactionStatus.successful
             elif action == TransactionAction.cancel:
-                raise IgnoredTransactionAction("Ignored cancel action on initial status")
+                raise IgnoredTransactionAction('Ignored cancel action on initial status')
             else:
                 raise InvalidManualTransactionAction(action)
         elif action == TransactionAction.complete:
@@ -98,7 +86,7 @@ class TransactionStatusTransition(object):
         elif action == TransactionAction.pending:
             return TransactionStatus.pending
         elif action == TransactionAction.reject:
-            raise IgnoredTransactionAction("Ignored reject action on initial status")
+            raise IgnoredTransactionAction('Ignored reject action on initial status')
         else:
             raise InvalidTransactionAction(action)
 
@@ -106,7 +94,7 @@ class TransactionStatusTransition(object):
     def _next_from_successful(action, manual=False):
         if manual:
             if action == TransactionAction.complete:
-                raise IgnoredTransactionAction("Ignored complete action on successful status")
+                raise IgnoredTransactionAction('Ignored complete action on successful status')
             elif action == TransactionAction.cancel:
                 return TransactionStatus.cancelled
             else:
@@ -114,9 +102,9 @@ class TransactionStatusTransition(object):
         elif action == TransactionAction.complete:
             raise DoublePaymentTransaction
         elif action == TransactionAction.pending:
-            raise IgnoredTransactionAction("Ignored pending action on successful status")
+            raise IgnoredTransactionAction('Ignored pending action on successful status')
         elif action == TransactionAction.reject:
-            raise IgnoredTransactionAction("Ignored reject action on successful status")
+            raise IgnoredTransactionAction('Ignored reject action on successful status')
         else:
             raise InvalidTransactionAction(action)
 
@@ -124,7 +112,7 @@ class TransactionStatusTransition(object):
     def _next_from_pending(action, manual=False):
         if manual:
             if action == TransactionAction.complete:
-                raise IgnoredTransactionAction("Ignored complete action on pending status")
+                raise IgnoredTransactionAction('Ignored complete action on pending status')
             elif action == TransactionAction.cancel:
                 return TransactionStatus.cancelled
             else:
@@ -132,7 +120,7 @@ class TransactionStatusTransition(object):
         elif action == TransactionAction.complete:
             return TransactionStatus.successful
         elif action == TransactionAction.pending:
-            raise IgnoredTransactionAction("Ignored pending action on pending status")
+            raise IgnoredTransactionAction('Ignored pending action on pending status')
         elif action == TransactionAction.reject:
             return TransactionStatus.rejected
         else:
@@ -140,7 +128,8 @@ class TransactionStatusTransition(object):
 
 
 class PaymentTransaction(db.Model):
-    """Payment transactions"""
+    """Payment transactions."""
+
     __tablename__ = 'payment_transactions'
     __table_args__ = (db.CheckConstraint('amount > 0', 'positive_amount'),
                       {'schema': 'events'})
@@ -164,7 +153,7 @@ class PaymentTransaction(db.Model):
     )
     #: the base amount the user needs to pay (without payment-specific fees)
     amount = db.Column(
-        db.Numeric(8, 2),  # max. 999999.99
+        db.Numeric(11, 2),  # max. 999999999.99
         nullable=False
     )
     #: the currency of the payment (ISO string, e.g. EUR or USD)
@@ -186,7 +175,7 @@ class PaymentTransaction(db.Model):
     )
     #: plugin-specific data of the payment
     data = db.Column(
-        JSON,
+        JSONB,
         nullable=False
     )
 
@@ -211,21 +200,28 @@ class PaymentTransaction(db.Model):
     def is_manual(self):
         return self.provider == '_manual'
 
-    @return_ascii
     def __repr__(self):
         # in case of a new object we might not have the default status set
         status = TransactionStatus(self.status).name if self.status is not None else None
         return format_repr(self, 'id', 'registration_id', 'provider', 'amount', 'currency', 'timestamp', status=status)
 
     def render_details(self):
-        """Renders the transaction details"""
+        """Render the transaction details."""
         if self.is_manual:
-            return render_template('events/payment/transaction_details_manual.html', transaction=self)
+            return render_template('events/payment/transaction_details_manual.html', transaction=self, plugin=None)
         plugin = self.plugin
         if plugin is None:
-            return '[plugin not loaded: {}]'.format(self.provider)
+            return f'[plugin not loaded: {self.provider}]'
         with plugin.plugin_context():
             return plugin.render_transaction_details(self)
+
+    def is_pending_expired(self):
+        if self.is_manual:
+            return False
+        if (plugin := self.plugin) is None:
+            return False
+        with plugin.plugin_context():
+            return plugin.is_pending_transaction_expired(self)
 
     @classmethod
     def create_next(cls, registration, amount, currency, action, provider=None, data=None):
@@ -235,7 +231,7 @@ class PaymentTransaction(db.Model):
         try:
             next_status = TransactionStatusTransition.next(previous_transaction, action, provider)
         except InvalidTransactionStatus as e:
-            Logger.get('payment').exception("%s (data received: %r)", e, data)
+            Logger.get('payment').exception('%s (data received: %r)', e, data)
             return None
         except InvalidManualTransactionAction as e:
             Logger.get('payment').exception("Invalid manual action code '%s' on initial status (data received: %r)",
@@ -245,11 +241,11 @@ class PaymentTransaction(db.Model):
             Logger.get('payment').exception("Invalid action code '%s' on initial status (data received: %r)", e, data)
             return None
         except IgnoredTransactionAction as e:
-            Logger.get('payment').warning("%s (data received: %r)", e, data)
+            Logger.get('payment').warning('%s (data received: %r)', e, data)
             return None
         except DoublePaymentTransaction:
             next_status = TransactionStatus.successful
-            Logger.get('payment').info("Received successful payment for an already paid registration")
+            Logger.get('payment').info('Received successful payment for an already paid registration')
         registration.transaction = new_transaction
         new_transaction.status = next_status
         return new_transaction

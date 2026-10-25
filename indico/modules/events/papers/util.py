@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.orm import load_only, noload
 
@@ -22,32 +11,31 @@ from indico.core.db import db
 from indico.modules.events import Event
 from indico.modules.events.abstracts.models.abstracts import Abstract
 from indico.modules.events.contributions import Contribution
-from indico.modules.events.contributions.models.persons import ContributionPersonLink
+from indico.modules.events.contributions.models.principals import ContributionPrincipal
 from indico.modules.events.models.principals import EventPrincipal
+from indico.modules.events.papers.models.reviews import PaperReviewType
 from indico.modules.events.papers.models.revisions import PaperRevision, PaperRevisionState
 from indico.modules.users import User
+from indico.util.date_time import now_utc
 
 
 def _query_contributions_with_user_as_reviewer(event, user):
     query = Contribution.query.with_parent(event)
-    query = query.filter(db.or_(Contribution.paper_content_reviewers.any(User.id == user.id),
-                                Contribution.paper_layout_reviewers.any(User.id == user.id)),
-                         Contribution._paper_revisions.any())
-    return query
+    return query.filter(db.or_(Contribution.paper_content_reviewers.any(User.id == user.id),
+                               Contribution.paper_layout_reviewers.any(User.id == user.id)),
+                        Contribution._paper_revisions.any())
 
 
 def get_user_reviewed_contributions(event, user):
-    """Get the list of contributions where user already reviewed paper"""
+    """Get the list of contributions where user already reviewed paper."""
     contribs = _query_contributions_with_user_as_reviewer(event, user).all()
-    contribs = [contrib for contrib in contribs if contrib.paper.last_revision.has_user_reviewed(user)]
-    return contribs
+    return [contrib for contrib in contribs if contrib.paper.last_revision.has_user_reviewed(user)]
 
 
 def get_user_contributions_to_review(event, user):
-    """Get the list of contributions where user has paper to review"""
+    """Get the list of contributions where user has paper to review."""
     contribs = _query_contributions_with_user_as_reviewer(event, user).all()
-    contribs = [contrib for contrib in contribs if not contrib.paper.last_revision.has_user_reviewed(user)]
-    return contribs
+    return [contrib for contrib in contribs if not contrib.paper.last_revision.has_user_reviewed(user)]
 
 
 def get_events_with_paper_roles(user, dt=None):
@@ -77,8 +65,10 @@ def get_contributions_with_paper_submitted_by_user(event, user):
 
 
 def _query_contributions_with_user_paper_submission_rights(event, user):
-    criteria = [Contribution.person_links.any(ContributionPersonLink.person.has(user=user)),
-                Contribution.abstract.has(Abstract.submitter_id == user.id)]
+    criteria = [
+        Contribution.abstract.has(Abstract.submitter_id == user.id),
+        Contribution.acl_entries.any(db.and_(ContributionPrincipal.user == user,
+                                             ContributionPrincipal.has_management_permission('submit')))]
     return Contribution.query.with_parent(event).filter(db.or_(*criteria))
 
 
@@ -87,8 +77,19 @@ def has_contributions_with_user_paper_submission_rights(event, user):
 
 
 def get_user_submittable_contributions(event, user):
-    criteria = [Contribution._paper_last_revision == None,  # noqa
+    criteria = [Contribution._paper_last_revision == None,  # noqa: E711
                 Contribution._paper_last_revision.has(PaperRevision.state == PaperRevisionState.to_be_corrected)]
     return (_query_contributions_with_user_paper_submission_rights(event, user)
             .filter(db.or_(*criteria))
             .all())
+
+
+def is_type_reviewing_possible(cfp, review_type):
+    if review_type == PaperReviewType.content:
+        return (cfp.content_reviewing_enabled
+                and (not cfp.content_reviewer_deadline_enforced or cfp.content_reviewer_deadline > now_utc()))
+    elif review_type == PaperReviewType.layout:
+        return (cfp.layout_reviewing_enabled
+                and (not cfp.layout_reviewer_deadline_enforced or cfp.layout_reviewer_deadline > now_utc()))
+    else:
+        raise ValueError('invalid review type')

@@ -1,32 +1,26 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+import os
+import traceback
 
-from flask import current_app, jsonify, request, session
+import sentry_sdk
+from flask import current_app, g, jsonify, request, session
 from itsdangerous import BadData
+from marshmallow import ValidationError
 from sqlalchemy.exc import DatabaseError
 from werkzeug.exceptions import BadRequestKeyError, Forbidden, HTTPException, UnprocessableEntity
 
 from indico.core.errors import IndicoError, get_error_description
-from indico.core.logger import Logger, sentry_log_exception
+from indico.core.logger import Logger
 from indico.modules.auth.util import redirect_to_login
 from indico.util.i18n import _
-from indico.util.string import to_unicode
-from indico.web.errors import render_error
+from indico.util.network import InsecureRequestError
+from indico.web.errors import _need_json_response, render_error
 from indico.web.flask.wrappers import IndicoBlueprint
 from indico.web.util import ExpectedError
 
@@ -38,7 +32,8 @@ errors_bp = IndicoBlueprint('errors', __name__)
 def handle_forbidden(exc):
     if exc.response:
         return exc
-    if session.user is None and not request.is_xhr and request.blueprint != 'auth':
+    if (session.user is None and not _need_json_response() and request.blueprint != 'auth' and
+            not g.get('get_request_user_failed')):
         return redirect_to_login(reason=_('Please log in to access this page.'))
     return render_error(exc, _('Access Denied'), get_error_description(exc), exc.code)
 
@@ -48,6 +43,17 @@ def handle_expectederror(exc):
     response = jsonify(exc.data)
     response.status_code = 418
     return response
+
+
+@errors_bp.app_errorhandler(ValidationError)
+def handle_validationerror(exc):
+    # marshmallow validation failed outside webargs
+    if request.is_xhr or request.is_json:
+        # this error came from a webargs parsing failure
+        response = jsonify(webargs_errors=exc.messages)
+        response.status_code = 422
+        return response
+    return render_error(exc, _('Validation Error'), get_error_description(exc), 422)
 
 
 @errors_bp.app_errorhandler(UnprocessableEntity)
@@ -66,8 +72,8 @@ def handle_unprocessableentity(exc):
 @errors_bp.app_errorhandler(BadRequestKeyError)
 def handle_badrequestkeyerror(exc):
     if current_app.debug:
-        raise
-    msg = _('Required argument missing: {}').format(to_unicode(exc.message))
+        raise  # noqa: PLE0704
+    msg = _('Required argument missing: {}').format(str(exc))
     return render_error(exc, exc.name, msg, exc.code)
 
 
@@ -87,12 +93,12 @@ def handle_http_exception(exc):
 
 @errors_bp.app_errorhandler(BadData)
 def handle_baddata(exc):
-    return render_error(exc, _('Invalid or expired token'), to_unicode(exc.message), 400)
+    return render_error(exc, _('Invalid or expired token'), str(exc), 400)
 
 
 @errors_bp.app_errorhandler(IndicoError)
 def handle_indico_exception(exc):
-    return render_error(exc, _('Something went wrong'), to_unicode(exc.message), getattr(exc, 'http_status_code', 500))
+    return render_error(exc, _('Something went wrong'), str(exc), getattr(exc, 'http_status_code', 500))
 
 
 @errors_bp.app_errorhandler(DatabaseError)
@@ -100,15 +106,27 @@ def handle_databaseerror(exc):
     return handle_exception(exc, _('There was a database error while processing your request.'))
 
 
+@errors_bp.app_errorhandler(InsecureRequestError)
+def handle_insecurerequesterror(exc):
+    return render_error(exc, _('Disallowed URL'), str(exc), 400)
+
+
 @errors_bp.app_errorhandler(Exception)
 def handle_exception(exc, message=None):
-    Logger.get('flask').exception(to_unicode(exc.message) or 'Uncaught Exception')
+    if current_app.testing:
+        # Make sure errors from RHs fail tests and don't get silenced
+        raise  # noqa: PLE0704
+    Logger.get('flask').exception(str(exc) or 'Uncaught Exception')
     if not current_app.debug or request.is_xhr or request.is_json:
-        sentry_log_exception()
+        sentry_sdk.capture_exception(exc)
         if message is None:
-            message = '{}: {}'.format(type(exc).__name__, to_unicode(exc.message))
+            message = f'{type(exc).__name__}: {exc!s}'
+        if os.environ.get('INDICO_DEV_SERVER') == '1':
+            # If we are in the dev server, we always want to see a traceback on the
+            # console, even if this was an API request.
+            traceback.print_exc()
         return render_error(exc, _('Something went wrong'), message, 500)
-    # Let the exception propagate to middleware /the webserver.
+    # Let the exception propagate to middleware / the webserver.
     # This triggers the Flask debugger in development and sentry
     # logging (if enabled) (via got_request_exception).
-    raise
+    raise  # noqa: PLE0704

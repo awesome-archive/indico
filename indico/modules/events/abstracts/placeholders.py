@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.modules.events.abstracts.models.abstracts import AbstractState
 from indico.util.i18n import _, orig_string
@@ -23,17 +12,18 @@ from indico.web.flask.util import url_for
 
 
 __all__ = ('EventTitlePlaceholder', 'EventURLPlaceholder', 'AbstractIDPlaceholder', 'AbstractTitlePlaceholder',
-           'AbstractURLPlaceholder', 'AbstractTrackPlaceholder', 'AbstractSessionPlaceholder',
-           'PrimaryAuthorsPlaceholder', 'CoAuthorsPlaceholder', 'SubmitterNamePlaceholder',
-           'SubmitterFirstNamePlaceholder', 'SubmitterLastNamePlaceholder', 'SubmitterTitlePlaceholder',
-           'TargetAbstractIDPlaceholder', 'TargetAbstractTitlePlaceholder', 'TargetSubmitterNamePlaceholder',
-           'TargetSubmitterFirstNamePlaceholder', 'TargetSubmitterLastNamePlaceholder', 'JudgmentCommentPlaceholder',
-           'ContributionTypePlaceholder', 'ContributionURLPlaceholder')
+           'AbstractURLPlaceholder', 'AbstractInvitationURLPlaceholder', 'AbstractTrackPlaceholder',
+           'AbstractSessionPlaceholder', 'PrimaryAuthorsPlaceholder', 'CoAuthorsPlaceholder',
+           'SubmitterNamePlaceholder', 'SubmitterFirstNamePlaceholder', 'SubmitterLastNamePlaceholder',
+           'SubmitterTitlePlaceholder', 'TargetAbstractIDPlaceholder', 'TargetAbstractTitlePlaceholder',
+           'TargetSubmitterNamePlaceholder', 'TargetSubmitterFirstNamePlaceholder',
+           'TargetSubmitterLastNamePlaceholder', 'JudgmentCommentPlaceholder', 'ContributionTypePlaceholder',
+           'ContributionURLPlaceholder')
 
 
 class EventTitlePlaceholder(Placeholder):
     name = 'event_title'
-    description = _("The title of the event")
+    description = _('The title of the event')
 
     @classmethod
     def render(cls, abstract):
@@ -42,7 +32,7 @@ class EventTitlePlaceholder(Placeholder):
 
 class EventURLPlaceholder(Placeholder):
     name = 'event_url'
-    description = _("The URL of the event")
+    description = _('The URL of the event')
 
     @classmethod
     def render(cls, abstract):
@@ -51,16 +41,16 @@ class EventURLPlaceholder(Placeholder):
 
 class AbstractIDPlaceholder(Placeholder):
     name = 'abstract_id'
-    description = _("The ID of the abstract")
+    description = _('The ID of the abstract')
 
     @classmethod
     def render(cls, abstract):
-        return unicode(abstract.friendly_id)
+        return str(abstract.friendly_id)
 
 
 class AbstractTitlePlaceholder(Placeholder):
     name = 'abstract_title'
-    description = _("The title of the abstract")
+    description = _('The title of the abstract')
 
     @classmethod
     def render(cls, abstract):
@@ -70,16 +60,25 @@ class AbstractTitlePlaceholder(Placeholder):
 class AbstractURLPlaceholder(Placeholder):
     advanced = True
     name = 'abstract_url'
-    description = _("The direct URL of the abstract")
+    description = _('The direct URL of the abstract')
 
     @classmethod
     def render(cls, abstract):
         return url_for('abstracts.display_abstract', abstract, management=False, _external=True)
 
 
+class AbstractInvitationURLPlaceholder(Placeholder):
+    name = 'invitation_url'
+    description = _('The link to submit an invited abstract')
+
+    @classmethod
+    def render(cls, abstract):
+        return url_for('abstracts.submit_invited_abstract', abstract.locator.token, _external=True)
+
+
 class AbstractTrackPlaceholder(Placeholder):
     name = 'abstract_track'
-    description = _("The name of the destination track")
+    description = _('The name of the destination track')
 
     @classmethod
     def render(cls, abstract):
@@ -90,7 +89,7 @@ class AbstractTrackPlaceholder(Placeholder):
 
 class AbstractSessionPlaceholder(Placeholder):
     name = 'abstract_session'
-    description = _("The name of the destination session")
+    description = _('The name of the destination session')
 
     @classmethod
     def render(cls, abstract):
@@ -101,7 +100,7 @@ class AbstractSessionPlaceholder(Placeholder):
 
 class ContributionTypePlaceholder(Placeholder):
     name = 'contribution_type'
-    description = _("The contribution type that is associated to the abstract")
+    description = _('The contribution type that is associated to the abstract')
 
     @classmethod
     def render(cls, abstract):
@@ -116,7 +115,7 @@ class ContributionTypePlaceholder(Placeholder):
 
 class PrimaryAuthorsPlaceholder(Placeholder):
     name = 'primary_authors'
-    description = _('The names of the primary authors (separated by commas)')
+    description = _('The names of the authors (separated by commas)')
 
     @classmethod
     def render(cls, abstract):
@@ -173,7 +172,7 @@ class SubmitterTitlePlaceholder(Placeholder):
 class ContributionURLPlaceholder(Placeholder):
     advanced = True
     name = 'contribution_url'
-    description = _('Contribution URL')
+    description = _('The URL of the contribution')
 
     @classmethod
     def render(cls, abstract):
@@ -184,17 +183,17 @@ class ContributionURLPlaceholder(Placeholder):
 
 class TargetAbstractIDPlaceholder(Placeholder):
     name = 'target_abstract_id'
-    description = _("The ID of the target abstract (merge or duplicate)")
+    description = _('The ID of the target abstract (merge or duplicate)')
 
     @classmethod
     def render(cls, abstract):
         target = abstract.merged_into or abstract.duplicate_of
-        return unicode(target.friendly_id) if target else ''
+        return str(target.friendly_id) if target else ''
 
 
 class TargetAbstractTitlePlaceholder(Placeholder):
     name = 'target_abstract_title'
-    description = _("The title of the target abstract (merge or duplicate)")
+    description = _('The title of the target abstract (merge or duplicate)')
 
     @classmethod
     def render(cls, abstract):

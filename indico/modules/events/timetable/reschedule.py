@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime, timedelta
 
@@ -26,16 +15,16 @@ from werkzeug.utils import cached_property
 from indico.core.db import db
 from indico.core.errors import NoReportError, UserValueError
 from indico.modules.events import EventLogRealm
-from indico.modules.events.logs.models.entries import EventLogKind
 from indico.modules.events.timetable.models.entries import TimetableEntry, TimetableEntryType
 from indico.modules.events.timetable.operations import fit_session_block_entry
+from indico.modules.logs.models.entries import LogKind
 from indico.util.date_time import format_date, format_human_timedelta
+from indico.util.enum import RichEnum
 from indico.util.i18n import _
-from indico.util.struct.enum import RichEnum
-from indico.util.struct.iterables import materialize_iterable, window
+from indico.util.iterables import materialize_iterable, window
 
 
-class RescheduleMode(unicode, RichEnum):
+class RescheduleMode(str, RichEnum):
     __titles__ = {'none': 'Fit blocks', 'time': 'Start times', 'duration': 'Durations'}
     none = 'none'  # no action, just fit blocks..
     time = 'time'
@@ -46,9 +35,9 @@ class RescheduleMode(unicode, RichEnum):
         return RichEnum.title.fget(self)
 
 
-class Rescheduler(object):
+class Rescheduler:
     """
-    Compacts the the schedule of an event day by either adjusting
+    Compact the the schedule of an event day by either adjusting
     start times or durations of timetable entries.
 
     :param event: The event of which the timetable entries should
@@ -83,7 +72,7 @@ class Rescheduler(object):
         self.gap = gap
 
     def run(self):
-        """Perform the rescheduling"""
+        """Perform the rescheduling."""
         if self.fit_blocks:
             self._fit_blocks()
         if self.mode == RescheduleMode.time:
@@ -91,8 +80,8 @@ class Rescheduler(object):
         elif self.mode == RescheduleMode.duration:
             self._reschedule_duration()
         db.session.flush()
-        self.event.log(EventLogRealm.management, EventLogKind.change, 'Timetable',
-                       "Entries rescheduled", session.user,
+        self.event.log(EventLogRealm.management, LogKind.change, 'Timetable',
+                       'Entries rescheduled', session.user,
                        data={'Mode': self.mode.title,
                              'Day': format_date(self.day, locale='en_GB'),
                              'Fit Blocks': self.fit_blocks,
@@ -110,8 +99,8 @@ class Rescheduler(object):
         for entry, successor in window(self._entries):
             duration = successor.start_dt - entry.start_dt - self.gap
             if duration <= timedelta(0):
-                raise UserValueError(_("The chosen time gap would result in an entry with a duration of less than a "
-                                       "minute. Please choose a smaller gap between entries."))
+                raise UserValueError(_('The chosen time gap would result in an entry with a duration of less than a '
+                                       'minute. Please choose a smaller gap between entries.'))
             entry.object.duration = duration
 
     def _fit_blocks(self):

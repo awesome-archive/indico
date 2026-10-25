@@ -1,55 +1,66 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from copy import copy
+from operator import attrgetter
 
 
 _not_in_db = object()
 
 
 def _get_cache_key(proxy, name, kwargs):
-    return type(proxy), proxy.module, name, frozenset(kwargs.viewitems())
+    return type(proxy), proxy.module, name, frozenset(kwargs.items())
 
 
 def _preload_settings(cls, proxy, cache, **kwargs):
     settings = cls.get_all(proxy.module, **kwargs)
-    for name, value in settings.iteritems():
+    for name, value in settings.items():
         cache_key = _get_cache_key(proxy, name, kwargs)
         cache[cache_key] = value
     # cache missing entries as not in db
-    for name in proxy.defaults.viewkeys() - settings.viewkeys():
+    for name in proxy.defaults.keys() - settings.keys():
         cache_key = _get_cache_key(proxy, name, kwargs)
         cache[cache_key] = _not_in_db
     return settings
 
 
+def preload_settings_bulk(proxy, filter_col, filter_values):
+    """Preload settings in bulk for a given SettingsProxy.
+
+    This is useful for scoped settings proxies such as event or category settings
+    when you want to preload settings for many objects in a single query.
+    """
+    settings = proxy.query.filter(filter_col.in_(filter_values)).all()
+    cache = proxy._cache
+    get_kwargs_val = attrgetter(filter_col.key)
+    for setting in settings:
+        kwargs = {filter_col.key: get_kwargs_val(setting)}
+        cache_key = _get_cache_key(proxy, setting.name, kwargs)
+        cache[cache_key] = setting.value
+    # cache missing entries as not in db
+    for name in proxy.defaults:
+        for id in filter_values:
+            kwargs = {filter_col.key: id}
+            cache_key = _get_cache_key(proxy, name, kwargs)
+            cache.setdefault(cache_key, _not_in_db)
+
+
 def get_all_settings(cls, acl_cls, proxy, no_defaults, **kwargs):
-    """Helper function for SettingsProxy.get_all"""
+    """Helper function for SettingsProxy.get_all."""
     if no_defaults:
         rv = cls.get_all(proxy.module, **kwargs)
         if acl_cls and proxy.acl_names:
             rv.update(acl_cls.get_all_acls(proxy.module, **kwargs))
-        return {k: proxy._convert_to_python(k, v) for k, v in rv.iteritems()}
+        return {k: proxy._convert_to_python(k, v) for k, v in rv.items()}
     settings = dict(proxy.defaults)
     if acl_cls and proxy.acl_names:
         settings.update({name: set() for name in proxy.acl_names})
     settings.update({k: proxy._convert_to_python(k, v)
-                     for k, v in cls.get_all(proxy.module, **kwargs).iteritems()
+                     for k, v in cls.get_all(proxy.module, **kwargs).items()
                      if not proxy.strict or k in proxy.defaults})
     if acl_cls and proxy.acl_names:
         settings.update(acl_cls.get_all_acls(proxy.module, **kwargs))
@@ -57,7 +68,7 @@ def get_all_settings(cls, acl_cls, proxy, no_defaults, **kwargs):
 
 
 def get_setting(cls, proxy, name, default, cache, **kwargs):
-    """Helper function for SettingsProxy.get"""
+    """Helper function for SettingsProxy.get."""
     from indico.core.settings import SettingsProxyBase
 
     cache_key = _get_cache_key(proxy, name, kwargs)
@@ -76,7 +87,7 @@ def get_setting(cls, proxy, name, default, cache, **kwargs):
 
 
 def get_setting_acl(cls, proxy, name, cache, **kwargs):
-    """Helper function for ACLProxy.get"""
+    """Helper function for ACLProxy.get."""
     cache_key = _get_cache_key(proxy, name, kwargs)
     try:
         return cache[cache_key]

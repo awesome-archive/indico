@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
@@ -29,7 +18,7 @@ from indico.web.menu import SideMenuItem
 __all__ = ('RequestDefinitionBase', 'RequestFormBase')
 
 
-@signals.app_created.connect
+@signals.core.app_created.connect
 def _check_request_definitions(app, **kwargs):
     # This will raise RuntimeError if the request type names are not unique
     get_request_definitions()
@@ -53,8 +42,8 @@ def _get_event_management_url(event, **kwargs):
 @signals.users.merged.connect
 def _merge_users(target, source, **kwargs):
     from indico.modules.events.requests.models.requests import Request
-    Request.find(created_by_id=source.id).update({Request.created_by_id: target.id})
-    Request.find(processed_by_id=source.id).update({Request.processed_by_id: target.id})
+    Request.query.filter_by(created_by_id=source.id).update({Request.created_by_id: target.id})
+    Request.query.filter_by(processed_by_id=source.id).update({Request.processed_by_id: target.id})
 
 
 @signals.event.deleted.connect

@@ -1,4 +1,4 @@
-{% extends 'categories/management/full_width_base.html' if category else 'events/management/full_width_base.html' %}
+{% extends 'categories/management/full_width_base.html' if category|default(none) else 'events/management/full_width_base.html' %}
 
 {% from 'message_box.html' import message_box %}
 
@@ -38,7 +38,7 @@
         </div>
         <div class="back-warning-qtip-content hidden">
             <ul class="js-back-affected qbubble-item-list">
-                {% for related_tpls_owner, related_tpls in related_tpls_per_owner.iteritems() %}
+                {% for related_tpls_owner, related_tpls in related_tpls_per_owner.items() %}
                     {% for related_tpl in related_tpls %}
                         <li>{{ related_tpl.title }} ({{ related_tpls_owner.title }})</li>
                     {% endfor %}
@@ -100,6 +100,7 @@
                             <option value="business_card" data-width="8.5" data-height="5.4">
                                 {%- trans %}Business card{% endtrans -%}
                             </option>
+                            {{ template_hook('extra-designer-tpl-page-size', template=template, landscape=true) }}
                         </optgroup>
                         <optgroup label="{% trans %}Portrait orientation{% endtrans %}">
                             <option value="a6" data-width="10.5" data-height="14.8">A6</option>
@@ -107,6 +108,7 @@
                             <option value="business_card" data-width="5.4" data-height="8.5">
                                 {%- trans %}Business card{% endtrans -%}
                             </option>
+                            {{ template_hook('extra-designer-tpl-page-size', template=template, landscape=false) }}
                         </optgroup>
                     </select>
                 </div>
@@ -118,10 +120,10 @@
             <div class="tool js-hide-on-flip">
                 <i class="icon-image" title="{% trans %}Template background{% endtrans %}"></i>
                 <form id="bg-form" class="content flexrow f-a-center"
-                      action="{{ url_for('designer.upload_image', template) }}"
+                      action="{{ url_for('designer.upload_image', template, background=true) }}"
                       enctype="multipart/form-data"
                       method="POST">
-                    <input type="hidden" value="{{ session.csrf_token }}" name="csrf_token">
+                    <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
                     <input id="backgroundFile" name="file" type="file">
                     <label for="backgroundFile" class="i-button background-label truncate-text">
                         {%- trans %}Choose a file{% endtrans -%}
@@ -150,7 +152,7 @@
                 <div class="tool backside-tools">
                     <span>{% trans %}Back side template:{% endtrans %}</span>
                     <span class="backside-template-title">
-                        {{- template.backside_template.title -}}
+                        {{- template.backside_template.title if template.backside_template -}}
                     </span>
                     <button class="js-remove-backside i-button icon-remove icon-only text-color subtle"
                             title="{% trans %}Remove back side{% endtrans %}"></button>
@@ -168,39 +170,47 @@
             <div class="element-tools hidden">
                 <div class="tool">
                     <span class="selection-text f-self-stretch"></span>
-                    <a class="js-remove-element i-button icon-remove icon-only text-color subtle"
-                       title="{% trans %}Remove element{% endtrans %}"></a>
+                    <button class="js-remove-element i-button icon-remove icon-only text-color subtle"
+                            title="{% trans %}Remove element{% endtrans %}"></button>
                 </div>
                 <div class="tool font-tools">
                     <i class="icon-font-size" title="{% trans %}Font dimensions{% endtrans %}"></i>
                     <div class="subtool">
-                        <select id='font-selector' class="js-font-tool" data-attr="font">
-                            <optgroup label="{% trans %}Normal Fonts{% endtrans %}">
-                                <option value="serif">Serif</option>
-                                <option value="courier">Courier</option>
-                                <option value="sans-serif">Sans Serif</option>
-                            </optgroup>
-                            <optgroup label="{% trans %}Special Character Fonts{% endtrans %}">
-                                <option>LinuxLibertine</option>
-                                <option>Kochi-Mincho</option>
-                                <option>Kochi-Gothic</option>
-                                <option>Uming-CN</option>
-                            </optgroup>
-                        </select>
+                        {% block fonts %}
+                            <select id='font-selector' class="js-font-tool" data-attr="font">
+                                <optgroup label="{% trans %}Normal Fonts{% endtrans %}">
+                                    <option value="serif">Serif</option>
+                                    <option value="courier">Courier</option>
+                                    <option value="sans-serif">Sans Serif</option>
+                                </optgroup>
+                                <optgroup label="{% trans %}Special Character Fonts{% endtrans %}">
+                                    <option>LinuxLibertine</option>
+                                    <option>Kochi-Mincho</option>
+                                    <option>Kochi-Gothic</option>
+                                    <option>Uming-CN</option>
+                                </optgroup>
+                            </select>
+                        {% endblock %}
                     </div>
                     <div class="subtool">
-                        <select id='color-selector' class="js-font-tool" data-attr="color">
-                            <option value="black">{% trans %}black{% endtrans %}</option>
-                            <option value="red">{% trans %}red{% endtrans %}</option>
-                            <option value="blue">{% trans %}blue{% endtrans %}</option>
-                            <option value="green">{% trans %}green{% endtrans %}</option>
-                            <option value="yellow">{% trans %}yellow{% endtrans %}</option>
-                            <option value="brown">{% trans %}brown{% endtrans %}</option>
-                            <option value="gold">{% trans %}gold{% endtrans %}</option>
-                            <option value="pink">{% trans %}pink{% endtrans %}</option>
-                            <option value="gray">{% trans %}gray{% endtrans %}</option>
-                            <option value="white">{% trans %}white{% endtrans %}</option>
-                        </select>
+                        <div class="i-color-field clearfix">
+                            <div class="clickable-wrapper">
+                                <span id="text-color-preview" class="color-preview"></span>
+                                <input title="{% trans %}Text color{% endtrans %}" type="text"
+                                       id="text-color-selector" value="#" class="js-font-tool" data-attr="color"
+                                       maxlength="7" size="2">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="subtool">
+                        <div class="i-color-field clearfix">
+                            <div class="clickable-wrapper">
+                                <span id="bg-color-preview" class="color-preview"></span>
+                                <input title="{% trans %}Text background color{% endtrans %}" type="text"
+                                       value="#" id="bg-color-selector" class="js-font-tool" data-attr="background_color"
+                                       maxlength="7" size="2">
+                            </div>
+                        </div>
                     </div>
                     <div class="subtool">
                         <select id='style-selector' class="js-font-tool" data-attr="style">
@@ -235,6 +245,7 @@
                             <option value="10pt">10pt</option>
                             <option value="7.5pt">7.5pt</option>
                             <option value="7pt">7pt</option>
+                            <option value="6pt">6pt</option>
                         </select>
                     </div>
                     <div class="subtool">
@@ -245,16 +256,50 @@
                             <option value="justified">{% trans %}Justified{% endtrans %}</option>
                         </select>
                     </div>
+                    <div class="subtool">
+                        <select id='overflow-selector' class="js-font-tool" data-attr="overflow">
+                            <option value="wrap">{% trans %}Wrap{% endtrans %}</option>
+                            <option value="resize">{% trans %}Resize{% endtrans %}</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="tool">
                     <i class="icon-rulers" title="{% trans %}Element dimensions{% endtrans %}"></i>
-                    <label for="element-width">{% trans %}Width:{% endtrans %}</label>
-                    <input id="element-width" class="js-element-width" size="5" type="number">
-                    <span class="scale">cm</span>
+                    <div class="subtool">
+                        <label for="element-width">{% trans %}Width:{% endtrans %}</label>
+                        <input id="element-width" class="js-element-width" size="5" type="number">
+                        <span class="scale">cm</span>
+                    </div>
+                    <div class="subtool" id="subtool-element-height">
+                        <label for="element-height">{% trans %}Height:{% endtrans %}</label>
+                        <input id="element-height" class="js-element-height" size="5" type="number">
+                        <span class="scale">cm</span>
+                    </div>
                 </div>
                 <div class="tool" style="display: none;">
                     <label for="fixed-text-field">{% trans %}Text:{% endtrans %}</label>
                     <input type="text" id="fixed-text-field">
+                </div>
+                <div id="fixed-image-tool" class="tool js-hide-on-flip">
+                    <i class="icon-image" title="{% trans %}Fixed Image{% endtrans %}"></i>
+                    <form id="img-form" class="content flexrow f-a-center"
+                          action="{{ url_for('designer.upload_image', template, background=false) }}"
+                          enctype="multipart/form-data"
+                          method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                        <input id="imageFile" name="file" type="file">
+                        <label for="imageFile" class="i-button background-label truncate-text">
+                            {%- trans %}Choose a file{% endtrans -%}
+                        </label>
+                        <div class="subtool">
+                            <div class="toolbar">
+                                <button class="i-button icon-upload icon-only js-upload-img"
+                                        title="{% trans %}Upload file{% endtrans %}"></button>
+                                <button class="i-button icon-cross icon-only js-remove-img" disabled
+                                        title="{% trans %}Remove image{% endtrans %}"></button>
+                            </div>
+                        </div>
+                    </form>
                 </div>
                 <div class="tool">
                     <i class="icon-layout" title="{% trans %}Element positioning{% endtrans %}"></i>
@@ -279,6 +324,14 @@
                                 class="i-button move-button icon-only text-color subtle icon-expand"
                                 data-direction="bottom">
                         </button>
+                        <button title="{% trans %}Move item to the back{% endtrans %}"
+                                class="i-button move-button icon-only text-color subtle icon-first"
+                                data-direction="back">
+                        </button>
+                        <button title="{% trans %}Move item to the front{% endtrans %}"
+                                class="i-button move-button icon-only text-color subtle icon-last"
+                                data-direction="front">
+                        </button>
                     </div>
                 </div>
             </div>
@@ -298,7 +351,7 @@
                 <div class="flexrow f-a-baseline">
                     <label for="element-list">{% trans %}Insert element:{% endtrans %}</label>
                     <select id="element-list">
-                        {% for group_id, group in placeholders.viewitems() | sort(attribute='1.title') %}
+                        {% for group_id, group in placeholders.items() | sort(attribute='1.position') %}
                             {% if group_id not in config.disallow_groups %}
                                 <optgroup label="{{ group.title }}">
                                     {% for option_id, option in group.options|dictsort(by='value') %}
@@ -307,9 +360,6 @@
                                 </optgroup>
                             {% endif %}
                         {% endfor %}
-                        <optgroup label="{% trans %}Fixed data{% endtrans %}">
-                            <option value="fixed">{% trans %}Fixed text{% endtrans %}</option>
-                        </optgroup>
                     </select>
                     <button id="insert-button" class="insert-element-btn i-button highlight icon-next text-color subtle"
                             title="{% trans %}Insert{% endtrans %}">
@@ -369,8 +419,16 @@
         (function() {
             'use strict';
 
-            setupDesigner({{ template_data | tojson }}, {{ backside_template_data | tojson}}, {{ config | tojson }},
-                          {{ placeholders | tojson }});
+            setupDesigner({{ template_data | tojson }}, {{ backside_template_data | tojson }}, {{ config | tojson }},
+                          {{ placeholders | tojson }}, {{ image_types | tojson }});
         })();
+        setupColorPickerWidget({
+            fieldId: 'text-color-selector',
+            showField: true
+        });
+        setupColorPickerWidget({
+            fieldId: 'bg-color-selector',
+            showField: true
+        });
     </script>
 {% endblock %}

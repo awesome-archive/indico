@@ -3,7 +3,12 @@
 
 <div class="balloon {{ 'event-locked' if event_locked }}">
     <div class="title-container">
-        <div class="title">{{ contrib.title }}</div>
+        <div class="title">
+            {{ contrib.title }}
+            {% if contrib.code %}
+                <span class="balloon-code">({{ contrib.code }})</span>
+            {% endif %}
+        </div>
         <div class="group right entry-action-buttons hide-if-locked">
             {% if editable %}
                 {% if can_manage_contributions %}
@@ -37,15 +42,24 @@
                        data-confirm="{% trans title=contrib.title %}Are you sure you want to delete the contribution '{{ title }}'?{% endtrans %}"></a>
                 {% endif %}
             {% else %}
-                <a class="i-link icon-list" title="{% trans %}View contribution details{% endtrans %}"
-                   href="{{ url_for('contributions.display_contribution', contrib) }}"></a>
+                <div class="balloon-actions">
+                    {% if session.user %}
+                        <ind-favorite-contribution-icon contribution-id="{{ contrib.id }}" event-id="{{ contrib.event.id }}" variant="icon"></ind-favorite-contribution-icon>
+                    {% endif %}
+                    <a class="i-link icon-list" title="{% trans %}View contribution details{% endtrans %}"
+                       href="{{ url_for('contributions.display_contribution', contrib) }}"></a>
+                </div>
             {% endif %}
         </div>
     </div>
     <div class="description" data-display-href="{{ url_for('contributions.display_contribution', contrib) }}">
          {{ contrib.description }}
      </div>
-    {{ render_time_and_location(contrib, editable=(editable and can_manage_contributions), use_event_tz=editable) }}
+    <div class="row">
+        <div class="expand">
+            {{ render_time_and_location(contrib, editable=(editable and can_manage_contributions), use_event_tz=editable) }}
+        </div>
+    </div>
     {% if contrib.speakers or (editable and can_manage_contributions) %}
         <span class="hr"></span>
         <dl class="i-data-list thirty-seventy">
@@ -69,7 +83,7 @@
             {% endif %}
         </dl>
     {% endif %}
-    {% if (editable and can_manage_contributions) or subcontribution_count %}
+    {% if (editable and can_manage_contributions) or contrib.subcontribution_count %}
         <span class="hr"></span>
         <div class="attribute">
             <div class="attribute-title">

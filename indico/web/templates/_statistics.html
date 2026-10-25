@@ -1,6 +1,6 @@
 {% macro stats_box(title='', subtitle='', label='', label_tooltip='', classes='') %}
     <div class="i-box
-                {%- if classes %} {{classes}}{% endif %}">
+                {%- if classes %} {{ classes }}{% endif %}">
         {%- if title or label %}
             <div class="i-box-header">
                 {% if title -%}
@@ -21,24 +21,8 @@
     </div>
 {% endmacro %}
 
-
-{% macro scatter_plot(id, data) %}
-    <div id="{{ id }}" class="plot" style="height:100%;"
-        data-title="{{ title }}"
-        data-min-x="{{ data.min_x }}"
-        data-max-x="{{ data.max_x }}"
-        data-min-y="{{ data.min_y}}"
-        data-max-y="{{ data.max_y }}"
-        data-label-yaxis="{{ data.label_y }}"
-        data-label-xaxis="{{ data.label_x }}"
-        data-tooltip="{{ data.tooltip }}"
-        data-values="{{ data['values']|tojson|forceescape }}">
-    </div>
-{% endmacro %}
-
-
 {% macro stats_badge(label, value) %}
-    <div class="i-badge">
+    <div class="i-badge i-badge-disabled">
         <div class="i-badge-content">
             {% if value is none %}
                 <span class="i-badge-value">&ndash;</span>
@@ -52,7 +36,7 @@
 
 
 {% macro stats_badges(badges, classes='') %}
-    <div class="i-badges-list{% if classes %} {{ classes }}{%  endif %}">
+    <div class="i-badges-list-space-evenly{% if classes %} {{ classes }}{%  endif %}">
         {% for label, value in badges %}
             {{ stats_badge(label, value) }}
         {% endfor %}

@@ -1,27 +1,18 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
 from operator import attrgetter
 
 from flask import redirect
+from werkzeug.exceptions import NotFound
 
-from indico.legacy.pdfinterface.conference import AbstractsToPDF, ConfManagerAbstractsToPDF
+from indico.core.config import config
+from indico.legacy.pdfinterface.latex import AbstractsToPDF, ConfManagerAbstractsToPDF
 from indico.modules.events.abstracts.models.files import AbstractFile
 from indico.modules.events.abstracts.util import generate_spreadsheet_from_abstracts
 from indico.modules.events.util import ZipGeneratorMixin
@@ -32,7 +23,7 @@ from indico.web.util import jsonify_data, jsonify_template
 
 
 class DisplayAbstractListMixin:
-    """Display the list of abstracts"""
+    """Display the list of abstracts."""
 
     view_class = None
     template = None
@@ -53,7 +44,7 @@ class DisplayAbstractListMixin:
 
 
 class CustomizeAbstractListMixin:
-    """Filter options and columns to display for the abstract list of an event"""
+    """Filter options and columns to display for the abstract list of an event."""
 
     view_class = None
 
@@ -72,9 +63,11 @@ class CustomizeAbstractListMixin:
 
 
 class AbstractsExportPDFMixin:
-    """Export list of abstracts as PDF"""
+    """Export list of abstracts as PDF."""
 
     def _process(self):
+        if not config.LATEX_ENABLED:
+            raise NotFound
         sorted_abstracts = sorted(self.abstracts, key=attrgetter('friendly_id'))
         cls = ConfManagerAbstractsToPDF if self.management else AbstractsToPDF
         pdf = cls(self.event, sorted_abstracts)
@@ -82,7 +75,7 @@ class AbstractsExportPDFMixin:
 
 
 class _AbstractsExportBaseMixin:
-    """Base mixin for all abstract list spreadsheet export mixins"""
+    """Base mixin for all abstract list spreadsheet export mixins."""
 
     def _generate_spreadsheet(self):
         export_config = self.list_generator.get_list_export_config()
@@ -91,32 +84,30 @@ class _AbstractsExportBaseMixin:
 
 
 class AbstractsExportCSV(_AbstractsExportBaseMixin):
-    """Export list of abstracts to CSV"""
+    """Export list of abstracts to CSV."""
 
     def _process(self):
         return send_csv('abstracts.csv', *self._generate_spreadsheet())
 
 
 class AbstractsExportExcel(_AbstractsExportBaseMixin):
-    """Export list of abstracts to XLSX"""
+    """Export list of abstracts to XLSX."""
 
     def _process(self):
         return send_xlsx('abstracts.xlsx', *self._generate_spreadsheet(), tz=self.event.tzinfo)
 
 
 class AbstractsDownloadAttachmentsMixin(ZipGeneratorMixin):
-    """Generate a ZIP file with attachment files for a given list of abstracts"""
+    """Generate a ZIP file with attachment files for a given list of abstracts."""
 
     def _prepare_folder_structure(self, item):
-        abstract_title = secure_filename('{}_{}'.format(unicode(item.abstract.friendly_id), item.abstract.title),
-                                         'abstract')
-        file_name = secure_filename('{}_{}'.format(unicode(item.id), item.filename), item.filename)
+        abstract_title = secure_filename(f'{item.abstract.friendly_id}_{item.abstract.title}', 'abstract')
+        file_name = secure_filename(f'{item.id}_{item.filename}', str(item.id))
         return os.path.join(*self._adjust_path_length([abstract_title, file_name]))
 
     def _iter_items(self, abstracts):
         for abstract in abstracts:
-            for f in abstract.files:
-                yield f
+            yield from abstract.files
 
     def _process(self):
         return self._generate_zip_file(self.abstracts, name_prefix='abstract-attachments',

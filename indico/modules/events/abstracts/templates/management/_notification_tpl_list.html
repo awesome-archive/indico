@@ -18,7 +18,7 @@
                 <ul class="i-box-group vert"
                     data-url="{{ url_for('.email_tpl_sort', event) }}">
                     {% for tpl in event.abstract_email_templates|sort(attribute='position') %}
-                        <li class="i-box" data-id="{{ tpl.id }}">
+                        <li class="i-box js-email-template" data-id="{{ tpl.id }}">
                             <div class="ui-i-box-sortable-handle hide-if-locked"></div>
                             <div class="i-box-header">
                                 <span class="i-box-title">{{ tpl.title }}</span>
@@ -35,11 +35,11 @@
                                         </a>
                                     </div>
                                     <div class="group hide-if-locked">
-                                        <a class="i-button icon-edit arrow js-edit-tpl-dropdown"
-                                           data-toggle="dropdown">
+                                        <button class="i-button icon-edit arrow js-edit-tpl-dropdown"
+                                                data-toggle="dropdown">
                                             {%- trans %}Edit{% endtrans -%}
-                                        </a>
-                                        <ul class="dropdown">
+                                        </button>
+                                        <ul class="i-dropdown">
                                             <li>
                                                 <a data-href="{{ url_for('.email_tpl_rule_edit', tpl) }}"
                                                    title="{% trans %}Edit ruleset{% endtrans %}"
@@ -59,15 +59,15 @@
                                                 </a>
                                             </li>
                                         </ul>
-                                        <a href="#" class="i-button js-delete-item icon-remove icon-only"
-                                           title="{% trans %}Delete template{% endtrans %}"
-                                           data-qtip-style="danger"
-                                           data-href="{{ url_for('.email_tpl_delete', tpl) }}"
-                                           data-method="DELETE"
-                                           data-confirm="{% trans %}Are you sure you want to delete this template?{% endtrans %}"
-                                           data-title="{% trans %}Delete template{% endtrans %}"
-                                           data-update="#email-template-manager">
-                                        </a>
+                                        <button class="i-button js-delete-item icon-remove icon-only"
+                                                title="{% trans %}Delete template{% endtrans %}"
+                                                data-qtip-style="danger"
+                                                data-href="{{ url_for('.email_tpl_delete', tpl) }}"
+                                                data-method="DELETE"
+                                                data-confirm="{% trans %}Are you sure you want to delete this template?{% endtrans %}"
+                                                data-title="{% trans %}Delete template{% endtrans %}"
+                                                data-update="#email-template-manager">
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -153,13 +153,13 @@
 
     <div class="toolbar f-j-end hide-if-locked">
         <div class="group">
-            <a href="#" class="i-button icon-plus highlight"
-               data-href="{{ url_for('.email_tpl_add', event) }}"
-               data-title="{% trans %}Add a new notification ruleset{% endtrans %}"
-               data-update="#email-template-manager"
-               data-ajax-dialog>
+            <button class="i-button icon-plus highlight"
+                    data-href="{{ url_for('.email_tpl_add', event) }}"
+                    data-title="{% trans %}Add a new notification ruleset{% endtrans %}"
+                    data-update="#email-template-manager"
+                    data-ajax-dialog>
                 {% trans %}Add new one{% endtrans %}
-            </a>
+            </button>
         </div>
     </div>
     <script>

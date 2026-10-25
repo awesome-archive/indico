@@ -16,6 +16,15 @@
                                 {% else %}
                                     {{ regform.title }}
                                 {% endif %}
+                                {% if registration %}
+                                    {% if registration.state.name == 'withdrawn' %}
+                                        <span class="event-label ui-qtip ui label basic red mini">Withdrawn</span>
+                                    {% elif registration.state.name == 'rejected' %}
+                                        <span class="event-label ui-qtip ui label basic red mini">Rejected</span>
+                                    {% elif registration.state.name == 'pending' %}
+                                        <span class="event-label ui-qtip ui label basic orange mini">Pending</span>
+                                    {% endif %}
+                                {% endif %}
                             </span>
                         </div>
                         {% if not g.static_site %}
@@ -35,12 +44,17 @@
                                               href="{{ url_for('event_registration.display_regform', regform) }}">
                                                <strong>{% trans %}Modify registration{% endtrans %}</strong>
                                            </a>
+                                       {% else %}
+                                           <a class="i-button i-button-small highlight"
+                                              href="{{ url_for('event_registration.display_regform', regform) }}">
+                                               <strong>{% trans %}Check details{% endtrans %}</strong>
+                                           </a>
                                        {% endif %}
                                    {% elif regform.limit_reached %}
-                                       <a class="i-button i-button-small highlight disabled"
-                                          title="{% trans %}There are no more places available.{% endtrans %}">
-                                           <strong>{% trans %}Register{% endtrans %}</strong>
-                                       </a>
+                                        <button class="i-button i-button-small highlight disabled"
+                                                title="{% trans %}There are no more places available.{% endtrans %}">
+                                            <strong>{% trans %}Register{% endtrans %}</strong>
+                                       </button>
                                    {% elif regform.moderation_enabled %}
                                        <a class="i-button i-button-small highlight icon-question"
                                           href="{{ url_for('event_registration.display_regform', regform) }}">
@@ -62,20 +76,49 @@
     </div>
 {% endif %}
 
-{% if event.published_registrations %}
+{% if event.type == 'conference' and (published_registrations or num_hidden_registrations) %}
+    <div class="event-details-row">
+        <div class="event-details-label">{% trans %}Participants{% endtrans %}</div>
+        <div class="event-details-content">
+            <span class="ui circular label">
+                {{ published_registrations|length + num_hidden_registrations }}
+            </span>
+            <a href="{{ url_for('event_registration.participant_list', event) }}">
+                {% trans %}View full list{% endtrans %}
+            </a>
+        </div>
+    </div>
+{% elif published_registrations %}
     <div class="event-details-row">
         <div class="event-details-label">{% trans %}Participants{% endtrans %}</div>
         <div class="event-details-content">
             <div class="participant-list-wrapper">
                 <ul class="participant-list">
-                    {%- for participant in event.published_registrations|sort(attribute='display_full_name') -%}
-                        <li class="event-user {% if participant.checked_in and participant.registration_form.publish_checkin_enabled %}checked-in{% endif %}">
+                    {%- for participant in published_registrations|sort(attribute='display_full_name') -%}
+                        <li class="ui image label meeting-participant {% if participant.checked_in and participant.registration_form.publish_checkin_enabled %} checked-in {% endif %}">
+                            {%- if not g.static_site -%}
+                                <img src="{{ participant.avatar_url }}" alt="">
+                            {%- endif -%}
                             {{ participant.display_full_name }}
                         </li>
                     {%- endfor -%}
+                    {%- if num_hidden_registrations -%}
+                        <li class="ui circular label" title="{% trans num=num_hidden_registrations %}{{ num }} more participant{% pluralize %}{{ num }} more participants{% endtrans %}">
+                            +{{ num_hidden_registrations }}
+                        </li>
+                    {%- endif -%}
                 </ul>
                 <a class="trigger icon-expand" title="{% trans %}See the full list{% endtrans %}"></a>
             </div>
+        </div>
+    </div>
+{% elif num_hidden_registrations %}
+    <div class="event-details-row">
+        <div class="event-details-label">{% trans %}Participants{% endtrans %}</div>
+        <div class="event-details-content">
+            <span class="ui circular label">
+                {{ num_hidden_registrations }}
+            </span>
         </div>
     </div>
 {% endif %}

@@ -11,7 +11,7 @@
     {% trans date=cfa.end_dt|format_date(timezone=tz), time=cfa.end_dt|format_time(timezone=tz) -%}
         Closed on <strong>{{ date }}</strong> at <strong>{{ time }}</strong> ({{ tz }})
     {%- endtrans %}
-    {% if not cfa.modification_ended %}
+    {% if cfa.modification_end_dt and not cfa.modification_ended %}
         <br>
         {% trans date=cfa.modification_end_dt|format_date(timezone=tz), time=cfa.modification_end_dt|format_time(timezone=tz) -%}
             Modifications possible until <strong>{{ date }}</strong> at <strong>{{ time }}</strong>
@@ -22,11 +22,11 @@
 {% block buttons %}
     {{ super() }}
     <div class="group">
-        <a href="#" class="i-button"
-           data-href="{{ url_for('.open_abstracts_call', event) }}"
-           data-method="POST"
-           data-confirm="{% trans %}The call for abstracts is already finished. Do you want to open it again?{% endtrans %}">
+        <button class="i-button"
+                data-href="{{ url_for('.open_abstracts_call', event) }}"
+                data-method="POST"
+                data-confirm="{% trans %}The call for abstracts is already finished. Do you want to open it again?{% endtrans %}">
             {%- trans %}Reopen now{% endtrans -%}
-        </a>
+        </button>
     </div>
 {% endblock %}

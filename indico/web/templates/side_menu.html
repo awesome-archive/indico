@@ -8,12 +8,28 @@
     {% endif %}
     <li class="item {{ classes }}">
         {%- if item.disabled %}
-            <span class="title">
-                <span>{{ item.title }}</span>
+            <span class="title {{ icon or '' }}">
+                {%- if item.sui_icon %}
+                    <i class="{{ item.sui_icon }} icon"></i>
+                {%- endif -%}
+                <span class="side-menu-label">
+                    {{- item.title -}}
+                </span>
+                {% if item.badge is not none %}
+                    <span class="badge">{{ item.badge }}</span>
+                {% endif %}
             </span>
         {%- else -%}
-            <a class="title {{ icon }}" href="{{ item.url }}">
-                <span>{{ item.title }}</span>
+            <a class="title {{ icon or '' }}" href="{{ item.url }}">
+                {%- if item.sui_icon %}
+                    <i class="{{ item.sui_icon }} icon"></i>
+                {%- endif -%}
+                <span class="side-menu-label">
+                    {{- item.title -}}
+                </span>
+                {% if item.badge is not none %}
+                    <span class="badge">{{ item.badge }}</span>
+                {% endif %}
             </a>
         {%- endif -%}
     </li>
@@ -23,7 +39,7 @@
     {% if section.items %}
         <li class="section {{ 'collapsed' if not section.active }}" data-section-name="{{ section.name }}">
             <div class="title-wrapper">
-                <span class="title {{ section.icon }}">{{ section.title }}</span>
+                <span class="title {{ section.icon }} side-menu-label">{{ section.title }}</span>
             </div>
             <ul class="{{ 'weak-hidden' if not section.active }}">
                 {% for item in section.items %}
@@ -62,16 +78,23 @@
             var section = $this.closest('.section');
             $this.next('ul').slideToggle(300);
             section.toggleClass('collapsed');
-            $.jStorage.set(getSectionKey(section), section.hasClass('collapsed'));
+            localStorage.setItem(getSectionKey(section), section.hasClass('collapsed'));
         });
 
         menu.find('.section').each(function() {
             var section = $(this);
-            var collapsed = $.jStorage.get(getSectionKey(section));
+            var collapsed = localStorage.getItem(getSectionKey(section));
             // if the active menu item is in the section, we don't touch it
             if (collapsed !== null && !section.find('.active').length) {
-                section.toggleClass('collapsed', collapsed);
-                section.children('ul').toggle(!collapsed);
+                section.toggleClass('collapsed', collapsed === 'true');
+                section.children('ul').toggle(collapsed === 'false');
+            }
+        });
+
+        $('.side-menu-label').on('mouseenter', function() {
+            const $this = $(this);
+            if (this.offsetWidth < this.scrollWidth && !$this.attr('title')) {
+                $this.attr('title', $this.text());
             }
         });
     })();

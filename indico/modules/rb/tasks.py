@@ -1,27 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import date, datetime
 from itertools import groupby
 from operator import attrgetter
 
 from celery.schedules import crontab
-from sqlalchemy.orm import contains_eager
+from sqlalchemy.orm import contains_eager, noload
 
 from indico.core.celery import celery
 from indico.core.config import config
@@ -35,19 +24,19 @@ from indico.modules.rb.notifications.reservations import notify_about_finishing_
 from indico.util.console import cformat
 
 
-def _make_occurrence_date_filter(date_column, default_values, room_columns):
+def _make_occurrence_date_filter(date_column, default_values, room_columns, value_col=Reservation.repeat_frequency):
     notification_before = db.case({RepeatFrequency.WEEK.value: room_columns['weekly'],
                                    RepeatFrequency.MONTH.value: room_columns['monthly']},
-                                  else_=room_columns['default'], value=Reservation.repeat_frequency)
+                                  else_=room_columns['default'], value=value_col)
     notification_before_default = db.case({RepeatFrequency.WEEK.value: default_values['weekly'],
                                            RepeatFrequency.MONTH.value: default_values['monthly']},
-                                          else_=default_values['default'], value=Reservation.repeat_frequency)
+                                          else_=default_values['default'], value=value_col)
     notification_before_days = db.func.coalesce(notification_before, notification_before_default)
     days_until = db.cast(date_column, db.Date) - date.today()
     return days_until == notification_before_days
 
 
-def _print_occurrences(user, occurrences, _defaults={}, _overrides={}):
+def _print_occurrences(user, occurrences, _defaults={}, _overrides={}):  # noqa: B006
     if not _defaults or not _overrides:
         _defaults.update({RepeatFrequency.WEEK: rb_settings.get('notification_before_days_weekly'),
                           RepeatFrequency.MONTH: rb_settings.get('notification_before_days_monthly'),
@@ -57,13 +46,13 @@ def _print_occurrences(user, occurrences, _defaults={}, _overrides={}):
                            RepeatFrequency.MONTH: lambda r: r.notification_before_days_monthly,
                            RepeatFrequency.NEVER: lambda r: r.notification_before_days,
                            RepeatFrequency.DAY: lambda r: r.notification_before_days})
-    print cformat('%{grey!}*** {} ({}) ***').format(user.full_name, user.email)
+    print(cformat('%{grey!}*** {} ({}) ***').format(user.full_name, user.email))
     for occ in occurrences:
         default = _defaults[occ.reservation.repeat_frequency]
         override = _overrides[occ.reservation.repeat_frequency](occ.reservation.room)
         days = default if override is None else override
         days_until = (occ.start_dt.date() - date.today()).days
-        print cformat('  * %{yellow}{}%{reset} %{green}{:5}%{reset} {} {} {} \t %{blue!}{}%{reset} {} ({})').format(
+        print(cformat('  * %{yellow}{}%{reset} %{green}{:5}%{reset} {} {} {} \t %{blue!}{}%{reset} {} ({})').format(
             occ.start_dt.date(), occ.reservation.repeat_frequency.name,
             days,
             default if override is not None and override != default else ' ',
@@ -71,7 +60,7 @@ def _print_occurrences(user, occurrences, _defaults={}, _overrides={}):
             occ.reservation.id,
             occ.reservation.room.full_name,
             occ.reservation.room.id
-        )
+        ))
 
 
 def _notify_occurrences(user, occurrences):
@@ -108,7 +97,7 @@ def roombooking_occurrences(debug=False):
     occurrences = (ReservationOccurrence.query
                    .join(ReservationOccurrence.reservation)
                    .join(Reservation.room)
-                   .filter(Room.is_active,
+                   .filter(~Room.is_deleted,
                            Room.notifications_enabled,
                            Reservation.is_accepted,
                            Reservation.booked_for_id.isnot(None),
@@ -151,16 +140,27 @@ def roombooking_end_notifications():
         'monthly': Room.end_notification_monthly
     }
 
+    cte = (db.session.query(Reservation.id, Reservation.repeat_frequency)
+           .add_columns(db.func.max(ReservationOccurrence.start_dt).label('last_valid_end_dt'))
+           .join(Reservation.room)
+           .join(Reservation.occurrences)
+           .filter(ReservationOccurrence.is_valid,
+                   ReservationOccurrence.end_dt >= datetime.now(),
+                   Reservation.is_accepted,
+                   Reservation.repeat_frequency != RepeatFrequency.NEVER,
+                   Room.end_notifications_enabled,
+                   ~Reservation.end_notification_sent,
+                   ~Room.is_deleted)
+           .group_by(Reservation.id)
+           .cte())
+
     reservations = (Reservation.query
+                    .options(noload('created_by_user'))
+                    .join(cte, cte.c.id == Reservation.id)
                     .join(Reservation.room)
-                    .filter(Room.is_active,
-                            Room.end_notifications_enabled,
-                            Reservation.is_accepted,
-                            Reservation.end_dt >= datetime.now(),
-                            Reservation.repeat_frequency != RepeatFrequency.NEVER,
-                            ~Reservation.end_notification_sent,
-                            _make_occurrence_date_filter(Reservation.end_dt, defaults, room_columns))
-                    .order_by(Reservation.booked_for_id, Reservation.start_dt, Room.id)
+                    .filter(_make_occurrence_date_filter(cte.c.last_valid_end_dt, defaults, room_columns,
+                                                         cte.c.repeat_frequency))
+                    .order_by('booked_for_id', 'start_dt', 'room_id')
                     .all())
 
     for user, user_reservations in groupby(reservations, key=attrgetter('booked_for_user')):

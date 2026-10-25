@@ -1,59 +1,56 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 import _ from 'lodash';
 
-
 function smartCamelCase(string) {
-    return _.camelCase(string).replace(/Url/g, 'URL');
+  return _.camelCase(string).replace(/Url/g, 'URL');
 }
 
-export function camelizeKeys(obj) {
-    if (!_.isPlainObject(obj) && !_.isArray(obj)) {
-        return obj;
-    }
+/**
+ * Camelizes keys of an object recursively.
+ *
+ * @param {Object} obj - Object to camelize
+ * @param {string|null} skip - Key of object to skip
+ */
+export function camelizeKeys(obj, skip = null) {
+  if (!_.isPlainObject(obj) && !_.isArray(obj)) {
+    return obj;
+  }
 
-    if (_.isArray(obj)) {
-        return obj.map(camelizeKeys);
-    }
+  if (_.isArray(obj)) {
+    return obj.map(x => camelizeKeys(x, skip));
+  }
 
-    return Object.entries(obj).reduce((accum, [key, value]) => {
-        if (key.match(/^[A-Za-z_]+$/)) {
-            return {...accum, [smartCamelCase(key)]: camelizeKeys(value)};
-        } else {
-            return {...accum, [key]: camelizeKeys(value)};
-        }
-    }, {});
+  return Object.entries(obj).reduce((accum, [key, value]) => {
+    if (skip && skip === key) {
+      return {...accum, [smartCamelCase(key)]: value};
+    } else if (key.match(/^[A-Za-z_]+$/)) {
+      return {...accum, [smartCamelCase(key)]: camelizeKeys(value, skip)};
+    } else {
+      return {...accum, [key]: camelizeKeys(value, skip)};
+    }
+  }, {});
 }
 
 export function snakifyKeys(obj) {
-    if (!_.isPlainObject(obj) && !_.isArray(obj)) {
-        return obj;
-    }
+  if (!_.isPlainObject(obj) && !_.isArray(obj)) {
+    return obj;
+  }
 
-    if (_.isArray(obj)) {
-        return obj.map(snakifyKeys);
-    }
+  if (_.isArray(obj)) {
+    return obj.map(snakifyKeys);
+  }
 
-    return Object.entries(obj).reduce((accum, [key, value]) => {
-        if (key.match(/^[A-Za-z_]+$/)) {
-            return {...accum, [_.snakeCase(key)]: snakifyKeys(value)};
-        } else {
-            return {...accum, [key]: snakifyKeys(value)};
-        }
-    }, {});
+  return Object.entries(obj).reduce((accum, [key, value]) => {
+    if (key.match(/^[A-Za-z_]+$/)) {
+      return {...accum, [_.snakeCase(key)]: snakifyKeys(value)};
+    } else {
+      return {...accum, [key]: snakifyKeys(value)};
+    }
+  }, {});
 }

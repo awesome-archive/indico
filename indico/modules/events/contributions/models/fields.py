@@ -1,36 +1,25 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declared_attr
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
+from indico.util.enum import RichIntEnum
 from indico.util.i18n import _
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii, text_to_repr
-from indico.util.struct.enum import RichIntEnum
+from indico.util.string import format_repr, text_to_repr
 
 
 def _get_next_position(context):
     """Get the next contribution field position for the event."""
     event_id = context.current_parameters['event_id']
-    res = db.session.query(db.func.max(ContributionField.position)).filter_by(event_id=event_id).one()
+    res = db.session.query(db.func.max(ContributionField.position)).filter(ContributionField.event_id == event_id).one()
     return (res[0] or 0) + 1
 
 
@@ -100,7 +89,7 @@ class ContributionField(db.Model):
         nullable=True
     )
     field_data = db.Column(
-        JSON,
+        JSONB,
         nullable=False,
         default={}
     )
@@ -137,10 +126,14 @@ class ContributionField(db.Model):
         return self._get_field(management=True)
 
     @property
-    def filter_choices(self):
-        return {x['id']: x['option'] for x in self.field_data.get('options', {})}
+    def is_public(self):
+        return self.visibility == ContributionFieldVisibility.public
 
-    @return_ascii
+    @property
+    def filter_choices(self):
+        no_value = {None: _('No value')}
+        return no_value | {x['id']: x['option'] for x in self.field_data.get('options', {})}
+
     def __repr__(self):
         return format_repr(self, 'id', 'field_type', is_required=False, is_active=True, _text=self.title)
 
@@ -155,7 +148,7 @@ class ContributionFieldValueBase(db.Model):
     contribution_field_backref_name = None
 
     data = db.Column(
-        JSON,
+        JSONB,
         nullable=False
     )
 
@@ -163,7 +156,7 @@ class ContributionFieldValueBase(db.Model):
     def contribution_field_id(cls):
         return db.Column(
             db.Integer,
-            db.ForeignKey('events.contribution_fields.id', name='fk_{}_contribution_field'.format(cls.__tablename__)),
+            db.ForeignKey('events.contribution_fields.id', name=f'fk_{cls.__tablename__}_contribution_field'),
             primary_key=True,
             index=True
         )
@@ -201,7 +194,6 @@ class ContributionFieldValue(ContributionFieldValueBase):
     # relationship backrefs:
     # - contribution (Contribution.field_values)
 
-    @return_ascii
     def __repr__(self):
-        text = text_to_repr(self.data) if isinstance(self.data, unicode) else self.data
+        text = text_to_repr(self.data) if isinstance(self.data, str) else self.data
         return format_repr(self, 'contribution_id', 'contribution_field_id', _text=text)

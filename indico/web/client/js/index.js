@@ -1,30 +1,33 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-import '@babel/polyfill';
+import 'core-js/es';
+import 'element-internals-polyfill';
 
 import './legacy/presentation.js';
 import './legacy/indico.js';
 import './legacy/timetable.js';
 
+import './custom_elements';
+import './widgets/tz_selector.js';
+import './widgets/dynamic-tips.js';
+
 import '../styles/screen.scss';
+import '../styles/editor-output.scss';
+import '../styles/tinymce.scss';
+import 'indico-sui-theme/semantic.css';
+import 'rc-time-picker/assets/index.css';
 
-// outdatedbrowser has to be loaded with exports-loader
-// in order to be available from 'window.outdatedBrowser'
-window.outdatedBrowser = require('exports-loader?outdatedBrowser!outdatedbrowser');
+import showReactErrorDialog from 'indico/react/errors';
 
-import 'outdatedbrowser/outdatedbrowser/outdatedbrowser.css';
+// XXX: some plugins (and legacy code) use it
+window.showErrorDialog = (error, instantReport = false) => {
+  if (process.env.NODE_ENV === 'development') {
+    console.warn('Legacy showErrorDialog called');
+  }
+  return showReactErrorDialog(error, instantReport);
+};

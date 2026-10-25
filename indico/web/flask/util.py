@@ -1,45 +1,34 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import inspect
 import os
-import time
+import re
+import secrets
 from importlib import import_module
+from urllib.parse import urlsplit
 
-from flask import Blueprint, current_app, g, redirect, request
+from flask import Blueprint, current_app, g, has_request_context, redirect, request
 from flask import send_file as _send_file
 from flask import url_for as _url_for
 from flask.helpers import get_root_path
-from werkzeug.datastructures import FileStorage, Headers
+from flask_cors import cross_origin
 from werkzeug.exceptions import HTTPException, NotFound
 from werkzeug.routing import BaseConverter, BuildError, RequestRedirect, UnicodeConverter
-from werkzeug.urls import url_parse
-from werkzeug.wrappers import Response as WerkzeugResponse
 
 from indico.core.config import config
 from indico.util.caching import memoize
-from indico.util.fs import secure_filename
 from indico.util.locators import get_locator
+from indico.util.string import is_legacy_id
 from indico.web.util import jsonify_data
 
 
 def discover_blueprints():
-    """Discovers all blueprints inside the indico package
+    """Discover all blueprints inside the indico package.
 
     Only blueprints in a ``blueprint.py`` module or inside a
     ``blueprints`` package are loaded. Any other files are not touched
@@ -50,11 +39,11 @@ def discover_blueprints():
     """
     package_root = get_root_path('indico')
     modules = set()
-    for root, dirs, files in os.walk(package_root):
+    for root, _dirs, files in os.walk(package_root):
         for name in files:
             if not name.endswith('.py') or name.endswith('_test.py'):
                 continue
-            segments = ['indico'] + os.path.relpath(root, package_root).replace(os.sep, '.').split('.') + [name[:-3]]
+            segments = ['indico', *os.path.relpath(root, package_root).replace(os.sep, '.').split('.'), name[:-3]]
             if segments[-1] == 'blueprint':
                 modules.add('.'.join(segments))
             elif 'blueprints' in segments[:-1]:
@@ -78,32 +67,9 @@ def discover_blueprints():
     return blueprints, compat_blueprints
 
 
-def _convert_request_value(x):
-    if isinstance(x, unicode):
-        return x.encode('utf-8')
-    elif isinstance(x, FileStorage):
-        return x
-    raise TypeError('Unexpected item in request data: %s' % type(x))
-
-
-def create_flat_args():
-    """Creates a dict containing the GET/POST arguments in a style old indico code expects.
-
-    Do not use this for anything new - use request.* directly instead!"""
-    args = request.args.copy()
-    for key, values in request.form.iterlists():
-        args.setlist(key, values)
-    for key, values in request.files.iterlists():
-        args.setlist(key, values)
-    flat_args = {}
-    for key, item in args.iterlists():
-        flat_args[key] = map(_convert_request_value, item) if len(item) > 1 else _convert_request_value(item[0])
-    return flat_args
-
-
 @memoize
 def make_view_func(obj):
-    """Turns an object in to a view function.
+    """Turn an object in to a view function.
 
     This function is called on each view_func passed to IndicoBlueprint.add_url_route().
     It handles RH classes and normal functions.
@@ -116,24 +82,29 @@ def make_view_func(obj):
                 return obj().process()
         else:
             # Some class we didn't expect.
-            raise ValueError('Unexpected view func class: %r' % obj)
+            raise ValueError(f'Unexpected view func class: {obj!r}')
 
         wrapper.__name__ = obj.__name__
         wrapper.__doc__ = obj.__doc__
+
+        if (cors_config := getattr(obj, '_CORS', None)) is not None:
+            # apply CORS options from `@cors` decorator
+            wrapper = cross_origin(**cors_config)(wrapper)
+
         return wrapper
     elif callable(obj):
         # Normal function
         return obj
     else:
         # If you ever get this error you should probably feel bad. :)
-        raise ValueError('Unexpected view func: %r' % obj)
+        raise ValueError(f'Unexpected view func: {obj!r}')
 
 
 @memoize
 def redirect_view(endpoint, code=302):
-    """Creates a view function that redirects to the given endpoint."""
+    """Create a view function that redirects to the given endpoint."""
     def _redirect(**kwargs):
-        params = dict(request.args.to_dict(), **kwargs)
+        params = request.args.to_dict() | kwargs
         return redirect(_url_for(endpoint, **params), code=code)
 
     return _redirect
@@ -141,28 +112,36 @@ def redirect_view(endpoint, code=302):
 
 def make_compat_redirect_func(blueprint, endpoint, view_func=None, view_args_conv=None):
     def _redirect(**view_args):
+        from indico.modules.events.models.legacy_mapping import LegacyEventMapping
+
         # In case of POST we can't safely redirect since the method would switch to GET
         # and thus the request would most likely fail.
         if view_func and request.method == 'POST':
             return view_func(**view_args)
         # Ugly hack to get non-list arguments unless they are used multiple times.
         # This is necessary since passing a list for an URL path argument breaks things.
-        view_args.update((k, v[0] if len(v) == 1 else v) for k, v in request.args.iterlists())
+        view_args.update((k, v[0] if len(v) == 1 else v) for k, v in request.args.lists())
         if view_args_conv is not None:
-            for oldkey, newkey in view_args_conv.iteritems():
+            for oldkey, newkey in view_args_conv.items():
                 value = view_args.pop(oldkey, None)
                 if newkey is not None:
                     view_args[newkey] = value
+        if (legacy_event_id := view_args.get('event_id')) is not None and is_legacy_id(legacy_event_id):
+            # Resolve legacy event IDs here, because when building the URL there's a good chance that
+            # the `event_id` URL segment is a number and not a string, so building the URL would fail
+            # in case of IDs like `a000001`, or point to the wrong event in case of leading zeroes.
+            mapping = LegacyEventMapping.query.filter_by(legacy_event_id=legacy_event_id).first_or_404()
+            view_args['event_id'] = mapping.event_id
         try:
-            target = _url_for('%s.%s' % (getattr(blueprint, 'name', blueprint), endpoint), **view_args)
-        except (BuildError, ValueError):
+            target = _url_for('{}.{}'.format(getattr(blueprint, 'name', blueprint), endpoint), **view_args)
+        except (BuildError, ValueError, TypeError):
             raise NotFound
         return redirect(target, 302 if current_app.debug else 301)
     return _redirect
 
 
 def url_for(endpoint, *targets, **values):
-    """Wrapper for Flask's url_for() function.
+    """Wrapper for Flask's ``url_for`` function.
 
     The `target` argument allows you to pass some object having a `locator` property returning a dict.
 
@@ -173,22 +152,23 @@ def url_for(endpoint, *targets, **values):
     _scheme: a string specifying the desired URL scheme (only with _external) - use _secure if possible!
     _anchor: if provided this is added as #anchor to the URL.
     """
-
     if targets:
         locator = {}
         for target in targets:
             if target:  # don't fail on None or mako's Undefined
                 locator.update(get_locator(target))
-        intersection = set(locator.iterkeys()) & set(values.iterkeys())
+        intersection = set(locator.keys()) & set(values.keys())
         if intersection:
-            raise ValueError('url_for kwargs collide with locator: %s' % ', '.join(intersection))
+            raise ValueError('url_for kwargs collide with locator: {}'.format(', '.join(intersection)))
         values.update(locator)
 
-    for key, value in values.iteritems():
+    for key, value in values.items():
         # Avoid =True and =False in the URL
         if isinstance(value, bool):
             values[key] = int(value)
 
+    values.setdefault('_external', False)
+    values = dict(sorted(values.items()))
     url = _url_for(endpoint, **values)
     if g.get('static_site') and 'custom_manifests' in g and not values.get('_external'):
         # for static sites we assume all relative urls need to be
@@ -203,7 +183,7 @@ def url_for(endpoint, *targets, **values):
 
 
 def url_rule_to_js(endpoint):
-    """Converts the rule(s) of an endpoint to a JavaScript object.
+    """Convert the rule(s) of an endpoint to a JavaScript object.
 
     Use this if you need to build an URL in JavaScript, but only if
     you really have to do that instead of e.g. building the URL on
@@ -217,7 +197,6 @@ def url_rule_to_js(endpoint):
     ``params`` is is an object containing the arguments and ``fragment``
     a string containing the ``#anchor`` if needed.
     """
-
     if endpoint[0] == '.':
         endpoint = request.blueprint + endpoint
 
@@ -236,16 +215,16 @@ def url_rule_to_js(endpoint):
                         'data': data
                     } for is_dynamic, data in rule._trace
                 ],
-                'converters': dict((key, type(converter).__name__)
-                                   for key, converter in rule._converters.iteritems()
-                                   if type(converter) is not UnicodeConverter)
+                'converters': {key: type(converter).__name__
+                               for key, converter in rule._converters.items()
+                               if not isinstance(converter, UnicodeConverter)}
             } for rule in current_app.url_map.iter_rules(endpoint)
         ]
     }
 
 
 def redirect_or_jsonify(location, flash=True, **json_data):
-    """Returns a redirect or json response.
+    """Return a redirect or json response.
 
     If the request was an XHR we return JSON, otherwise we redirect.
     Unless set to another value, the JSON data includes `success=True`
@@ -270,52 +249,72 @@ def _is_office_mimetype(mimetype):
     return False
 
 
-def send_file(name, path_or_fd, mimetype, last_modified=None, no_cache=True, inline=None, conditional=False, safe=True,
-              **kwargs):
-    """Sends a file to the user.
+def should_inline_file(mimetype, inline=None, *, safe=True):
+    if inline is None:
+        inline = mimetype not in ('text/csv', 'text/xml', 'application/xml')
+    if request.user_agent.platform == 'Android':
+        # Android is just full of fail when it comes to inline content-disposition...
+        inline = False
+    if _is_office_mimetype(mimetype):
+        inline = False
+    if safe and (mimetype == 'text/html' or mimetype.endswith('+xml')):
+        inline = False
+    return inline
+
+
+def get_safe_file_csp():
+    """Return a strict CSP header suitable for serving arbitrary files.
+
+    This can be used e.g. by plugins that implement file storage backends
+    where `send_file` below is not used.
+    """
+    csp_directives = [
+        "default-src 'none'",
+        # img-src self is needed due to https://bugzilla.mozilla.org/show_bug.cgi?id=1735994
+        "img-src 'self'",
+        # Chrome cannot play videos using its builtin player when accessing a video URL directly
+        # since it's simply an HTML page with a <video> tag pointing to the same URL. Due to some
+        # of these URLs containing special characters that would not work in headers, we just stick
+        # with 'self'...
+        "media-src 'self'",
+    ]
+    return '; '.join(csp_directives)
+
+
+def send_file(name, path_or_fd, mimetype, *, last_modified=None, no_cache=True, inline=None,
+              max_age=86400, conditional=False, safe=True, **kwargs):
+    """Send a file to the user.
 
     `name` is required and should be the filename visible to the user.
     `path_or_fd` is either the physical path to the file or a file-like object (e.g. a StringIO).
     `mimetype` SHOULD be a proper MIME type such as image/png. It may also be an indico-style file type such as JPG.
     `last_modified` may contain a unix timestamp or datetime object indicating the last modification of the file.
-    `no_cache` can be set to False to disable no-cache headers.
+    `no_cache` can be set to False to disable no-cache headers. Setting `conditional` to `True` overrides it (`False`).
     `inline` defaults to true except for certain filetypes like XML and CSV. It SHOULD be set to false only when you
     want to force the user's browser to download the file. Usually it is much nicer if e.g. a PDF file can be displayed
     inline so don't disable it unless really necessary.
     `conditional` is very useful when sending static files such as CSS/JS/images. It will allow the browser to retrieve
-    the file only if it has been modified (based on mtime and size).
+    the file only if it has been modified (based on mtime and size). Setting it will override `no_cache`.
     `safe` adds some basic security features such a adding a content-security-policy and forcing inline=False for
     text/html mimetypes
+    `max_age` sets the number of seconds to cache a file for in the browser - defaults to 86400 seconds (24 hours). This
+    can only be used in combination with `no_cache=False`.
     """
-
-    name = secure_filename(name, 'file')
+    name = re.sub(r'\s+', ' ', name).strip()  # get rid of crap like linebreaks
     assert '/' in mimetype
-    if inline is None:
-        inline = mimetype not in ('text/csv', 'text/xml', 'application/xml')
-    if request.user_agent.platform == 'android':
-        # Android is just full of fail when it comes to inline content-disposition...
-        inline = False
-    if _is_office_mimetype(mimetype):
-        inline = False
-    if safe and mimetype in ('text/html', 'image/svg+xml'):
-        inline = False
+    inline = should_inline_file(mimetype, inline, safe=safe)
+    if not no_cache:
+        kwargs['max_age'] = max_age
     try:
-        rv = _send_file(path_or_fd, mimetype=mimetype, as_attachment=not inline, attachment_filename=name,
-                        conditional=conditional, **kwargs)
-    except IOError:
+        rv = _send_file(path_or_fd, mimetype=mimetype, as_attachment=(not inline), download_name=name,
+                        conditional=conditional, last_modified=last_modified, **kwargs)
+    except OSError:
         if not current_app.debug:
             raise
-        raise NotFound('File not found: %s' % path_or_fd)
+        raise NotFound(f'File not found: {path_or_fd}')
     if safe:
-        rv.headers.add('Content-Security-Policy', "script-src 'self'; object-src 'self'")
-    if inline:
-        # send_file does not add this header if as_attachment is False
-        rv.headers.add('Content-Disposition', 'inline', filename=name)
-    if last_modified:
-        if not isinstance(last_modified, int):
-            last_modified = int(time.mktime(last_modified.timetuple()))
-        rv.last_modified = last_modified
-    if no_cache:
+        rv.headers.add('Content-Security-Policy', get_safe_file_csp())
+    if not conditional and no_cache:
         del rv.expires
         del rv.cache_control.max_age
         rv.cache_control.public = False
@@ -327,8 +326,8 @@ def send_file(name, path_or_fd, mimetype, last_modified=None, no_cache=True, inl
 def endpoint_for_url(url, base_url=None):
     if base_url is None:
         base_url = config.BASE_URL
-    base_url_data = url_parse(base_url)
-    url_data = url_parse(url)
+    base_url_data = urlsplit(base_url)
+    url_data = urlsplit(url)
     netloc = url_data.netloc or base_url_data.netloc
     # absolute url not matching our hostname
     if url_data.netloc and url_data.netloc != base_url_data.netloc:
@@ -349,11 +348,11 @@ def endpoint_for_url(url, base_url=None):
 # Note: When adding custom converters please do not forget to add them to converter_functions in routing.js
 # if they need any custom processing (i.e. not just encodeURIComponent) in JavaScript.
 class ListConverter(BaseConverter):
-    """Matches a dash-separated list"""
+    """Match a dash-separated list."""
 
     def __init__(self, map):
         BaseConverter.__init__(self, map)
-        self.regex = '\w+(?:-\w+)*'
+        self.regex = r'\w+(?:-\w+)*'
 
     def to_python(self, value):
         return value.split('-')
@@ -361,48 +360,10 @@ class ListConverter(BaseConverter):
     def to_url(self, value):
         if isinstance(value, (list, tuple, set)):
             value = '-'.join(value)
-        return super(ListConverter, self).to_url(value)
+        return super().to_url(value)
 
 
-class ResponseUtil(object):
-    """This class allows "modifying" a Response object before it is actually created.
-
-    The purpose of this is to allow e.g. an Indico RH to trigger a redirect but revoke
-    it later in case of an error or to simply have something to pass around to functions
-    which want to modify headers while there is no response available.
-    """
-
-    def __init__(self):
-        self.headers = Headers()
-        self.status = 200
-        self.content_type = None
-
-    @property
-    def modified(self):
-        return bool(self.headers) or self.status != 200 or self.content_type
-
-    def make_empty(self):
-        return self.make_response('')
-
-    def make_response(self, res):
-        if isinstance(res, (current_app.response_class, WerkzeugResponse, tuple)):
-            if self.modified:
-                # If we receive a response - most likely one created by send_file - we do not allow any
-                # external modifications.
-                raise Exception('Cannot combine response object with custom modifications')
-            return res
-
-        # Return a plain string if that's all we have
-        if not res and not self.modified:
-            return ''
-
-        res = current_app.make_response((res, self.status, self.headers))
-        if self.content_type:
-            res.content_type = self.content_type
-        return res
-
-
-class XAccelMiddleware(object):
+class XAccelMiddleware:
     """A WSGI Middleware that converts X-Sendfile headers to X-Accel-Redirect
     headers if possible.
 
@@ -412,7 +373,7 @@ class XAccelMiddleware(object):
 
     def __init__(self, app, mapping):
         self.app = app
-        self.mapping = [(str(k), str(v)) for k, v in mapping.iteritems()]
+        self.mapping = [(str(k), str(v)) for k, v in mapping.items()]
 
     def __call__(self, environ, start_response):
         def _start_response(status, headers, exc_info=None):
@@ -426,8 +387,8 @@ class XAccelMiddleware(object):
             if xsf_path:
                 uri = self.make_x_accel_header(xsf_path)
                 if not uri:
-                    raise ValueError('Could not map {} to a URI'.format(xsf_path))
-                new_headers.append((b'X-Accel-Redirect', uri))
+                    raise ValueError(f'Could not map {xsf_path} to a URI')
+                new_headers.append(('X-Accel-Redirect', uri))
             return start_response(status, new_headers, exc_info)
 
         return self.app(environ, _start_response)
@@ -436,3 +397,16 @@ class XAccelMiddleware(object):
         for base, uri in self.mapping:
             if path.startswith(str(base + '/')):
                 return uri + path[len(base):]
+
+
+def get_csp_nonce(*, init=True):
+    if not has_request_context():
+        return None
+    if not init or 'csp_nonce' in g:
+        return g.get('csp_nonce')
+    # I think this is safe because custom headers cannot be sent in a regular request from a browser,
+    # so you cannot combine this with HTML injection to get XSS. Being able to override the nonce is
+    # necessary due to the ajax-form stuff we have, since custom fields often come with JS code to
+    # initialize them, which of course needs to match the page's current nonce instead of a new one.
+    # This could be avoided by using custom elements for all these fields instead of a JS function call...
+    return g.setdefault('csp_nonce', request.headers.get('X-Indico-CSP-Nonce') or secrets.token_urlsafe(32))

@@ -1,34 +1,25 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-import functools
 import itertools
 import posixpath
 import re
-from operator import itemgetter
+import typing as t
+from dataclasses import dataclass
+from types import GeneratorType
 
+from dateutil.relativedelta import relativedelta
 from flask import current_app
+from flask_pluginengine.templating import PluginEnvironment
 from flask_pluginengine.util import get_state
-from jinja2 import environmentfilter
-from jinja2.ext import Extension
+from jinja2 import pass_environment
 from jinja2.filters import _GroupTuple, make_attrgetter
-from jinja2.lexer import Token
 from jinja2.loaders import BaseLoader, FileSystemLoader, TemplateNotFound, split_template_path
+from jinja2.runtime import StrictUndefined
 from jinja2.utils import internalcode
 from markupsafe import Markup
 
@@ -41,21 +32,23 @@ indentation_re = re.compile(r'^ +', re.MULTILINE)
 
 
 def underline(s, sep='-'):
-    return '{0}\n{1}'.format(s, sep * len(s))
+    return f'{s}\n{sep * len(s)}'
 
 
 def markdown(value):
-    return Markup(EnsureUnicodeExtension.ensure_unicode(render_markdown(value, extensions=('nl2br', 'tables'))))
+    return Markup(render_markdown(value, extensions=('nl2br', 'tables')))
 
 
 def dedent(value):
-    """Removes leading whitespace from each line"""
+    """Remove leading whitespace from each line."""
     return indentation_re.sub('', value)
 
 
-@environmentfilter
+@pass_environment
 def natsort(environment, value, reverse=False, case_sensitive=False, attribute=None):
-    """Sort an iterable in natural order.  Per default it sorts ascending,
+    """Sort an iterable in natural order.
+
+    Per default it sorts ascending,
     if you pass it true as first argument it will reverse the sorting.
 
     If the iterable is made of strings the third parameter can be used to
@@ -66,7 +59,7 @@ def natsort(environment, value, reverse=False, case_sensitive=False, attribute=N
     """
     if not case_sensitive:
         def sort_func(item):
-            if isinstance(item, basestring):
+            if isinstance(item, str):
                 item = item.lower()
             return natural_sort_key(item)
     else:
@@ -81,7 +74,7 @@ def natsort(environment, value, reverse=False, case_sensitive=False, attribute=N
     return sorted(value, key=sort_func, reverse=reverse)
 
 
-@environmentfilter
+@pass_environment
 def groupby(environment, value, attribute, reverse=False):
     """Like Jinja's builtin `groupby` filter, but allows reversed order."""
     expr = make_attrgetter(environment, attribute)
@@ -89,8 +82,23 @@ def groupby(environment, value, attribute, reverse=False):
             for key, values in itertools.groupby(sorted(value, key=expr, reverse=reverse), expr)]
 
 
+def plusdelta(value, **kwargs):
+    """Add a relativedelta to a datetime object."""
+    return value + relativedelta(**kwargs)
+
+
+def decodeprincipal(value, **kwargs):
+    """Decode a principal into an actual object."""
+    from indico.util.user import principal_from_identifier
+
+    # this is a template filter, acting on server-side data, which is typically persistent and thus not
+    # signed in case of a `User:id` identifier
+    kwargs.setdefault('require_user_token', False)
+    return principal_from_identifier(value, soft_fail=True, **kwargs)
+
+
 def instanceof(value, type_):
-    """Checks if `value` is an instance of `type_`
+    """Check if `value` is an instance of `type_`.
 
     :param value: an object
     :param type_: a type
@@ -99,7 +107,7 @@ def instanceof(value, type_):
 
 
 def subclassof(value, type_):
-    """Checks if `value` is a subclass of `type_`
+    """Check if `value` is a subclass of `type_`.
 
     :param value: a type
     :param type_: a type
@@ -108,7 +116,7 @@ def subclassof(value, type_):
 
 
 def get_overridable_template_name(name, plugin, core_prefix='', plugin_prefix=''):
-    """Returns template names for templates that may be overridden in a plugin.
+    """Return template names for templates that may be overridden in a plugin.
 
     :param name: the name of the template
     :param plugin: the :class:`IndicoPlugin` that may override it (can be none)
@@ -120,20 +128,38 @@ def get_overridable_template_name(name, plugin, core_prefix='', plugin_prefix=''
     if plugin is None:
         return core_tpl
     else:
-        return ['{}:{}{}'.format(plugin.name, plugin_prefix, name), core_tpl]
+        return [f'{plugin.name}:{plugin_prefix}{name}', core_tpl]
 
 
 def get_template_module(template_name_or_list, **context):
-    """Returns the python module of a template.
+    """Return the python module of a template.
 
-    This allows you to call e.g. macros inside it from Python code."""
+    This allows you to call e.g. macros inside it from Python code.
+    """
     current_app.update_template_context(context)
     tpl = current_app.jinja_env.get_or_select_template(template_name_or_list)
     return tpl.make_module(context)
 
 
+@dataclass(frozen=True)
+class TemplateSnippet:
+    """A snippet to be returned by a template hook.
+
+    The `content` is typically string or Markup object, but in some special cases
+    it may also be a different object.
+
+    Typically this class does not need to be used when registering a template hook
+    unless you need the ability to specify priority or disable markup wrapping at
+    execution time, or yield multiple snippets with different settings.
+    """
+
+    content: t.Any
+    markup: bool = True
+    priority: int = 50
+
+
 def register_template_hook(name, receiver, priority=50, markup=True, plugin=None):
-    """Registers a function to be called when a template hook is invoked.
+    """Register a function to be called when a template hook is invoked.
 
     The receiver function should always support arbitrary ``**kwargs``
     to prevent breakage in future Indico versions which might add new
@@ -153,16 +179,18 @@ def register_template_hook(name, receiver, priority=50, markup=True, plugin=None
     :param markup: If the returned data is HTML
     """
     def _func(_, **kw):
-        return markup, priority, receiver(**kw)
+        res = receiver(**kw)
+        res = tuple(res) if isinstance(res, GeneratorType) else (res,)
+        return tuple(x if isinstance(x, TemplateSnippet) else TemplateSnippet(x, markup, priority) for x in res)
 
     if plugin is None:
-        signals.plugin.template_hook.connect(_func, sender=unicode(name), weak=False)
+        signals.plugin.template_hook.connect(_func, sender=str(name), weak=False)
     else:
-        plugin.connect(signals.plugin.template_hook, _func, sender=unicode(name))
+        plugin.connect(signals.plugin.template_hook, _func, sender=str(name))
 
 
 def template_hook(name, priority=50, markup=True):
-    """Decorator for register_template_hook"""
+    """Decorator for register_template_hook."""
     def decorator(func):
         register_template_hook(name, func, priority, markup)
         return func
@@ -178,17 +206,18 @@ def call_template_hook(*name, **kwargs):
     :param kwargs: Data to pass to the signal receivers.
     """
     if len(name) != 1:
-        raise TypeError('call_template_hook() accepts only one positional argument, {} given'.format(len(name)))
+        raise TypeError(f'call_template_hook() accepts only one positional argument, {len(name)} given')
     name = name[0]
     as_list = kwargs.pop('as_list', False)
     values = []
-    for is_markup, priority, value in values_from_signal(signals.plugin.template_hook.send(unicode(name), **kwargs),
-                                                         single_value=True, as_list=as_list):
-        if value:
-            if is_markup:
-                value = Markup(value)
-            values.append((priority, value))
-    values.sort(key=itemgetter(0))
+    for snippet in values_from_signal(signals.plugin.template_hook.send(str(name), **kwargs),
+                                      multi_value_types=tuple, as_list=True):
+        if not (value := snippet.content):
+            continue
+        if snippet.markup:
+            value = Markup(value)
+        values.append((snippet.priority, value))
+    values.sort(key=lambda x: (x[0], str(x[1])))
     if as_list:
         return [x[1] for x in values]
     else:
@@ -214,6 +243,12 @@ class CustomizationLoader(BaseLoader):
         return rv
 
     def get_source(self, environment, template):
+        source, filename, uptodate = self._do_get_source(environment, template)
+        if template.endswith('.html'):
+            source = source.replace('<script>', '<script nonce="{{ get_csp_nonce() }}">')
+        return source, filename, uptodate
+
+    def _do_get_source(self, environment, template):
         path = posixpath.join(*split_template_path(template))
         if template[0] == '~':
             return self._get_fallback(environment, template[1:], path[1:], customization_ignored=True)
@@ -233,97 +268,64 @@ class CustomizationLoader(BaseLoader):
 
     @internalcode
     def load(self, environment, name, globals=None):
-        tpl = super(CustomizationLoader, self).load(environment, name, globals)
+        tpl = super().load(environment, name, globals)
         if ':' not in name:
             return tpl
         # This is almost exactly what PluginPrefixLoader.load() does, but we have
         # to replicate it here since we need to handle `~` and use our custom
         # `get_source` to get the overridden template
-        plugin_name, tpl_name = name.split(':', 1)
+        plugin_name = name.split(':', 1)[0]
         if plugin_name[0] == '~':
             plugin_name = plugin_name[1:]
         plugin = get_state(current_app).plugin_engine.get_plugin(plugin_name)
         if plugin is None:
             # that should never happen
-            raise RuntimeError('Plugin template {} has no plugin'.format(name))
+            raise RuntimeError(f'Plugin template {name} has no plugin')
         tpl.plugin = plugin
         return tpl
 
 
-class EnsureUnicodeExtension(Extension):
-    """Ensures all strings in Jinja are unicode"""
+def _convert_undefined(new_cls, undefined):
+    return new_cls(
+        hint=undefined._undefined_hint,
+        obj=undefined._undefined_obj,
+        name=undefined._undefined_name,
+        exc=undefined._undefined_exception,
+    )
 
-    @classmethod
-    def wrap_func(cls, f):
-        """Wraps a function to make sure it returns unicode.
 
-        Useful for custom filters."""
+class SemiStrictUndefined(StrictUndefined):
+    """Like `StrictUndefined` but allows truthiness checks.
 
-        @functools.wraps(f)
-        def wrapper(*args, **kwargs):
-            return cls.ensure_unicode(f(*args, **kwargs))
+    This allows for code such as ``{% if foo.bar %}`` and comparisons which are
+    widely used and thus raising exceptions would be somewhat annoying. And unlike
+    undefined top-level variables undefined attributes/items are much more likely
+    to show up when testing things.
+    """
 
-        return wrapper
+    def __bool__(self):
+        return False
 
-    @staticmethod
-    def ensure_unicode(s):
-        """Converts a bytestring to unicode. Must be registered as a filter!"""
-        if isinstance(s, str):
-            return s.decode('utf-8')
-        return s
+    def __eq__(self, other):
+        return type(self) is type(other)
 
-    def filter_stream(self, stream):
-        # The token stream looks like this:
-        # ------------------------
-        # variable_begin {{
-        # name           event
-        # dot            .
-        # name           getTitle
-        # lparen         (
-        # rparen         )
-        # pipe           |
-        # name           safe
-        # variable_end   }}
-        # ------------------------
-        # Intercepting the end of the actual variable is hard but it's rather easy to get the end of
-        # the variable tag or the start of the first filter. As filters are optional we need to check
-        # both cases. If we inject the code before the first filter we *probably* don't need to run
-        # it again later assuming our filters are nice and only return unicode. If that's not the
-        # case we can simply remove the `variable_done` checks.
-        # Due to the way Jinja works it is pretty much impossible to apply the filter to arguments
-        # passed inside a {% trans foo=..., bar=... %} argument list - we have nothing to detect the
-        # end of an argument as the 'comma' token might be inside a function call. So in that case#
-        # people simply need to unicodify the strings manually. :(
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
-        variable_done = False
-        in_trans = False
-        in_variable = False
-        for token in stream:
-            # Check if we are inside a trans block - we cannot use filters there!
-            if token.type == 'block_begin':
-                block_name = stream.current.value
-                if block_name == 'trans':
-                    in_trans = True
-                elif block_name == 'endtrans':
-                    in_trans = False
-            elif token.type == 'variable_begin':
-                in_variable = True
 
-            if not in_trans and in_variable:
-                if token.type == 'pipe':
-                    # Inject our filter call before the first filter
-                    yield Token(token.lineno, 'pipe', '|')
-                    yield Token(token.lineno, 'name', 'ensure_unicode')
-                    variable_done = True
-                elif token.type == 'variable_end' or (token.type == 'name' and token.value == 'if'):
-                    if not variable_done:
-                        # Inject our filter call if we haven't injected it right after the variable
-                        yield Token(token.lineno, 'pipe', '|')
-                        yield Token(token.lineno, 'name', 'ensure_unicode')
-                    variable_done = False
+class IndicoEnvironment(PluginEnvironment):
+    def getattr(self, obj, attribute):
+        rv = super().getattr(obj, attribute)
+        if isinstance(rv, StrictUndefined):
+            # we only care about top-level undefineds, so if getting an attribute returns
+            # undefined, we switch to a less strict Undefined implementation
+            return _convert_undefined(SemiStrictUndefined, rv)
+        return rv
 
-            if token.type == 'variable_end':
-                in_variable = False
-
-            # Original token
-            yield token
+    def getitem(self, obj, argument):
+        rv = super().getitem(obj, argument)
+        if isinstance(rv, StrictUndefined):
+            # we only care about top-level undefineds, so if getting an item returns
+            # undefined, we switch to a less strict Undefined implementation
+            return _convert_undefined(SemiStrictUndefined, rv)
+        return rv

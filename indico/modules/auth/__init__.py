@@ -1,33 +1,28 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from datetime import timedelta
 
 from flask import redirect, request, session
 from flask_multipass import MultipassException
+from werkzeug.exceptions import Forbidden
 
 from indico.core import signals
 from indico.core.auth import multipass
 from indico.core.config import config
 from indico.core.db import db
+from indico.core.errors import NoReportError
 from indico.core.logger import Logger
 from indico.modules.auth.models.identities import Identity
 from indico.modules.auth.models.registration_requests import RegistrationRequest
 from indico.modules.auth.util import save_identity_info
 from indico.modules.users import User
+from indico.modules.users.util import log_user_update
+from indico.util.date_time import now_utc
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
@@ -47,7 +42,7 @@ def process_identity(identity_info):
         emails = {email.lower() for email in identity_info.data.getlist('email') if email}
         if emails:
             identity_info.data.setlist('email', emails)
-            users = User.query.filter(~User.is_deleted, User.all_emails.contains(db.func.any(list(emails)))).all()
+            users = User.query.filter(~User.is_deleted, User.all_emails.in_(list(emails))).all()
             if len(users) == 1:
                 user = users[0]
             elif len(users) > 1:
@@ -80,11 +75,12 @@ def process_identity(identity_info):
         identity.data = identity_info.data
     if user.is_blocked:
         raise MultipassException(_('Your Indico profile has been blocked.'))
+
     login_user(user, identity)
 
 
 def login_user(user, identity=None, admin_impersonation=False):
-    """Set the session user and performs on-login logic
+    """Set the session user and performs on-login logic.
 
     When specifying `identity`, the provider/identitifer information
     is saved in the session so the identity management page can prevent
@@ -100,25 +96,55 @@ def login_user(user, identity=None, admin_impersonation=False):
         session.timezone = user.settings.get('timezone', config.DEFAULT_TIMEZONE)
     else:
         session.timezone = 'LOCAL'
-    session.user = user
+    session.set_session_user(user)
     session.lang = user.settings.get('lang')
     if not admin_impersonation:
+        if config.SESSION_MAX_LIFETIME:
+            session.hard_expiry = now_utc() + timedelta(seconds=config.SESSION_MAX_LIFETIME)
         if identity:
             identity.register_login(request.remote_addr)
             session['login_identity'] = identity.id
         else:
             session.pop('login_identity', None)
-        user.synchronize_data()
+        if changes := user.synchronize_data():
+            log_user_update(user, changes, from_sync=True)
+    signals.users.logged_in.send(user, identity=identity, admin_impersonation=admin_impersonation)
 
 
 @signals.menu.items.connect_via('user-profile-sidemenu')
 def _extend_profile_sidemenu(sender, user, **kwargs):
+    if not user.can_be_modified(session.user):
+        return
     yield SideMenuItem('accounts', _('Accounts'), url_for('auth.accounts'), 50, disabled=user.is_system)
 
 
 @signals.users.registered.connect
 def _delete_requests(user, **kwargs):
-    for req in RegistrationRequest.find(RegistrationRequest.email.in_(user.all_emails)):
+    for req in RegistrationRequest.query.filter(RegistrationRequest.email.in_(user.all_emails)):
         logger.info('Deleting registration request %r due to registration of %r', req, user)
         db.session.delete(req)
     db.session.flush()
+
+
+@signals.core.app_created.connect
+def _handle_insecure_password_logins(app, **kwargs):
+    from indico.modules.auth.util import should_skip_redirect_on_insecure_password
+
+    @app.before_request
+    def _redirect_if_insecure():
+        if not request.endpoint:
+            return
+
+        if should_skip_redirect_on_insecure_password(request.endpoint):
+            return
+
+        if 'insecure_password_error' not in session:
+            return
+
+        if request.method != 'GET':
+            raise NoReportError.wrap_exc(Forbidden(_('You need to change your password')))
+
+        if request.is_xhr or request.is_json:
+            return
+
+        return redirect(url_for('auth.accounts'))

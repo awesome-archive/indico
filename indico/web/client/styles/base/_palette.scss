@@ -1,22 +1,14 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 // when changing a color in here don't forget to check palette.js
 // whether it is used in there too and update it if necessary.
+
+$white: #fff;
 
 $darker-blue: #005272;
 $dark-blue: #007cac;
@@ -33,7 +25,9 @@ $dark-gray: #999;
 $gray: #bbb;
 $pastel-gray: #dfdfdf;
 $light-gray: #f9f9f9;
+$raincloud-gray: #d4d4d5;
 
+$midnight-black: #31393c;
 $dark-black: #333;
 $black: #555;
 $light-black: #777;
@@ -45,6 +39,7 @@ $light-green: #def2de;
 
 $dark-yellow: #9c793b;
 $yellow: #e99e18;
+$bright-yellow: #ffcf00;
 $postit-yellow: #ffffa5;
 $light-yellow: #ffe6ba;
 
@@ -53,12 +48,14 @@ $bright-orange: #fb3;
 $dark-orange: #cb6d04;
 
 $purple: #6e5494;
+$light-purple: #988bb9;
 
 $separator-color: #ebebeb;
 
 $link: #0b63a5;
 $indico-blue: #00a4e4;
 
-// Room Booking
-$highlight-color: #7dcfb6;
-$dark-highlight-color: #45ba97;
+$teal: #7dcfb6;
+$dark-teal: #45ba97;
+
+$olive: #b5cc18;

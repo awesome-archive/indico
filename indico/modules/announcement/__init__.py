@@ -1,26 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
 from indico.core import signals
 from indico.core.settings import SettingsProxy
 from indico.util.i18n import _
+from indico.util.string import render_markdown
 from indico.web.flask.templating import template_hook
 from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
@@ -36,9 +26,8 @@ announcement_settings = SettingsProxy('announcement', {
 def _inject_announcement_header(**kwargs):
     if not announcement_settings.get('enabled'):
         return
-    message = announcement_settings.get('message')
-    if message:
-        return ('warning', message)
+    if message := announcement_settings.get('message'):
+        return ('warning', render_markdown(message, extra_html=True))
 
 
 @signals.menu.items.connect_via('admin-sidemenu')

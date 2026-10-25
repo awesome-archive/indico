@@ -1,30 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.settings.converters import DatetimeConverter, SettingConverter
 from indico.modules.events.papers.models.reviews import PaperReviewType
 from indico.modules.events.settings import EventSettingsProxy
-from indico.util.i18n import _
-from indico.util.struct.enum import RichIntEnum
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import _, pgettext
 
 
 class PaperReviewingRole(RichIntEnum):
-    __titles__ = [None, _('Judge'), _('Layout Reviewer'), _('Content Reviewer')]
+    __titles__ = [None, pgettext('Paper reviewing role', 'Judge'), _('Layout Reviewer'), _('Content Reviewer')]
     __acl_permissions__ = [None, 'paper_judge', 'paper_layout_reviewer', 'paper_content_reviewer']
     __review_types__ = [None, None, PaperReviewType.layout, PaperReviewType.content]
 
@@ -62,9 +51,12 @@ paper_reviewing_settings = EventSettingsProxy('paper_reviewing', {
     'enforce_judge_deadline': False,
     'enforce_layout_reviewer_deadline': False,
     'enforce_content_reviewer_deadline': False,
+    'limit_review_cycles': False,
+    'max_review_cycles': 2,
     'announcement': '',
     'scale_lower': -3,
     'scale_upper': 3,
+    'hide_accepted': False,
 
     # Notifications
     'notify_on_added_to_event': set(),
@@ -81,4 +73,6 @@ paper_reviewing_settings = EventSettingsProxy('paper_reviewing', {
     'notify_on_added_to_event': RoleConverter,
     'notify_on_assigned_contrib': RoleConverter,
     'notify_on_paper_submission': RoleConverter
+}, acls={
+    'authorized_submitters'
 })

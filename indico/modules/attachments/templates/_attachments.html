@@ -8,11 +8,17 @@
 
 {% macro render_attachment(attachment, has_label=false, classes='') %}
     {% set previewable = (attachment.file.is_previewable and not g.static_site) or false %}
+    {% set visible_link = attachment.type.name == 'link' and (not attachment.is_protected or attachment.can_access(session.user)) %}
     <a class="attachment {{ get_attachment_icon(attachment) }} {% if attachment.is_self_protected %}is-protected{% endif %} {% if has_label %}has-label{% endif %} {%- if previewable %} js-preview-dialog{% endif %} {{ classes }}"
        data-previewable="{{ previewable|tojson }}"
        data-attachment-id="{{ attachment.id }}"
-       href="{{ attachment.download_url }}" target="_blank"
+       {% if attachment.annotations.source %}
+           data-attachment-source="{{ attachment.annotations.source }}"
+       {% endif %}
+       href="{{ attachment.link_url if visible_link else attachment.download_url }}" target="_blank"
+       rel="noopener noreferrer"
        title="{{ attachment.description or attachment.title }}
+              {%- if attachment.annotations.source %} ({{ attachment.annotations.source }}){% endif %}
               {%- if attachment.is_self_protected %} ({% trans %}Protected{% endtrans %}){% endif %}">
         {%- if not has_label -%}
             <span class="title">{{ attachment.title }}</span>
@@ -33,19 +39,26 @@
         {% if management -%}
             <td class="actions hide-if-locked">
                 <a class="icon-edit js-dialog-action"
-                   data-href="{{ url_for('.modify_attachment', attachment) }}"
+                   data-href="{{ url_for('attachments.modify_attachment', attachment) }}"
                    data-title="
                     {%- if attachment.type.name == 'file' -%}
                         {% trans name=attachment.title %}Edit file &quot;{{ name }}&quot;{% endtrans %}
                     {% else %}
                         {% trans name=attachment.title %}Edit link &quot;{{ name }}&quot;{% endtrans %}
+                    {% endif -%}"
+                   title="
+                    {%- if attachment.type.name == 'file' -%}
+                        {% trans %}Edit file{% endtrans %}
+                    {% else %}
+                        {% trans %}Edit link{% endtrans %}
                     {% endif -%}"></a>
                 <a href="#" class="icon-remove js-delete"
                    data-method="DELETE"
-                   data-href="{{ url_for('.delete_attachment', attachment) }}"
+                   data-href="{{ url_for('attachments.delete_attachment', attachment) }}"
                    data-title="{% trans name=attachment.title %}Remove {{ name }}?{% endtrans %}"
+                   title="{% trans %}Remove{% endtrans %}"
                    data-confirm="{% trans name=attachment.title -%}
-                       Are you sure you want to remove &quot;{{ name }}&quot;?<br>
+                       Are you sure you want to remove &quot;{{ name }}&quot;?
                        This will remove the attachment permanently.
                        {%- endtrans %}">
                 </a>
@@ -76,14 +89,16 @@
         {% if management -%}
             <td class="actions hide-if-locked">
                 <a class="icon-edit js-dialog-action"
-                           data-href="{{ url_for('.edit_folder', folder) }}"
-                           data-title="{% trans name=folder.title %}Edit folder: {{ name }}{% endtrans %}"></a>
+                           data-href="{{ url_for('attachments.edit_folder', folder) }}"
+                           data-title="{% trans name=folder.title %}Edit folder: {{ name }}{% endtrans %}"
+                           title="{% trans %}Edit folder{% endtrans %}"></a>
                 <a href="#" class="icon-remove js-delete"
                    data-method="DELETE"
-                   data-href="{{ url_for('.delete_folder', folder) }}"
+                   data-href="{{ url_for('attachments.delete_folder', folder) }}"
                    data-title="{% trans name=folder.title %}Remove {{ name }}?{% endtrans %}"
+                   title="{% trans %}Remove{% endtrans %}"
                    data-confirm="{% trans name=folder.title -%}
-                       Are you sure you want to remove &quot;{{ name }}&quot;?<br>
+                       Are you sure you want to remove &quot;{{ name }}&quot;?
                        This will remove the folder and its contents permanently.
                    {%- endtrans %}">
                 </a>
@@ -128,13 +143,15 @@
             {%- endif -%}
         </table>
     {%- else -%}
-        <span class="empty">{% trans %}There are no materials yet.{% endtrans %}</span>
+        <p class="empty">{% trans %}There are no materials yet.{% endtrans %}</p>
     {%- endif -%}
     {% if management %}
         <div class="i-box-footer text-right js-attachment-actions hide-if-locked">
-            <a href="#" class="i-button icon-folder-plus js-dialog-action"
-               data-href="{{ url_for('.create_folder', linked_object) }}"
-               data-title="{% trans %}Create a new folder{% endtrans %}">{% trans %}New folder{% endtrans -%}</a>
+            <button class="i-button icon-folder-plus js-dialog-action"
+                    data-href="{{ url_for('attachments.create_folder', linked_object) }}"
+                    data-title="{% trans %}Create a new folder{% endtrans %}">
+                {% trans %}New folder{% endtrans -%}
+            </button>
         </div>
     {% endif %}
 {%- endmacro %}
@@ -164,16 +181,17 @@
                 </div>
                 <div class="toolbar">
                     <div class="group">
-                        <a href="#" class="i-button icon-file js-dialog-action"
-                           data-href="{{ url_for('.upload', linked_object) }}"
-                           data-title="{%- trans %}Upload files{% endtrans -%}">
+                        <button class="i-button icon-file js-dialog-action"
+                                data-href="{{ url_for('attachments.upload', linked_object) }}"
+                                data-title="{%- trans %}Upload files{% endtrans -%}">
                             {%- trans %}Upload files{% endtrans -%}
-                        </a>
-                        <a href="#" class="i-button icon-link js-dialog-action"
-                           data-href="{{ url_for('.add_link', linked_object) }}"
-                           data-title="{%- trans %}Add link{% endtrans -%}">
+                        </button>
+                        <button class="i-button icon-link js-dialog-action"
+                                data-href="{{ url_for('attachments.add_link', linked_object) }}"
+                                data-title="{%- trans %}Add link{% endtrans -%}">
                             {%- trans %}Add link{% endtrans -%}
-                        </a>
+                        </button>
+                        {{ template_hook('attachment-sources', linked_object=linked_object) }}
                     </div>
                 </div>
             </div>
@@ -190,7 +208,7 @@
                         <div>{% trans %}You can generate a ZIP file containing materials from the event.{% endtrans %}</div>
                     </div>
                     <div class="toolbar">
-                        <a href="{{ url_for('.package_management', linked_object) }}" class="i-button icon-package-download">
+                        <a href="{{ url_for('attachments.package_management', linked_object) }}" class="i-button icon-package-download">
                             {%- trans %}Material Package{% endtrans -%}
                         </a>
                     </div>

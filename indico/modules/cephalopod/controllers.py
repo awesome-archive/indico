@@ -1,26 +1,15 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import platform
+from urllib.parse import urljoin
 
 from flask import flash, jsonify, redirect, request
 from requests.exceptions import HTTPError, RequestException, Timeout
-from werkzeug.urls import url_join
 
 import indico
 from indico.core.config import config
@@ -48,7 +37,7 @@ class RHCephalopod(RHCephalopodBase):
         form = CephalopodForm(obj=FormDefaults(**cephalopod_settings.get_all()))
         if form.validate_on_submit():
             return self._process_form(form)
-        hub_url = url_join(config.COMMUNITY_HUB_URL, 'api/instance/{}'.format(cephalopod_settings.get('uuid')))
+        hub_url = urljoin(config.COMMUNITY_HUB_URL, 'api/instance/{}'.format(cephalopod_settings.get('uuid')))
         cephalopod_settings.set('show_migration_message', False)
         return WPCephalopod.render_template('cephalopod.html', 'cephalopod',
                                             affiliation=core_settings.get('site_organization'),
@@ -76,11 +65,11 @@ class RHCephalopod(RHCephalopodBase):
             elif enabled and not uuid:
                 register_instance(name, email)
         except HTTPError as err:
-            flash(_("Operation failed, the community hub returned: {err.message}").format(err=err), 'error')
+            flash(_('Operation failed, the community hub returned: {err}').format(err=err), 'error')
         except Timeout:
-            flash(_("The operation timed-out. Please try again in a while."), 'error')
+            flash(_('The operation timed-out. Please try again in a while.'), 'error')
         except RequestException as err:
-            flash(_("Unexpected exception while contacting the Community Hub: {err.message}").format(err=err))
+            flash(_('Unexpected exception while contacting the Community Hub: {err}').format(err=err))
 
         return redirect(url_for('.index'))
 
@@ -96,12 +85,12 @@ class RHCephalopodSync(RHCephalopodBase):
             try:
                 sync_instance(contact_name, contact_email)
             except HTTPError as err:
-                flash(_("Synchronization failed, the community hub returned: {err.message}").format(err=err),
+                flash(_('Synchronization failed, the community hub returned: {err}').format(err=err),
                       'error')
             except Timeout:
-                flash(_("Synchronization timed-out. Please try again in a while."), 'error')
+                flash(_('Synchronization timed-out. Please try again in a while.'), 'error')
             except RequestException as err:
-                flash(_("Unexpected exception while contacting the Community Hub: {err.message}").format(err=err))
+                flash(_('Unexpected exception while contacting the Community Hub: {err}').format(err=err))
 
             return redirect(url_for('.index'))
 

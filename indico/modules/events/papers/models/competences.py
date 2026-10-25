@@ -1,25 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy import ARRAY
 
 from indico.core.db import db
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr
 
 
 class PaperCompetence(db.Model):
@@ -67,6 +56,17 @@ class PaperCompetence(db.Model):
         )
     )
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'user_id', 'event_id', _text=', '.join(self.competences))
+
+    @classmethod
+    def merge_users(cls, target, source):
+        source_competences = source.paper_competences.all()
+        target_competences_by_event = {x.event: x for x in target.paper_competences}
+        for comp in source_competences:
+            existing = target_competences_by_event.get(comp.event)
+            if existing is None:
+                comp.user_id = target.id
+            else:
+                existing.competences = list(set(existing.competences) | set(comp.competences))
+                db.session.delete(comp)

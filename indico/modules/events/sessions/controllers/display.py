@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from io import BytesIO
 
@@ -23,11 +12,12 @@ from sqlalchemy.orm import joinedload, subqueryload
 from werkzeug.exceptions import Forbidden
 
 from indico.modules.events.controllers.base import RHDisplayEventBase
+from indico.modules.events.sessions.ical import session_to_ical
 from indico.modules.events.sessions.models.sessions import Session
-from indico.modules.events.sessions.util import get_session_ical_file, get_session_timetable_pdf, get_sessions_for_user
+from indico.modules.events.sessions.util import generate_session_pdf_timetable, get_sessions_for_user
 from indico.modules.events.sessions.views import WPDisplayMySessionsConference, WPDisplaySession
-from indico.modules.events.util import get_base_ical_parameters
 from indico.web.flask.util import send_file
+from indico.web.rh import allow_signed_url
 
 
 class RHDisplaySessionList(RHDisplayEventBase):
@@ -54,16 +44,13 @@ class RHDisplaySessionBase(RHDisplayEventBase):
 
     def _process_args(self):
         RHDisplayEventBase._process_args(self)
-        self.session = Session.get_one(request.view_args['session_id'], is_deleted=False)
+        self.session = Session.get_or_404(request.view_args['session_id'], is_deleted=False)
 
 
 class RHDisplaySession(RHDisplaySessionBase):
     view_class = WPDisplaySession
 
     def _process(self):
-        ical_params = get_base_ical_parameters(session.user, 'sessions',
-                                               '/export/event/{0}/session/{1}.ics'.format(self.event.id,
-                                                                                          self.session.id))
         contributions_strategy = subqueryload('contributions')
         contributions_strategy.joinedload('track')
         _contrib_tte_strategy = contributions_strategy.joinedload('timetable_entry')
@@ -80,15 +67,19 @@ class RHDisplaySession(RHDisplaySessionBase):
                 .options(contributions_strategy, blocks_strategy)
                 .one())
         return self.view_class.render_template('display/session_display.html', self.event,
-                                               sess=sess, page_title=sess.title, **ical_params)
+                                               sess=sess, page_title=sess.title)
 
 
+@allow_signed_url
 class RHExportSessionToICAL(RHDisplaySessionBase):
     def _process(self):
-        return send_file('session.ics', get_session_ical_file(self.session), 'text/calendar')
+        detailed = request.args.get('detail') == 'contributions'
+
+        return send_file('session.ics', BytesIO(session_to_ical(self.session, session.user, detailed)),
+                         'text/calendar')
 
 
 class RHExportSessionTimetableToPDF(RHDisplaySessionBase):
     def _process(self):
-        pdf = get_session_timetable_pdf(self.session)
-        return send_file('session-timetable.pdf', BytesIO(pdf.getPDFBin()), 'application/pdf')
+        pdf = generate_session_pdf_timetable(self.session)
+        return send_file('session-timetable.pdf', pdf, 'application/pdf')

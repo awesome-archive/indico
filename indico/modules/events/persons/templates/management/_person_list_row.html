@@ -1,8 +1,11 @@
-{% macro render_person_row(person_data, event_has_registration_forms) %}
+{% from 'events/_affiliation.html' import render_person_affiliation %}
+
+{% macro render_person_row(person_data, event_has_registration_forms, person_schema, has_predefined_affiliations,
+                           allow_custom_affiliations) %}
     {% set person = person_data.person %}
     <td class="i-table thin-column hide-if-locked">
-        <input type="checkbox" value="{{ person.id }}" class="select-row id-field"
-               name="{{ person_data.id_field_name }}"
+        <input type="checkbox" value="{{ person.identifier }}" class="select-row id-field"
+               name="person_identifier"
                {{ 'disabled' if not person.email }}>
     </td>
     {% if event_has_registration_forms %}
@@ -26,7 +29,10 @@
     {% endif %}
     <td class="i-table name-column" data-searchable="{{ person.display_full_name|lower }}">
         {{ person.display_full_name }}
-        {% if person.is_untrusted %}
+        {% if person_data.roles.no_roles %}
+            <span class="icon-question"
+                  title="{%- trans %}This person currently has no ties to the event.{% endtrans -%}"></span>
+        {% elif person.is_untrusted %}
             {% set untrusted_tooltip -%}
                 {%- trans -%}
                     This person is currently just an author of an abstract with no other ties to the event.
@@ -40,11 +46,11 @@
         {{ person.email }}
     </td>
     <td class="i-table affiliation-column">
-        {{ person.affiliation }}
+        {{ render_person_affiliation(person, compact=true) }}
     </td>
     <td class="i-table roles-column">
-        {% for role, role_data in person_data.roles.iteritems() %}
-            {%- if role != 'no_account' %}
+        {% for role, role_data in person_data.roles.items() %}
+            {%- if role not in ('no_account', 'no_registration', 'no_roles', 'no_builtin_roles') %}
                 {%- if role_data.elements -%}
                     <span class="i-tag outline contrast js-count-label" style="{{ role_data.css }};"
                           data-role-name="{{ role_data.name }}"
@@ -74,23 +80,42 @@
     <td class="i-table">
         {% if person.invited_dt %}
             <span class="i-label icon-mail"
-                  title="This person has been invited to create an Indico account">
+                  title="{% trans %}This person has been invited to create an Indico account{% endtrans %}">
                 {{ person.invited_dt | format_date(timezone=person_data.person.event.tzinfo) }}
             </span>
         {% endif %}
     </td>
     <td class="i-table edit-column thin-column">
         {% if person_data.has_event_person %}
-            <a class="i-link icon-edit"
-               title="{%- trans %}Edit information{% endtrans -%}"
-               data-href="{{ url_for('persons.edit_person', person) }}"
-               data-title="{%- trans %}Edit information{% endtrans -%}"
-               data-update="#person-{{ person.id }}"
-               data-highlight-update
-               data-ajax-dialog></a>
+            <span id="edit-person-{{ person.id }}"></span>
+            <script>
+                setupEditEventPerson(
+                    {{ person.event_id }},
+                    {{ person_schema.dump(person) | tojson }},
+                    {{ has_predefined_affiliations | tojson }},
+                    {{ allow_custom_affiliations | tojson }}
+                );
+            </script>
         {% else %}
             <a class="i-link icon-edit disabled"
                title="{%- trans %}This user does not play any public role{% endtrans -%}"></a>
+        {% endif %}
+        {% if person_data.has_event_person and person_data.person.get_unsynced_data() %}
+            <a class="i-link icon-loop"
+               title="{%- trans %}Sync person with user{% endtrans -%}"
+               data-href="{{ url_for('persons.sync_with_user', person) }}"
+               data-title="{%- trans %}Sync person with user{% endtrans -%}"
+               data-method="POST"
+               data-update="#person-{{ person.id }}"></a>
+        {% endif %}
+        {% if person_data.has_event_person and person_data.roles.no_builtin_roles %}
+            <a class="i-link icon-remove"
+               title="{%- trans %}Delete person{% endtrans -%}"
+               data-href="{{ url_for('persons.delete_unused_person', person) }}"
+               data-title="{%- trans %}Delete person{% endtrans -%}"
+               data-method="DELETE"
+               data-update="#person-{{ person.id }}"
+               data-confirm="{% trans %}Do you really want to delete this person from the event?{% endtrans %}"></a>
         {% endif %}
     </td>
 {% endmacro %}

@@ -1,19 +1,11 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+@use 'base/palette' as *;
 
 $header-bg-color: white;
 $header-icon-color: black;
@@ -27,107 +19,113 @@ $tt-additional-text-color: black;
 
 $gray: black;
 
-@import 'themes/indico';
+@use 'themes/indico' as indico;
 
-%black-and-white {
-    background-color: white !important;
-    color: black !important;
+@mixin black-and-white {
+  background-color: white !important;
+  color: black !important;
 }
 
-%no-shadow {
-    box-shadow: none !important;
+@mixin no-shadow {
+  box-shadow: none !important;
 }
 
 body {
-    @extend %black-and-white;
+  @include black-and-white();
 }
 
 .manage-button,
 .event-manage-button,
+.event-privacy-info-button,
+.privacy-dropdown .item,
 #session-bar,
 .eventHeaderButtonBar,
 .js-go-to-day,
 .trigger.icon-expand {
-    display: none !important;
+  display: none !important;
 }
 
 .timetable-duration,
 .dayList .day,
 .dayList .day-title,
 .participant-list-wrapper {
-    @extend %black-and-white;
+  @include black-and-white();
 }
 
 .timetable-time {
-    .start-time, .end-time {
-        @extend %black-and-white;
-    }
+  .start-time,
+  .end-time {
+    @include black-and-white();
+  }
 }
 
 .timetable-item {
-    &.timetable-break .timetable-item-header {
-        background: transparent !important;
-        .timetable-title {
-            @extend %black-and-white;
-        }
+  &.timetable-break .timetable-item-header {
+    background: transparent !important;
+
+    .timetable-title {
+      @include black-and-white();
     }
+  }
 }
 
 .participant-list-wrapper {
-    max-height: none !important;
+  max-height: none !important;
 }
 
 .event-service-row {
-    @extend %no-shadow;
-    border: none !important;
+  @include no-shadow();
+  border: none !important;
 
-    .event-service-toolbar {
-        display: none;
-    }
+  .event-service-toolbar {
+    display: none;
+  }
 }
 
 .meeting-timetable {
-    @extend %no-shadow;
+  @include no-shadow();
+  border: 1px solid $gray;
+
+  .start-time {
+    @include no-shadow();
     border: 1px solid $gray;
 
-    .start-time {
-        @extend %no-shadow;
-        border: 1px solid $gray;
-
-        &:before {
-            display: none !important;
-        }
+    &::before {
+      display: none !important;
     }
+  }
 }
 
 .event-sub-header {
-    @extend %no-shadow;
-    border: none;
+  @include no-shadow();
+  border: none;
 }
 
-.flexrow, .flexcol {
-    // XXX: this is awful and while making some things in the header look
-    // slightly ugly, it fixes both the IE11 crash and firefox only printing
-    // the first page.
-    display: block !important;
+.flexrow,
+.flexcol {
+  // XXX: this is awful and while making some things in the header look
+  // slightly ugly, it fixes both the IE11 crash and firefox only printing
+  // the first page.
+  display: block !important;
 }
 
 .event-date > * {
-    float: left;
+  float: left;
 }
 
 .event-location {
-    clear: both;
+  clear: both;
 }
 
 // this would re-introduce the IE crash so we limit it to modern browsers
 // http://browserhacks.com/#hack-8a0d11a6b2e3d172711eed35cb7237b9
-@supports (-webkit-appearance:none) {
-    .timetable-item-body {
-        margin-top: 0.5em;
-    }
+@supports (-webkit-appearance: none) {
+  .timetable-item-body {
+    margin-top: 0.5em;
+  }
 }
 
-.main-action-bar, .footer {
-    display: none !important;
+.main-action-bar,
+.footer {
+  display: none !important;
 }

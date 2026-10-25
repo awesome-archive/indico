@@ -11,4 +11,5 @@ Installation guides
     Migration from 1.2 <upgrade_legacy.rst>
     Development <development.rst>
     Plugins <plugins.rst>
-    LaTeX <latex.rst>
+    Translations <translations.rst>
+    PDF Generation <pdf_generation.rst>

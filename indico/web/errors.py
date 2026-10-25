@@ -1,37 +1,31 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import traceback
 from uuid import uuid4
 
-from flask import g, jsonify, render_template, request, session
+import sentry_sdk
+from flask import after_this_request, current_app, g, jsonify, render_template, request, session
+from flask_cors.core import get_cors_options, set_cors_headers
 from itsdangerous import BadData
 from sqlalchemy.exc import OperationalError
-from werkzeug.exceptions import Forbidden, HTTPException
+from werkzeug.exceptions import Forbidden, HTTPException, TooManyRequests
 
+from indico.core.cache import make_scoped_cache
 from indico.core.errors import NoReportError
-from indico.legacy.common.cache import GenericCache
-from indico.web.flask.util import url_for
 from indico.web.util import get_request_info
 from indico.web.views import WPError
 
 
+error_cache = make_scoped_cache('errors')
+
+
 def render_error(exc, title, message, code, standalone=False):
+    _handle_error_cors()
     _save_error(exc, title, message)
     if _need_json_response():
         return _jsonify_error(exc, title, message, code)
@@ -39,7 +33,7 @@ def render_error(exc, title, message, code, standalone=False):
         return render_template('standalone_error.html', error_message=title, error_description=message), code
     else:
         try:
-            return WPError(title, message).getHTML(), code
+            return WPError(title, message).display(), code
         except OperationalError:
             # If the error was caused while connecting the database,
             # rendering the error page fails since e.g. the header/footer
@@ -51,7 +45,20 @@ def render_error(exc, title, message, code, standalone=False):
 
 
 def load_error_data(uuid):
-    return GenericCache('errors').get(uuid)
+    return error_cache.get(uuid)
+
+
+def _handle_error_cors():
+    """Set CORS on error response based on RH's CORS settings."""
+    if not hasattr(g, 'rh') or (cors_config := getattr(g.rh, '_CORS', None)) is None:
+        return
+
+    cors_options = get_cors_options(current_app, cors_config)
+
+    @after_this_request
+    def set_error_cors(resp):
+        set_cors_headers(resp, cors_options)
+        return resp
 
 
 def _save_error(exc, title, message):
@@ -61,7 +68,7 @@ def _save_error(exc, title, message):
         return
     if not _is_error_reportable(exc):
         return
-    g.saved_error_uuid = uuid = unicode(uuid4())
+    g.saved_error_uuid = uuid = str(uuid4())
     # XXX: keep this outside - it must be called before `get_request_info()`
     # as that function may mess up `sys.exc_info()` in case accessing user
     # details fails
@@ -70,17 +77,31 @@ def _save_error(exc, title, message):
             'message': message,
             'request_info': get_request_info(),
             'traceback': tb,
-            'sentry_event_id': g.get('sentry_event_id')}
-    GenericCache('errors').set(uuid, data, 7200)
+            'sentry_event_id': sentry_sdk.last_event_id()}
+    error_cache.set(uuid, data, timeout=7200)
 
 
 def _need_json_response():
-    return request.is_xhr or request.is_json
+    return request.is_xhr or request.is_json or (hasattr(g, 'rh') and getattr(g.rh, '_JSON_ERRORS', False))
+
+
+def _is_error_reporting_opted_out(code):
+    header = request.headers.get('X-Indico-No-Report-Error')
+    if not header:
+        return
+    codes = header.split(',')
+    return str(code) in codes
 
 
 def _is_error_reportable(exc):
+    # client explicitly opted out from reporting this (expected) error
+    if hasattr(exc, 'code') and _is_error_reporting_opted_out(exc.code):
+        return False
+    # rate limit exceeded
+    elif isinstance(exc, TooManyRequests):
+        return False
     # error marked as not reportable
-    if isinstance(exc, NoReportError) or getattr(exc, '_disallow_report', False):
+    elif isinstance(exc, NoReportError) or getattr(exc, '_disallow_report', False):
         return False
     elif isinstance(exc, BadData):
         # itsdangerous stuff - should only fail if someone tampers with a link
@@ -100,15 +121,10 @@ def _is_error_reportable(exc):
 
 
 def _jsonify_error(exc, title, message, code):
-    report_url = error_uuid = None
-    if _is_error_reportable(exc) and 'saved_error_uuid' in g:
-        report_url = url_for('core.report_error', error_id=g.saved_error_uuid)
-        error_uuid = g.saved_error_uuid
     error_data = {
         'title': title,
         'message': message,
-        'report_url': report_url,
-        'error_uuid': error_uuid,
+        'error_uuid': g.get('saved_error_uuid') if _is_error_reportable(exc) else None,
     }
     response = jsonify(error=error_data)
     response.status_code = code

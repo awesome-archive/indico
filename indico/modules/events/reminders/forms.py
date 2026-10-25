@@ -1,81 +1,136 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from operator import attrgetter
 
-from datetime import date, datetime
+from wtforms.fields import BooleanField, SelectField, StringField, TextAreaField
+from wtforms.validators import DataRequired, ValidationError
+from wtforms.widgets import TextArea
 
-import pytz
-from wtforms.fields import BooleanField, SelectField, TextAreaField
-from wtforms.validators import DataRequired, InputRequired, ValidationError
-from wtforms_components import TimeField
-
+from indico.core.db.sqlalchemy.descriptions import RenderMode
 from indico.modules.events.models.events import EventType
+from indico.modules.events.registration.models.forms import RegistrationForm
+from indico.modules.events.registration.models.tags import RegistrationTag
+from indico.modules.events.reminders.models.reminders import ReminderType
+from indico.modules.events.reminders.placeholders import RecipientFirstNamePlaceholder, RecipientLastNamePlaceholder
 from indico.util.date_time import now_utc
 from indico.util.i18n import _
+from indico.util.placeholders import render_placeholder_info
+from indico.util.string import natural_sort_key
 from indico.web.forms.base import IndicoForm, generated_data
-from indico.web.forms.fields import EmailListField, IndicoDateField, IndicoRadioField, TimeDeltaField
-from indico.web.forms.validators import HiddenUnless
+from indico.web.forms.fields import (EmailListField, IndicoDateTimeField, IndicoQuerySelectMultipleCheckboxField,
+                                     IndicoRadioField, TimeDeltaField)
+from indico.web.forms.fields.sqlalchemy import IndicoQuerySelectMultipleTagField
+from indico.web.forms.util import inject_validators
+from indico.web.forms.validators import DateTimeRange, HiddenUnless, NoRelativeURLs
+from indico.web.forms.widgets import TinyMCEWidget
+
+
+def _sort_fn(object_list):
+    return sorted(object_list, key=lambda x: natural_sort_key(x[1].title))
 
 
 class ReminderForm(IndicoForm):
-    default_widget_attrs = {'absolute_time': {'placeholder': 'HH:MM'}}
-    recipient_fields = {'recipients', 'send_to_participants'}
-    schedule_fields = {'schedule_type', 'absolute_date', 'absolute_time', 'relative_delta'}
-    schedule_recipient_fields = recipient_fields | schedule_fields
+    recipient_fields = ['recipients', 'send_to_participants', 'forms', 'tags', 'all_tags', 'send_to_speakers']
+    schedule_fields = ['schedule_type', 'absolute_dt', 'relative_delta']
+    schedule_recipient_fields = recipient_fields + schedule_fields
 
     # Schedule
     schedule_type = IndicoRadioField(_('Type'), [DataRequired()],
-                                     choices=[('relative', _("Relative to the event start time")),
-                                              ('absolute', _("Fixed date/time")),
+                                     choices=[('start_time_relative', _('Before the event start time')),
+                                              ('end_time_relative', _('After the event end time')),
+                                              ('absolute', _('Fixed date/time')),
                                               ('now', _('Send immediately'))])
-    relative_delta = TimeDeltaField(_('Offset'), [HiddenUnless('schedule_type', 'relative'), DataRequired()])
-    absolute_date = IndicoDateField(_('Date'), [HiddenUnless('schedule_type', 'absolute'), DataRequired()])
-    absolute_time = TimeField(_('Time'), [HiddenUnless('schedule_type', 'absolute'), InputRequired()])
+    relative_delta = TimeDeltaField(_('Offset'), [HiddenUnless('schedule_type',
+                                                               {'start_time_relative', 'end_time_relative'}),
+                                                  DataRequired()],
+                                    units=('weeks', 'days', 'hours'))
+    absolute_dt = IndicoDateTimeField(_('Date'), [HiddenUnless('schedule_type', 'absolute'), DataRequired(),
+                                                  DateTimeRange()])
     # Recipients
     recipients = EmailListField(_('Email addresses'), description=_('One email address per line.'))
     send_to_participants = BooleanField(_('Participants'),
-                                        description=_('Send the reminder to all participants/registrants '
-                                                      'of the event.'))
+                                        description=_('Send the reminder to participants/registrants of the event.'))
+
+    forms = IndicoQuerySelectMultipleCheckboxField(_('Filter by forms'),
+                                                   [HiddenUnless('send_to_participants')],
+                                                   collection_class=set,
+                                                   modify_object_list=_sort_fn,
+                                                   get_label=attrgetter('title'),
+                                                   description=_('Select registration forms here to restrict sending '
+                                                                 'the reminder to the selected ones.'))
+    tags = IndicoQuerySelectMultipleTagField(_('Filter by tags'), [HiddenUnless('send_to_participants')],
+                                             description=_('Limit reminders to participants with these tags.'))
+    all_tags = BooleanField(_('All tags must be present'), [HiddenUnless('send_to_participants')],
+                            description=_('Participants must have all of the selected tags. '
+                                          'Otherwise at least one of them.'))
+    send_to_speakers = BooleanField(_('Speakers'),
+                                    description=_('Send the reminder to all speakers/chairpersons of the event.'))
     # Misc
     reply_to_address = SelectField(_('Sender'), [DataRequired()],
                                    description=_('The email address that will show up as the sender.'))
-    message = TextAreaField(_('Note'), description=_('A custom message to include in the email.'))
+    subject = StringField(_('Subject'), [DataRequired()])
+    message = TextAreaField(_('Note'), [NoRelativeURLs()],
+                            widget=TinyMCEWidget(absolute_urls=True, height=300),
+                            description=_('A custom message to include in the email.'))
     include_summary = BooleanField(_('Include agenda'),
                                    description=_("Includes a simple text version of the event's agenda in the email."))
     include_description = BooleanField(_('Include description'),
                                        description=_("Includes the event's description in the email."))
+    attach_ical = BooleanField(_('Attach iCalendar file'),
+                               description=_('Attach an iCalendar file to the event reminder.'))
 
-    def __init__(self, *args, **kwargs):
-        self.event = kwargs.pop('event')
-        super(ReminderForm, self).__init__(*args, **kwargs)
-        self.absolute_time.description = _("The event's timezone is {tz}.").format(tz=self.event.tzinfo)
-        self.reply_to_address.choices = (self.event
-                                         .get_allowed_sender_emails(extra=self.reply_to_address.object_data)
-                                         .items())
+    def __init__(self, *args, event, reminder_type, render_mode, **kwargs):
+        self.event = event
+        self._reminder_type = reminder_type
+        self._render_mode = render_mode
+        self.timezone = self.event.timezone
+        if self._reminder_type == ReminderType.custom:
+            inject_validators(self, 'message', [DataRequired()])
+        super().__init__(*args, **kwargs)
+        allowed_senders = self.event.get_allowed_sender_emails(include_noreply=True,
+                                                               extra=self.reply_to_address.object_data)
+        self.reply_to_address.choices = list(allowed_senders.items())
         if self.event.type_ == EventType.lecture:
             del self.include_summary
+        regforms_query = RegistrationForm.query.with_parent(self.event)
+        if regforms_query.count() > 1:
+            self.forms.query = regforms_query
+        else:
+            del self.forms
+        tags_query = RegistrationTag.query.with_parent(self.event)
+        if tags_query.has_rows():
+            self.tags.query = tags_query
+        else:
+            del self.tags
+            del self.all_tags
+        if self._reminder_type == ReminderType.standard:
+            del self.subject
+            # Keep plain/text note editor due to backward compatibility
+            if self._render_mode == RenderMode.plain_text:
+                self.message.widget = TextArea()
+
+        else:
+            self.message.label.text = _('Email body')
+            self.message.description = render_placeholder_info('event-reminder-email')
+            del self.include_summary
+            del self.include_description
 
     def validate_recipients(self, field):
-        if not field.data and not self.send_to_participants.data:
-            raise ValidationError(_('If participants are not included you need to specify recipients.'))
+        if not field.data and not self.send_to_participants.data and not self.send_to_speakers.data:
+            raise ValidationError(_('At least one type of recipient is required.'))
 
     def validate_send_to_participants(self, field):
-        if not field.data and not self.recipients.data:
-            raise ValidationError(_('If no recipients are specified you need to include participants.'))
+        if not field.data and not self.recipients.data and not self.send_to_speakers.data:
+            raise ValidationError(_('At least one type of recipient is required.'))
+
+    def validate_send_to_speakers(self, field):
+        if not field.data and not self.recipients.data and not self.send_to_participants.data:
+            raise ValidationError(_('At least one type of recipient is required.'))
 
     def validate_schedule_type(self, field):
         # Be graceful and allow a reminder that's in the past but on the same day.
@@ -84,26 +139,49 @@ class ReminderForm(IndicoForm):
             return
         scheduled_dt = self.scheduled_dt.data
         if scheduled_dt is not None and scheduled_dt.date() < now_utc().date():
-            raise ValidationError(_('The specified date is in the past'))
+            raise ValidationError(_('The specified date is in the past.'))
 
-    def validate_absolute_date(self, field):
-        if self.schedule_type.data == 'absolute' and field.data < date.today():
-            raise ValidationError(_('The specified date is in the past'))
+    def _validate_recipient_placeholders(self, field):
+        if self._reminder_type == ReminderType.custom and self.recipients.data:
+            if RecipientFirstNamePlaceholder.is_in(field.data) or RecipientLastNamePlaceholder.is_in(field.data):
+                raise ValidationError(_('Recipient-specific placeholders are not allowed '
+                                        'when email addresses are entered manually.'))
+
+    def validate_subject(self, field):
+        self._validate_recipient_placeholders(field)
+
+    def validate_message(self, field):
+        self._validate_recipient_placeholders(field)
 
     @generated_data
     def scheduled_dt(self):
         if self.schedule_type.data == 'absolute':
-            if self.absolute_date.data is None or self.absolute_time.data is None:
+            if self.absolute_dt.data is None:
                 return None
-            dt = datetime.combine(self.absolute_date.data, self.absolute_time.data)
-            return self.event.tzinfo.localize(dt).astimezone(pytz.utc)
-        elif self.schedule_type.data == 'relative':
+            return self.absolute_dt.data
+        elif self.schedule_type.data == 'start_time_relative':
             if self.relative_delta.data is None:
                 return None
             return self.event.start_dt - self.relative_delta.data
+        elif self.schedule_type.data == 'end_time_relative':
+            if self.relative_delta.data is None:
+                return None
+            return self.event.end_dt + self.relative_delta.data
         elif self.schedule_type.data == 'now':
             return now_utc()
 
     @generated_data
     def event_start_delta(self):
-        return self.relative_delta.data if self.schedule_type.data == 'relative' else None
+        return self.relative_delta.data if self.schedule_type.data == 'start_time_relative' else None
+
+    @generated_data
+    def event_end_delta(self):
+        return self.relative_delta.data if self.schedule_type.data == 'end_time_relative' else None
+
+    @generated_data
+    def reminder_type(self):
+        return self._reminder_type
+
+    @generated_data
+    def render_mode(self):
+        return self._render_mode

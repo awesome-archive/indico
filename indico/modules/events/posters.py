@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import division, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from collections import namedtuple
 
@@ -30,9 +19,8 @@ ConfigData = namedtuple('ConfigData', ['margin_horizontal', 'margin_vertical', '
 
 
 class PosterPDF(DesignerPDFBase):
-
     def __init__(self, template, config, event):
-        super(PosterPDF, self).__init__(template, config)
+        super().__init__(template, config)
         self.event = event
 
     def _build_config(self, config_data):
@@ -48,7 +36,7 @@ class PosterPDF(DesignerPDFBase):
                                       config.margin_horizontal, config.margin_vertical,
                                       tpl_data.width_cm * cm, tpl_data.height_cm * cm)
 
-        placeholders = get_placeholders('designer-fields')
+        placeholders = get_placeholders(self.placeholders_context)
 
         for item in tpl_data.items:
             placeholder = placeholders.get(item['type'])
@@ -56,6 +44,8 @@ class PosterPDF(DesignerPDFBase):
             if placeholder:
                 if placeholder.group == 'event':
                     text = placeholder.render(self.event)
+                elif placeholder.group == 'fixed':
+                    text = placeholder.render(item)
                 else:
                     continue
             elif item.get('text') is not None:
@@ -64,7 +54,9 @@ class PosterPDF(DesignerPDFBase):
             self._draw_item(canvas, item, tpl_data, text, config.margin_horizontal, config.margin_vertical)
 
     def _draw_poster(self, canvas, registration, pos_x, pos_y):
-        """Draw a badge for a given registration, at position pos_x, pos_y (top-left corner).
+        """
+        Draw a badge for a given registration, at position pos_x,
+        pos_y (top-left corner).
         """
         config = self.config
         tpl_data = self.tpl_data

@@ -1,14 +1,16 @@
-{% macro create_event_button(category, classes="", text="", with_tooltip=true) %}
-    <a class="{{ classes }} i-button arrow js-dropdown"
-       {% if with_tooltip %}title="{% trans %}Create event{% endtrans %}"{% endif %}
-       data-toggle="dropdown">
-        {{- text -}}
-    </a>
-    <ul class="dropdown">
-        <li>{{ create_event_link(category, 'lecture', _('Lecture')) }}</li>
-        <li>{{ create_event_link(category, 'meeting', _('Meeting')) }}</li>
-        <li>{{ create_event_link(category, 'conference', _('Conference')) }}</li>
-    </ul>
+{% macro create_event_button(category, classes="", text="") %}
+    {% block create_event_button scoped %}
+        {% if not indico_config.CHECK_ACTION_PERMISSIONS or (session.user and category.can_create_events(session.user)) %}
+            <ind-menu class="create-event-button">
+                <button class="{{ classes }} i-button">{{- text -}}</button>
+                <menu>
+                    <li>{{ create_event_link(category, 'lecture', _('Lecture')) }}</li>
+                    <li>{{ create_event_link(category, 'meeting', _('Meeting')) }}</li>
+                    <li>{{ create_event_link(category, 'conference', _('Conference')) }}</li>
+                </menu>
+            </ind-menu>
+        {% endif %}
+    {% endblock %}
 {% endmacro %}
 
 {% macro create_event_link(category, type, text) -%}

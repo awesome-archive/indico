@@ -8,13 +8,13 @@
     </div>
 {% endmacro %}
 
-{% macro render_references(item) -%}
-    <ul class="reference-list">
+{% macro render_references(item, class='reference-list-meeting') -%}
+    <ul class="reference-list {{ class }}">
         {%- for reference in item.references -%}
             <li title="{% trans title=reference.reference_type.name %}External reference ({{ title }}){% endtrans %}"
                 class="icon-link">
             {% if reference.url -%}
-                <a href="{{ reference.url }}" class="title" target="_blank">
+                <a href="{{ reference.url }}" class="title" target="_blank" rel="noopener noreferrer">
                     {{ reference.urn or reference.value }}
                 </a>
             {%- else -%}
@@ -40,7 +40,7 @@
 {% macro render_speakers(speakers) -%}
     <div class="speaker-list">
         <span class="label">{{ ngettext("Speaker", "Speakers", speakers | length) }}</span>:
-        {{ render_users(speakers | sort(attribute="display_order_key")) }}
+        {{ render_users(speakers | sort(attribute="display_order_key"), title=speakers[0].object.event.show_titles) }}
     </div>
 {%- endmacro %}
 
@@ -54,8 +54,11 @@
     </div>
 {%- endmacro %}
 
-{% macro render_notes(item) -%}
+{% macro render_notes(item, for_event=none, anchor=none, hidden=true) -%}
     {% if item.has_note %}
-        {{ render_note(note=item.note, can_edit=item.can_edit_note(session.user)) }}
+        {% set req = request.args.get('note') %}
+        {% set note_id = item.note.id|string %}
+        {{ render_note(item.note, hidden=(hidden and req != note_id), can_edit=item.can_edit_note(session.user),
+                       for_event=for_event, anchor=anchor) }}
     {% endif %}
 {%- endmacro %}

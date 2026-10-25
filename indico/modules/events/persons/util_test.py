@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 
@@ -37,8 +26,8 @@ def test_get_person_for_user(db, dummy_event, dummy_user):
 def test_create_event_person(db, dummy_event):
     data = {
         'email': 'test@acme.com',
-        'firstName': 'John',
-        'familyName': 'Doe',
+        'first_name': 'John',
+        'last_name': 'Doe',
         'affiliation': 'ACME Inc.'
     }
     person = create_event_person(dummy_event, **data)
@@ -51,8 +40,8 @@ def test_create_event_person(db, dummy_event):
 def test_get_event_person(db, dummy_event, dummy_user):
     data = {
         'email': 'test@acme.com',
-        'firstName': 'John',
-        'familyName': 'Doe',
+        'first_name': 'John',
+        'last_name': 'Doe',
         'affiliation': 'ACME Inc.'
     }
     person_1 = get_event_person(dummy_event, data)
@@ -65,9 +54,9 @@ def test_get_event_person(db, dummy_event, dummy_user):
     db.session.flush()
 
     data = {
-        'email': '1337@example.com',
-        'firstName': 'Sea',
-        'familyName': 'Pig',
+        'email': '1337@example.test',
+        'first_name': 'Sea',
+        'last_name': 'Pig',
         'affiliation': 'ACME Inc.'
     }
     person_2 = get_event_person(dummy_event, data)
@@ -86,8 +75,8 @@ def test_get_event_person(db, dummy_event, dummy_user):
     # User for whom there is already an EventPerson in this event
     data = {
         'email': 'test@acme.com',
-        'firstName': 'JOHN',
-        'familyName': 'DOE',
+        'first_name': 'JOHN',
+        'last_name': 'DOE',
         'affiliation': 'ACME'
     }
     person_3 = get_event_person(dummy_event, data)
@@ -97,8 +86,8 @@ def test_get_event_person(db, dummy_event, dummy_user):
     assert person_3.full_name == 'John Doe'
 
     data = {
-        'firstName': 'Foo',
-        'familyName': 'Bar'
+        'first_name': 'Foo',
+        'last_name': 'Bar'
     }
     person_4 = get_event_person(dummy_event, data)
     # We should get a new person
@@ -111,21 +100,21 @@ def test_get_event_person(db, dummy_event, dummy_user):
 def test_get_event_person_edit(db, dummy_event, dummy_user):
     data = {
         'email': 'test@acme.com',
-        'firstName': 'John',
-        'familyName': 'Doe',
+        'first_name': 'John',
+        'last_name': 'Doe',
         'affiliation': 'ACME Inc.'
     }
-    person_1 = get_event_person(dummy_event, dict(data, _type='Avatar', id=dummy_user.id))
+    person_1 = get_event_person(dummy_event, dict(data, type='user', email=dummy_user.email))
     assert person_1.id is None
     assert person_1.user == dummy_user
     db.session.add(person_1)
     db.session.flush()
 
-    person_2 = get_event_person(dummy_event, dict(data, _type='EventPerson', id=person_1.id))
+    person_2 = get_event_person(dummy_event, dict(data, type='event_person', person_id=person_1.id))
     assert person_2 == person_1
 
-    person_3 = get_event_person(dummy_event, dict(data, _type='PersonLink', personId=person_1.id))
+    person_3 = get_event_person(dummy_event, dict(data, type='person_link', person_id=person_1.id))
     assert person_3 == person_1
 
     with pytest.raises(ValueError):
-        get_event_person(dummy_event, dict(data, _type='UnsupportedPersonType'))
+        get_event_person(dummy_event, dict(data, type='UnsupportedPersonType'))

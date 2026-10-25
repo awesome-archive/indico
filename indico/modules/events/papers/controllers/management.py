@@ -1,43 +1,39 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import flash, render_template, request, session
 from werkzeug.exceptions import NotFound
 
+from indico.core.errors import UserValueError
 from indico.modules.events.contributions import Contribution
+from indico.modules.events.management.controllers.base import RHManageEventBase
 from indico.modules.events.operations import (create_reviewing_question, delete_reviewing_question,
                                               sort_reviewing_questions, update_reviewing_question)
 from indico.modules.events.papers import logger
 from indico.modules.events.papers.controllers.base import RHManagePapersBase
+from indico.modules.events.papers.file_types import PaperFileType
 from indico.modules.events.papers.forms import (DeadlineForm, PaperReviewingSettingsForm, PapersScheduleForm,
                                                 PaperTeamsForm, make_competences_form)
+from indico.modules.events.papers.models.files import PaperFile
 from indico.modules.events.papers.models.review_questions import PaperReviewQuestion
 from indico.modules.events.papers.models.review_ratings import PaperReviewRating
 from indico.modules.events.papers.models.reviews import PaperReview, PaperReviewType
 from indico.modules.events.papers.models.revisions import PaperRevision
-from indico.modules.events.papers.operations import (close_cfp, create_competences, open_cfp, schedule_cfp,
-                                                     set_deadline, set_reviewing_state, update_competences,
+from indico.modules.events.papers.operations import (close_cfp, create_competences, create_new_file_type,
+                                                     delete_file_type, open_cfp, schedule_cfp, set_deadline,
+                                                     set_reviewing_state, update_competences, update_file_type,
                                                      update_team_members)
+from indico.modules.events.papers.schemas import PaperFileTypeArgs, PaperFileTypeSchema
 from indico.modules.events.papers.settings import PaperReviewingRole, paper_reviewing_settings
 from indico.modules.events.papers.views import WPManagePapers
 from indico.modules.events.reviewing_questions_fields import get_reviewing_field_types
 from indico.modules.users.models.users import User
 from indico.util.i18n import _, ngettext
+from indico.web.args import use_rh_args
 from indico.web.forms.base import FormDefaults
 from indico.web.util import jsonify_data, jsonify_form, jsonify_template
 
@@ -50,7 +46,7 @@ def _render_paper_dashboard(event, view_class=None):
 
 
 class RHPapersDashboard(RHManagePapersBase):
-    """Dashboard of the papers module"""
+    """Dashboard of the papers module."""
 
     # Allow access even if the feature is disabled
     EVENT_FEATURE = None
@@ -63,7 +59,7 @@ class RHPapersDashboard(RHManagePapersBase):
 
 
 class RHManagePaperTeams(RHManagePapersBase):
-    """Modify managers of the papers module"""
+    """Modify managers of the papers module."""
 
     def _process(self):
         cfp = self.event.cfp
@@ -85,10 +81,10 @@ class RHManagePaperTeams(RHManagePapersBase):
             if cfp.layout_reviewing_enabled:
                 teams['layout_reviewers'] = form.layout_reviewers.data
             unassigned_contribs = update_team_members(self.event, **teams)
-            flash(_("The members of the teams were updated successfully"), 'success')
+            flash(_('The members of the teams were updated successfully'), 'success')
             if unassigned_contribs:
-                flash(ngettext("Users have been removed from 1 contribution",
-                               "Users have been removed from {} contributions",
+                flash(ngettext('Users have been removed from 1 contribution',
+                               'Users have been removed from {} contributions',
                                len(unassigned_contribs)).format(len(unassigned_contribs)),
                       'warning')
             return jsonify_data()
@@ -96,7 +92,7 @@ class RHManagePaperTeams(RHManagePapersBase):
 
 
 class RHSwitchReviewingType(RHManagePapersBase):
-    """Enable/disable the paper reviewing types"""
+    """Enable/disable the paper reviewing types."""
 
     def _process_PUT(self):
         set_reviewing_state(self.event, PaperReviewType[request.view_args['reviewing_type']], True)
@@ -108,30 +104,30 @@ class RHSwitchReviewingType(RHManagePapersBase):
 
 
 class RHManageCompetences(RHManagePapersBase):
-    """Manage the competences of the call for papers ACLs"""
+    """Manage the competences of the call for papers ACLs."""
 
     def _process(self):
         form_class = make_competences_form(self.event)
         user_competences = self.event.cfp.user_competences
-        defaults = {'competences_{}'.format(user_id): competences.competences
-                    for user_id, competences in user_competences.iteritems()}
+        defaults = {f'competences_{user_id}': competences.competences
+                    for user_id, competences in user_competences.items()}
         form = form_class(obj=FormDefaults(defaults))
         if form.validate_on_submit():
             key_prefix = 'competences_'
-            form_data = {int(key[len(key_prefix):]): value for key, value in form.data.iteritems()}
+            form_data = {int(key[len(key_prefix):]): value for key, value in form.data.items()}
             users = {u.id: u for u in User.query.filter(User.id.in_(form_data), ~User.is_deleted)}
-            for user_id, competences in form_data.iteritems():
+            for user_id, competences in form_data.items():
                 if user_id in user_competences:
                     update_competences(user_competences[user_id], competences)
                 elif competences:
                     create_competences(self.event, users[user_id], competences)
-            flash(_("Team competences were updated successfully"), 'success')
+            flash(_('Team competences were updated successfully'), 'success')
             return jsonify_data()
         return jsonify_template('events/papers/management/competences.html', event=self.event, form=form)
 
 
 class RHContactStaff(RHManagePapersBase):
-    """Send emails to reviewing staff"""
+    """Send emails to reviewing staff."""
 
     def _process(self):
         paper_persons_dict = {}
@@ -157,63 +153,82 @@ class RHScheduleCFP(RHManagePapersBase):
             rescheduled = self.event.cfp.start_dt is not None
             schedule_cfp(self.event, **form.data)
             if rescheduled:
-                flash(_("Call for papers has been rescheduled"), 'success')
+                flash(_('Call for papers has been rescheduled'), 'success')
             else:
-                flash(_("Call for papers has been scheduled"), 'success')
+                flash(_('Call for papers has been scheduled'), 'success')
             return jsonify_data(html=_render_paper_dashboard(self.event))
         return jsonify_form(form)
 
 
 class RHOpenCFP(RHManagePapersBase):
-    """Open the call for papers"""
+    """Open the call for papers."""
 
     def _process(self):
         open_cfp(self.event)
-        flash(_("Call for papers is now open"), 'success')
+        flash(_('Call for papers is now open'), 'success')
         return jsonify_data(html=_render_paper_dashboard(self.event))
 
 
 class RHCloseCFP(RHManagePapersBase):
-    """Close the call for papers"""
+    """Close the call for papers."""
 
     def _process(self):
         close_cfp(self.event)
-        flash(_("Call for papers is now closed"), 'success')
+        flash(_('Call for papers is now closed'), 'success')
         return jsonify_data(html=_render_paper_dashboard(self.event))
 
 
 class RHManageReviewingSettings(RHManagePapersBase):
+    @property
+    def ratings_query(self):
+        return (PaperReviewRating.query
+                .join(PaperReviewRating.review)
+                .join(PaperReview.revision)
+                .join(PaperRevision._contribution)
+                .join(PaperReviewRating.question)
+                .filter(~Contribution.is_deleted,
+                        Contribution.event == self.event,
+                        PaperReviewQuestion.field_type == 'rating'))
+
+    def _scale_ratings(self, scale_min, scale_max):
+        prev_min = paper_reviewing_settings.get(self.event, 'scale_lower')
+        prev_max = paper_reviewing_settings.get(self.event, 'scale_upper')
+        if scale_min == prev_min and scale_max == prev_max:
+            return
+        assert scale_max > scale_min
+
+        paper_reviewing_settings.set_multi(self.event, {
+            'scale_lower': scale_min,
+            'scale_upper': scale_max,
+        })
+        for rating in self.ratings_query:
+            if rating.value is None:
+                continue
+            value = (rating.value - prev_min) / (prev_max - prev_min)
+            rating.value = round(value * (scale_max - scale_min) + scale_min)
+
     def _process(self):
-        has_ratings = (PaperReviewRating.query
-                       .join(PaperReviewRating.review)
-                       .join(PaperReview.revision)
-                       .join(PaperRevision._contribution)
-                       .join(PaperReviewRating.question)
-                       .filter(~Contribution.is_deleted,
-                               Contribution.event == self.event,
-                               PaperReviewQuestion.field_type == 'rating')
-                       .has_rows())
         defaults = FormDefaults(content_review_questions=self.event.cfp.content_review_questions,
                                 layout_review_questions=self.event.cfp.layout_review_questions,
                                 **paper_reviewing_settings.get_all(self.event))
-        form = PaperReviewingSettingsForm(event=self.event, obj=defaults, has_ratings=has_ratings)
+        form = PaperReviewingSettingsForm(event=self.event, obj=defaults, has_ratings=self.ratings_query.has_rows())
         if form.validate_on_submit():
             data = form.data
             data.update(data.pop('email_settings'))
+            self._scale_ratings(data['scale_lower'], data['scale_upper'])
             paper_reviewing_settings.set_multi(self.event, data)
-            flash(_("The reviewing settings were saved successfully"), 'success')
-            logger.info("Paper reviewing settings of %r updated by %r", self.event, session.user)
+            flash(_('The reviewing settings were saved successfully'), 'success')
+            logger.info('Paper reviewing settings of %r updated by %r', self.event, session.user)
             return jsonify_data()
         self.commit = False
-        disabled_fields = form.RATING_FIELDS if has_ratings else ()
-        return jsonify_form(form, disabled_fields=disabled_fields)
+        return jsonify_form(form)
 
 
 class RHSetDeadline(RHManagePapersBase):
     def _process(self):
         role = PaperReviewingRole[request.view_args['role']]
-        deadline = paper_reviewing_settings.get(self.event, '{}_deadline'.format(role.name))
-        enforce = paper_reviewing_settings.get(self.event, 'enforce_{}_deadline'.format(role.name))
+        deadline = paper_reviewing_settings.get(self.event, f'{role.name}_deadline')
+        enforce = paper_reviewing_settings.get(self.event, f'enforce_{role.name}_deadline')
         form = DeadlineForm(obj=FormDefaults(deadline=deadline, enforce=enforce), event=self.event)
         if form.validate_on_submit():
             set_deadline(self.event, role, form.deadline.data, form.enforce.data)
@@ -267,7 +282,7 @@ class RHCreateReviewingQuestion(RHReviewingQuestionsActionsBase):
             new_question = create_reviewing_question(self.event, PaperReviewQuestion, self.field_cls, form,
                                                      {'type': PaperReviewType[self.review_type]})
             self.event.paper_review_questions.append(new_question)
-            logger.info("Reviewing question %r created by %r", new_question, session.user)
+            logger.info('Reviewing question %r created by %r', new_question, session.user)
             return jsonify_data(flash=False)
         return jsonify_form(form, fields=getattr(form, '_order', None))
 
@@ -298,7 +313,7 @@ class RHDeleteReviewingQuestion(RHManageQuestionBase):
 
 class RHSortReviewingQuestions(RHReviewingQuestionsActionsBase):
     def _process(self):
-        question_ids = map(int, request.form.getlist('field_ids'))
+        question_ids = request.form.getlist('field_ids', type=int)
         if self.review_type == 'layout':
             questions = self.event.cfp.layout_review_questions
         else:
@@ -306,3 +321,40 @@ class RHSortReviewingQuestions(RHReviewingQuestionsActionsBase):
 
         sort_reviewing_questions(questions, question_ids)
         return jsonify_data(flash=False)
+
+
+class RHPapersCreateFileType(RHManagePapersBase):
+    """Create a new file type."""
+
+    @use_rh_args(PaperFileTypeArgs)
+    def _process(self, data):
+        file_type = create_new_file_type(self.event, **data)
+        return PaperFileTypeSchema().jsonify(file_type)
+
+
+class RHPapersEditFileType(RHManagePapersBase):
+    """Delete/update a file type."""
+
+    def _process_args(self):
+        RHManageEventBase._process_args(self)
+        self.file_type = (PaperFileType.query
+                          .with_parent(self.event)
+                          .filter_by(id=request.view_args['file_type_id'])
+                          .first_or_404())
+
+    @use_rh_args(PaperFileTypeArgs, partial=True)
+    def _process_PATCH(self, data):
+        update_file_type(self.file_type, **data)
+        return PaperFileTypeSchema().jsonify(self.file_type)
+
+    def _process_DELETE(self):
+        if PaperFile.query.with_parent(self.file_type).has_rows():
+            raise UserValueError(_('Cannot delete file type which already has files'))
+
+        delete_file_type(self.file_type)
+        return '', 204
+
+
+class RHPapersManageFileTypes(RHManagePapersBase):
+    def _process(self):
+        return WPManagePapers.render_template('management/file_types.html', self.event)

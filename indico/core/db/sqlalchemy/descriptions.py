@@ -1,28 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
+from indico.core.db.sqlalchemy.searchable import fts_matches, make_fts_index
+from indico.util.decorators import strict_classproperty
+from indico.util.enum import RichIntEnum
 from indico.util.string import MarkdownText, PlainText, RichMarkup
-from indico.util.struct.enum import RichIntEnum
 
 
 class RenderMode(RichIntEnum):
@@ -41,8 +32,8 @@ RENDER_MODE_WRAPPER_MAP = {
 }
 
 
-class RenderModeMixin(object):
-    """Mixin to add a  plaintext/html/markdown-enabled column."""
+class RenderModeMixin:
+    """Mixin to add a plaintext/html/markdown-enabled column."""
 
     possible_render_modes = {RenderMode.plain_text}
     default_render_mode = RenderMode.plain_text
@@ -67,7 +58,9 @@ class RenderModeMixin(object):
                              if len(self.possible_render_modes) == 1 or self.render_mode is None
                              else self.render_mode)
             description_wrapper = RENDER_MODE_WRAPPER_MAP[selected_mode]
-            return description_wrapper(getattr(self, attr_name))
+            if (attr_value := getattr(self, attr_name)) is not None:
+                return description_wrapper(attr_value)
+            return description_wrapper()
         return _getter
 
     @classmethod
@@ -106,3 +99,21 @@ class DescriptionMixin(RenderModeMixin):
         )
 
     description = RenderModeMixin.create_hybrid_property('_description')
+
+
+class SearchableDescriptionMixin(DescriptionMixin):
+    @strict_classproperty
+    @classmethod
+    def __auto_table_args(cls):
+        return (make_fts_index(cls, '_description', 'description'),)
+
+    @classmethod
+    def description_matches(cls, search_string, exact=False):
+        """Check whether the description matches a search string.
+
+        To be used in a SQLAlchemy `filter` call.
+
+        :param search_string: A string to search for
+        :param exact: Whether to search for the exact string
+        """
+        return fts_matches(cls.description, search_string, exact=exact)

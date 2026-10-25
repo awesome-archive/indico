@@ -3,6 +3,19 @@
 
 {% block user_content %}
     {% if indico_config.LOCAL_IDENTITIES %}
+        {% if insecure_login_password_error %}
+            {% call message_box('error') %}
+                {% trans %}
+                    The password you used to login is no longer secure:
+                {% endtrans %}
+                <strong>{{ insecure_login_password_error }}</strong>
+                <br>
+                {% trans %}
+                    You need to change your password in order to keep using Indico.
+                {% endtrans %}
+            {% endcall %}
+        {% endif %}
+
         <div class="i-box-group vert">
             <div class="i-box">
                 <div class="i-box-header">
@@ -19,10 +32,11 @@
                         <div id="credentials-form" {%- if not form.is_submitted() %} style="display: none;"{% endif %}>
                             {{ form_header(form, orientation='vertical', classes='no-block-padding') }}
                             {{ form_rows(form) }}
+                            {{ template_hook('below-user-account-form', user=user) }}
                             {% call form_footer(form) %}
-                                <input class="i-button big highlight" type="submit"
+                                <input class="ui primary button" type="submit"
                                        value="{% trans %}Create account{% endtrans %}" data-disabled-until-change>
-                                <a href="#" class="i-button big js-hide-form">
+                                <a href="#" class="ui negative button js-hide-form">
                                     {% trans %}Cancel{% endtrans %}
                                 </a>
                             {% endcall %}
@@ -30,8 +44,9 @@
                     {% else %}
                         {{ form_header(form, orientation='vertical', classes='no-block-padding') }}
                         {{ form_rows(form) }}
+                        {{ template_hook('below-user-account-form', user=user) }}
                         {% call form_footer(form) %}
-                            <input class="i-button big highlight" type="submit" value="{% trans %}Modify credentials{% endtrans %}" data-disabled-until-change>
+                            <input class="ui primary button" type="submit" value="{% trans %}Modify credentials{% endtrans %}" data-disabled-until-change>
                         {% endcall %}
                     {% endif %}
                     {% if user.secondary_local_identities %}
@@ -70,7 +85,7 @@
                                                 </span>
                                             </span>
                                         </span>
-                                        <button class="i-button"
+                                        <button class="ui negative small button"
                                             data-href="{{ url_for('.remove_account', identity) }}"
                                             data-method="post"
                                             data-title="{% trans %}Remove account{% endtrans %}"
@@ -99,35 +114,40 @@
                 <ul class="group-list with-buttons">
                     {% if user.external_identities %}
                         {% for identity in user.external_identities | sort(attribute='safe_last_login_dt', reverse=True) %}
-                            <li>
+                            <li class="flexrow f-a-center">
                                 <span class="list-item-title">
-                                    {{ provider_titles[identity.provider] }}
+                                    {{ provider_titles.get(identity.provider, identity.provider) }}
                                 </span>
-                                <small>
-                                    ({{ identity.identifier }})
-                                </small>
+                                <span>
+                                    <small>
+                                        ({{ identity.identifier }})
+                                    </small>
+                                </span>
                                 <span class="right">
                                     <span class="list-item-info">
-                                        <span>
-                                            <span class="label">
-                                                {% trans %}Last login:{% endtrans %}
-                                            </span>
-                                            <span class="content">
-                                                {% if identity.last_login_dt %}
-                                                    {{ identity.last_login_dt | format_datetime('short') }}
-                                                {% else %}
-                                                    {% trans %}Never{% endtrans %}
-                                                {% endif %}
-                                            </span>
+                                        <span class="label">
+                                            {% trans %}Last login:{% endtrans %}
+                                        </span>
+                                        <span class="content">
+                                            {% if identity.last_login_dt %}
+                                                {{ identity.last_login_dt | format_datetime('short') }}
+                                            {% else %}
+                                                {% trans %}Never{% endtrans %}
+                                            {% endif %}
                                         </span>
                                     </span>
                                     {% if identity.id == session.login_identity %}
-                                        <button class="i-button" disabled
+                                        <button class="ui primary tiny button" disabled
                                             title="{% trans %}The account used to log in cannot be unlinked{% endtrans %}">
                                             {% trans %}Unlink{% endtrans %}
                                         </button>
+                                    {% elif insecure_login_password_error %}
+                                        <button class="ui primary tiny button" disabled
+                                            title="{% trans %}You need to change your password{% endtrans %}">
+                                            {% trans %}Unlink{% endtrans %}
+                                        </button>
                                     {% else %}
-                                        <button class="i-button right"
+                                        <button class="ui primary tiny button right"
                                             data-href="{{ url_for('.remove_account', identity) }}"
                                             data-method="post"
                                             data-title="{% trans %}Unlink account{% endtrans %}"

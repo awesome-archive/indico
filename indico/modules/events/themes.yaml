@@ -1,3 +1,15 @@
+_:
+  inline_minutes_setting: &user_setting_inline_minutes
+    inline_minutes:
+      caption: Inline minutes
+      description: Show minutes by default
+      type: BooleanField
+  numbered_contributions_setting: &user_setting_numbered_contributions
+    numbered_contributions:
+      caption: Numbered contributions
+      description: Show numbered contributions instead of times
+      type: BooleanField
+
 defaults:
     conference: ~
     lecture: lecture
@@ -34,12 +46,24 @@ definitions:
     settings:
       show_notes: true
 
-  nicecompact:
-    event_types: [conference, meeting]
-    stylesheet: compact.scss
-    template: compact.html
-    title: Compact style
-    user_visible: true
+  standard_numbered:
+    <<: *standard
+    title: Indico style - numbered
+    settings:
+      hide_duration: true
+      hide_session_block_time: true
+      hide_end_time: true
+      number_contributions: true
+
+  standard_numbered_inline_minutes:
+    <<: *standard
+    title: Indico style - numbered + minutes
+    settings:
+      hide_duration: true
+      hide_session_block_time: true
+      hide_end_time: true
+      number_contributions: true
+      show_notes: true
 
   indico_weeks_view:
     event_types: [conference, meeting]
@@ -47,10 +71,12 @@ definitions:
     template: weeks.html
     title: Indico Weeks View
     user_visible: true
+    settings:
+      page_is_dark: false
     user_settings:
       colors:
-        caption: Contribution Colours
-        description: 'Colours used for different types of timetable entries'
+        caption: Contribution Colors
+        description: 'Colors used for different types of timetable entries'
         type: MultipleItemsField
         required: false
         kwargs:
@@ -58,7 +84,7 @@ definitions:
             - id: entry
               caption: Keyword
             - id: color
-              caption: Colour
+              caption: Color
           unique_field: entry
         defaults:
           - entry: foo

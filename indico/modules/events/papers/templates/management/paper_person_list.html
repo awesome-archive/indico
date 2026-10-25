@@ -15,19 +15,20 @@
 
 {% block table_head %}
     <th class="i-table thin-column hide-if-locked" data-sorter="false"></th>
-    <th class="i-table name-column">{% trans %}Name{% endtrans %}</th>
+    {# i18n: Full name of the person #}
+    <th class="i-table name-column">{{ pgettext('Person', 'Name') }}</th>
     <th class="i-table email-column">{% trans %}Email{% endtrans %}</th>
     <th class="i-table roles-column" data-sorter="false">{% trans %}Roles{% endtrans %}</th>
 {% endblock %}
 
 {% block table_body %}
-    {% for user, person_roles in event_persons.iteritems() -%}
+    {% for user, person_roles in event_persons.items() -%}
         {% set is_judge = person_roles.judge %}
         {% set is_content_reviewer = person_roles.content_reviewer %}
         {% set is_layout_reviewer = person_roles.layout_reviewer %}
         <tr class="i-table" data-person-roles="{{ person_roles | tojson | forceescape }}">
             <td class="i-table thin-column hide-if-locked">
-                <input type="checkbox" name="user_id" value="{{ user.id }}" class="select-row"
+                <input type="checkbox" name="person_identifier" value="{{ user.identifier }}" class="select-row"
                        {{ 'disabled' if not user.email }}>
             </td>
             <td class="i-table name-column">{{ user.full_name }}</td>

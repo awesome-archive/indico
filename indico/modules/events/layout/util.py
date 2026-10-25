@@ -1,43 +1,33 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
+from dataclasses import dataclass
 from itertools import chain, count
+from urllib.parse import urlsplit
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, load_only
-from werkzeug.urls import url_parse
 
 import indico
 from indico.core import signals
+from indico.core.cache import make_scoped_cache
 from indico.core.config import config
 from indico.core.db import db
 from indico.core.plugins import url_for_plugin
-from indico.legacy.common.cache import GenericCache
 from indico.modules.events.layout import layout_settings
 from indico.modules.events.layout.models.menu import MenuEntry, MenuEntryType, TransientMenuEntry
 from indico.util.caching import memoize_request
 from indico.util.signals import named_objects_from_signal, values_from_signal
-from indico.util.string import crc32, return_ascii
+from indico.util.string import crc32
 from indico.web.flask.util import url_for
 
 
-_cache = GenericCache('updated-menus')
+_cache = make_scoped_cache('updated-menus')
 
 
 def _menu_entry_key(entry_data):
@@ -50,7 +40,7 @@ def get_menu_entries_from_signal():
 
 
 def build_menu_entry_name(name, plugin=None):
-    """ Builds the proper name for a menu entry.
+    """Build the proper name for a menu entry.
 
     Given a menu entry's name and optionally a plugin, returns the
     correct name of the menu entry.
@@ -61,13 +51,13 @@ def build_menu_entry_name(name, plugin=None):
     """
     if plugin:
         plugin = getattr(plugin, 'name', plugin)
-        return '{}:{}'.format(plugin, name)
+        return f'{plugin}:{name}'
     else:
         return name
 
 
-class MenuEntryData(object):
-    """Container to transmit menu entry-related data via signals
+class MenuEntryData:
+    """Container to transmit menu entry-related data via signals.
 
     The data contained is transmitted via the `sidemenu` signal and used
     to build the side menu of an event.
@@ -103,11 +93,14 @@ class MenuEntryData(object):
         be shown in the menu of a static site.  When set to a string,
         the string will be used instead of a mangled version of the
         endpoint's URL.
+    :param url_kwargs: dict -- Additional data passed to ``url_for``
+        when building the url the menu item points to.
     """
+
     plugin = None
 
     def __init__(self, title, name, endpoint=None, position=-1, is_enabled=True, visible=None, parent=None,
-                 static_site=False):
+                 static_site=False, url_kwargs=None, hide_if_restricted=True, new_tab=False):
         self.title = title
         self._name = name
         self.endpoint = endpoint
@@ -116,6 +109,9 @@ class MenuEntryData(object):
         self.is_enabled = is_enabled
         self.parent = parent
         self.static_site = static_site
+        self.url_kwargs = url_kwargs or {}
+        self.hide_if_restricted = hide_if_restricted
+        self.new_tab = new_tab
 
     @property
     def name(self):
@@ -124,63 +120,62 @@ class MenuEntryData(object):
     def visible(self, event):
         return self._visible(event) if self._visible else True
 
-    @return_ascii
     def __repr__(self):
         parent = ''
         if self.parent:
-            parent = ', parent={}'.format(self.parent)
-        return '<MenuEntryData({}{}): "{}">'.format(self.name, parent, self.title)
+            parent = f', parent={self.parent}'
+        return f'<MenuEntryData({self.name}{parent}): "{self.title}">'
 
 
 def _get_split_signal_entries():
-    """Get the top-level and child menu entry data"""
+    """Get the top-level and child menu entry data."""
     signal_entries = get_menu_entries_from_signal()
-    top_data = OrderedDict((name, data)
-                           for name, data in sorted(signal_entries.iteritems(),
-                                                    key=lambda (name, data): _menu_entry_key(data))
-                           if not data.parent)
+    top_data = {name: data
+                for name, data in sorted(signal_entries.items(),
+                                         key=lambda name_data: _menu_entry_key(name_data[1]))
+                if not data.parent}
     child_data = defaultdict(list)
-    for name, data in signal_entries.iteritems():
+    for data in signal_entries.values():
         if data.parent is not None:
             child_data[data.parent].append(data)
-    for parent, entries in child_data.iteritems():
+    for entries in child_data.values():
         entries.sort(key=_menu_entry_key)
     return top_data, child_data
 
 
 def _get_menu_cache_data(event):
     from indico.core.plugins import plugin_engine
-    cache_key = unicode(event.id)
+    cache_key = str(event.id)
     plugin_hash = crc32(','.join(sorted(plugin_engine.get_active_plugins())))
-    cache_version = '{}:{}'.format(indico.__version__, plugin_hash)
+    cache_version = f'{indico.__version__}:{plugin_hash}'
     return cache_key, cache_version
 
 
 def _menu_needs_recheck(event):
-    """Check whether the menu needs to be checked for missing items"""
+    """Check whether the menu needs to be checked for missing items."""
     cache_key, cache_version = _get_menu_cache_data(event)
     return _cache.get(cache_key) != cache_version
 
 
 def _set_menu_checked(event):
-    """Mark the menu as up to date"""
+    """Mark the menu as up to date."""
     cache_key, cache_version = _get_menu_cache_data(event)
     _cache.set(cache_key, cache_version)
 
 
 def _save_menu_entries(entries):
-    """Save new menu entries using a separate SA session"""
+    """Save new menu entries using a separate SA session."""
     with db.tmp_session() as sess:
         sess.add_all(entries)
         try:
             sess.commit()
-        except IntegrityError as e:
+        except IntegrityError as exc:
             # If there are two parallel requests trying to insert a new menu
             # item one of them will fail with an error due to the unique index.
             # If the IntegrityError involves that index, we assume it's just the
             # race condition and ignore it.
             sess.rollback()
-            if 'ix_uq_menu_entries_event_id_name' not in unicode(e.message):
+            if 'ix_uq_menu_entries_event_id_name' not in str(exc):
                 raise
             return False
         else:
@@ -188,16 +183,16 @@ def _save_menu_entries(entries):
 
 
 def _rebuild_menu(event):
-    """Create all menu entries in the database"""
+    """Create all menu entries in the database."""
     top_data, child_data = _get_split_signal_entries()
     pos_gen = count()
     entries = [_build_menu_entry(event, True, data, next(pos_gen), children=child_data.get(data.name))
-               for name, data in top_data.iteritems()]
+               for data in top_data.values()]
     return _save_menu_entries(entries)
 
 
 def _check_menu(event):
-    """Create missing menu items in the database"""
+    """Create missing menu items in the database."""
     top_data, child_data = _get_split_signal_entries()
 
     query = (MenuEntry.query
@@ -207,22 +202,22 @@ def _check_menu(event):
                       joinedload('children').load_only('id', 'parent_id', 'name', 'position')))
 
     existing = {entry.name: entry for entry in query}
-    pos_gen = count(start=(max(x.position for x in existing.itervalues() if not x.parent)))
+    pos_gen = count(start=(max(x.position for x in existing.values() if not x.parent) + 1))
     entries = []
     top_created = set()
-    for name, data in top_data.iteritems():
+    for name, data in top_data.items():
         if name in existing:
             continue
         entries.append(_build_menu_entry(event, True, data, next(pos_gen), child_data.get(name)))
         top_created.add(name)
 
     child_pos_gens = {}
-    for name, entry in existing.iteritems():
+    for name, entry in existing.items():
         if entry.parent is not None:
             continue
         child_pos_gens[name] = count(start=(max(x.position for x in entry.children) + 1 if entry.children else 0))
 
-    for parent_name, data_list in child_data.iteritems():
+    for parent_name, data_list in child_data.items():
         if parent_name in top_created:
             # adding a missing parent element also adds its children
             continue
@@ -271,7 +266,7 @@ def _build_transient_menu(event):
     top_data, child_data = _get_split_signal_entries()
     pos_gen = count()
     return [_build_menu_entry(event, False, data, next(pos_gen), children=child_data.get(data.name))
-            for name, data in top_data.iteritems()
+            for data in top_data.values()
             if data.parent is None]
 
 
@@ -288,6 +283,7 @@ def _build_menu_entry(event, custom_menu_enabled, data, position, children=None,
         is_enabled=data.is_enabled,
         name=data.name,
         position=position,
+        new_tab=data.new_tab,
         children=[_build_menu_entry(event, custom_menu_enabled, entry_data, i)
                   for i, entry_data in enumerate(sorted(children or [], key=_menu_entry_key))]
     )
@@ -310,30 +306,54 @@ def get_menu_entry_by_name(name, event):
 
 
 def is_menu_entry_enabled(entry_name, event):
-    """Check whether the MenuEntry is enabled"""
+    """Check whether the MenuEntry is enabled."""
     return get_menu_entry_by_name(entry_name, event).is_enabled
+
+
+@dataclass(frozen=True)
+class ConferenceTheme:
+    """
+    Holds the values of a given conference theme to be used by Indico.
+
+    Required:
+    - ``name``     -- string indicating the internal name used for the stylesheet which will be
+                      stored when the theme is selected in an event.
+    - ``css_path`` -- string indicating the relative location of the CSS file
+    - ``title``    -- string indicating the title displayed to the user when selecting the theme.
+
+    Optional:
+    - ``js_path``  -- string indicating the relative location for a simple, static javascript file
+    """
+
+    name: str
+    css_path: str
+    title: str
+    js_path: str = None
 
 
 def get_plugin_conference_themes():
     data = values_from_signal(signals.plugin.get_conference_themes.send(), return_plugins=True)
-    return {':'.join((plugin.name, name)): (path, title) for plugin, (name, path, title) in data}
+    # backwards compatibility in case theme_info is a tuple instead of a `ConferenceTheme``
+    data = [(plugin, (theme_info if isinstance(theme_info, ConferenceTheme) else ConferenceTheme(*theme_info)))
+            for plugin, theme_info in data]
+    return {f'{plugin.name}:{theme_info.name}': theme_info for plugin, theme_info in data}
 
 
 def _build_css_url(theme):
     if ':' in theme:
         try:
-            path = get_plugin_conference_themes()[theme][0]
+            path = get_plugin_conference_themes()[theme].css_path
         except KeyError:
             return None
         plugin = theme.split(':', 1)[0]
-        return url_for_plugin(plugin + '.static', filename=path)
+        return url_for_plugin(f'{plugin}.static', filename=path)
     else:
-        css_base = url_parse(config.CONFERENCE_CSS_TEMPLATES_BASE_URL).path
-        return '{}/{}'.format(css_base, theme)
+        css_base = urlsplit(config.CONFERENCE_CSS_TEMPLATES_BASE_URL).path
+        return f'{css_base}/{theme}'
 
 
 def get_css_url(event, force_theme=None, for_preview=False):
-    """Builds the URL of a CSS resource.
+    """Build the URL of a CSS resource.
 
     :param event: The `Event` to get the CSS url for
     :param force_theme: The ID of the theme to override the custom CSS resource
@@ -353,6 +373,39 @@ def get_css_url(event, force_theme=None, for_preview=False):
         return url_for('event_layout.css_display', event, slug=event.stylesheet_metadata['hash'])
     elif layout_settings.get(event, 'theme'):
         return _build_css_url(layout_settings.get(event, 'theme'))
+
+
+def _build_js_url(theme):
+    if ':' not in theme:
+        return None
+    try:
+        if not (path := get_plugin_conference_themes()[theme].js_path):
+            return None
+    except KeyError:
+        return None
+    plugin = theme.split(':', 1)[0]
+    return url_for_plugin(f'{plugin}.static', filename=path)
+
+
+def get_js_url(event, force_theme=None, for_preview=False):
+    """Build the URL of a JS resource.
+
+    :param event: The `Event` to get the JS url for
+    :param force_theme: The ID of the theme to import the custom JS resource
+                        only if it exists
+    :param for_preview: Whether the URL is used in the JS preview page
+    :return: The URL to the JS resource
+    """
+    from indico.modules.events.layout import layout_settings
+
+    if force_theme and force_theme != '_custom':
+        return _build_js_url(force_theme)
+    elif for_preview and force_theme is None:
+        return None
+    elif force_theme == '_custom' or layout_settings.get(event, 'use_custom_css'):
+        return None
+    elif layout_settings.get(event, 'theme'):
+        return _build_js_url(layout_settings.get(event, 'theme'))
 
 
 def get_logo_data(event):

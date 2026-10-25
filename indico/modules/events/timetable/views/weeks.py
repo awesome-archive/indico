@@ -1,22 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from datetime import timedelta
 from itertools import takewhile
 
@@ -67,7 +56,7 @@ def inject_week_timetable(event, days, tz_name, tpl='events/timetable/display/_w
     for week in week_table_shallow:
         # Build list of time slots that are used this week
         time_slots = set()
-        for day, entries in week:
+        for _day, entries in week:
             time_slots.update(_localized_time(x.start_dt, tz) for x in entries)
 
         # Build each day with its contributions and placeholders
@@ -82,8 +71,8 @@ def inject_week_timetable(event, days, tz_name, tpl='events/timetable/display/_w
 
             # We've got a dict with a {slot: [entry, entry, ...]} mapping (for a single day)
             # We'll run over it and make some additional calculations
-            day_tmp_sorted = sorted(day_tmp.viewitems())
-            day_entries = OrderedDict()
+            day_tmp_sorted = sorted(day_tmp.items())
+            day_entries = {}
             for n, (slot, slot_entries) in enumerate(day_tmp_sorted):
                 tmp_slot_entries = []
                 for entry in slot_entries:

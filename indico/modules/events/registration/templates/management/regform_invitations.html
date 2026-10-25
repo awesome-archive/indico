@@ -1,5 +1,8 @@
 {% extends 'events/registration/management/_regform_base.html' %}
-{% from 'events/registration/management/_invitation_list.html' import render_invitation_list %}
+
+{% block back_button_url -%}
+    {{ url_for('.manage_regform', regform) }}
+{%- endblock %}
 
 {% block subtitle %}
     {% trans title=regform.title -%}
@@ -21,39 +24,32 @@
                     </div>
                 </div>
                 <div class="toolbar">
-                    <a class="i-button icon-user arrow js-dropdown" data-toggle="dropdown">
-                        {% trans %}Invite{% endtrans %}
-                    </a>
-                    <ul class="dropdown">
-                        <li>
-                            <a class="js-invite-user" data-href="{{ url_for('.invite', regform) }}"
-                               data-title="{% trans %}Invite user to register{% endtrans %}">
-                                {% trans %}New user{% endtrans %}
-                            </a>
-                        </li>
-                        <li>
-                            <a class="js-invite-user" data-href="{{ url_for('.invite', regform, existing=True) }}"
-                               data-title="{% trans %}Invite user to register{% endtrans %}">
-                                {% trans %}Indico users{% endtrans %}
-                            </a>
-                        </li>
-                    </ul>
+                    {{ template_hook('registration-invite-options', event=event, regform=regform) }}
+                    <div id="invite-dialog-button-container" class="group"></div>
                 </div>
+            </div>
+            <div class="section">
+                <div class="icon icon-mail"></div>
+                <div class="text">
+                    <div class="label">
+                        {% trans %}Remind pending invitees{% endtrans %}
+                    </div>
+                    {% trans %}Send email reminders to users who have not yet registered.{% endtrans %}
+                </div>
+                <div class="toolbar" id="email-all-pending-invitations-container"></div>
             </div>
         </div>
     {% endif %}
 
-    <div id="invitation-list">
-        {{ render_invitation_list(invitations) }}
-    </div>
-
-    <div class="toolbar right">
-        <a href="{{ url_for('.manage_regform', regform) }}" class="i-button big">
-            {% trans %}Back{% endtrans %}
-        </a>
-    </div>
+    <div id="invitation-list-container"></div>
 
     <script>
-        setupInvitationPage();
+        setupInvitationPage({
+            eventId: {{ event.id | tojson }},
+            regformId: {{ regform.id | tojson }},
+            hasPendingInvitations: {{ has_pending_invitations | tojson }},
+            invitations: {{ invitations_list | tojson }},
+            searchToken: {{ make_user_search_token() | tojson }},
+        });
     </script>
 {% endblock %}

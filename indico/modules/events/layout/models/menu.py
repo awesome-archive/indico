@@ -1,30 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import g
+from flask import g, session
+from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import joinedload
 from werkzeug.utils import cached_property
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
-from indico.util.i18n import _
-from indico.util.string import format_repr, return_ascii, slugify, text_to_repr
-from indico.util.struct.enum import RichIntEnum
+from indico.core.db.sqlalchemy.protection import ProtectionMixin
+from indico.modules.events.layout.models.principals import MenuEntryPrincipal
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import _, orig_string
+from indico.util.locators import locator_property
+from indico.util.string import format_repr, slugify, text_to_repr
 from indico.web.flask.util import url_for
 
 
@@ -32,7 +25,9 @@ def _get_next_position(context):
     """Get the next menu entry position for the event."""
     event_id = context.current_parameters['event_id']
     parent_id = context.current_parameters['parent_id']
-    res = db.session.query(db.func.max(MenuEntry.position)).filter_by(event_id=event_id, parent_id=parent_id).one()
+    res = (db.session.query(db.func.max(MenuEntry.position))
+           .filter(MenuEntry.event_id == event_id, MenuEntry.parent_id == parent_id)
+           .one())
     return (res[0] or 0) + 1
 
 
@@ -45,10 +40,10 @@ class MenuEntryType(RichIntEnum):
     page = 5
 
 
-class MenuEntryMixin(object):
+class MenuEntryMixin:
     def __init__(self, **kwargs):
-        event = kwargs.pop('event', kwargs.get('event'))
-        super(MenuEntryMixin, self).__init__(**kwargs)
+        event = kwargs.pop('event', None)
+        super().__init__(**kwargs)
         # XXX: not calling this `event` since this one should NOT use
         # the relationship to avoid mixing data from different DB sessions
         # when updating/populating the menu (which happens in a separate
@@ -75,11 +70,11 @@ class MenuEntryMixin(object):
             return None
         elif self.is_internal_link:
             data = self.default_data
-            if data.static_site and isinstance(data.static_site, basestring) and g.get('static_site'):
+            if data.static_site and isinstance(data.static_site, str) and g.get('static_site'):
                 return data.static_site
-            kwargs = {}
+            kwargs = dict(data.url_kwargs)
             if self.name == 'timetable':
-                from indico.modules.events. layout import layout_settings
+                from indico.modules.events.layout import layout_settings
                 if layout_settings.get(self.event_ref, 'timetable_by_room'):
                     kwargs['layout'] = 'room'
                 if layout_settings.get(self.event_ref, 'timetable_detailed'):
@@ -90,8 +85,8 @@ class MenuEntryMixin(object):
             from indico.core.plugins import url_for_plugin
             return url_for_plugin(self.default_data.endpoint, self.event_ref, _external=False)
         elif self.is_page:
-            return url_for('event_pages.page_display', self.event_ref, page_id=self.page_id, slug=slugify(self.title),
-                           _external=False)
+            return url_for('event_pages.page_display', self.event_ref, page_id=self.page_id,
+                           slug=slugify(self.title, fallback=None), _external=False)
         else:
             return None
 
@@ -119,6 +114,19 @@ class MenuEntryMixin(object):
     def is_separator(self):
         return self.type == MenuEntryType.separator
 
+    @property
+    def log_title(self):
+        if self.is_separator:
+            return '<Spacer>'
+        elif self.title:
+            return self.title
+        elif defaults := self.default_data:
+            return orig_string(defaults.title)
+        # this is very unlikely to ever happen, since typically we hide orphaned entries (ie internal/plugin
+        # menu items which are no longer being defined via the signal) and thus managers cannot do loggable
+        # operations on them
+        return '<Orphaned>'
+
     @cached_property
     def default_data(self):
         from indico.modules.events.layout.util import get_menu_entries_from_signal
@@ -134,12 +142,18 @@ class MenuEntryMixin(object):
     def is_visible(self):
         if not self.is_enabled:
             return False
+        if not self.can_access(session.user):
+            return False
         if not self.name:
-            return True
+            # we don't have `hide_if_restricted` for custom menu items, so we
+            # always hide them if the user cannot access the event
+            return self.event_ref.can_access(session.user)
         if self.is_orphaned:
             return False
 
         data = self.default_data
+        if data.hide_if_restricted and not self.event_ref.can_access(session.user):
+            return False
         if not data.static_site and g.get('static_site'):
             return False
         return data.visible(self.event_ref)
@@ -162,25 +176,31 @@ class MenuEntryMixin(object):
     def locator(self):
         return dict(self.event_ref.locator, menu_entry_id=self.id)
 
-    @return_ascii
     def __repr__(self):
-        return '<{}({}, {}, {}, position={})>'.format(
-            type(self).__name__,
-            self.id,
-            self.title,
-            self.name,
-            self.position,
-        )
+        return f'<{type(self).__name__}({self.id}, {self.title}, {self.name}, position={self.position})>'
 
 
 class TransientMenuEntry(MenuEntryMixin):
-    def __init__(self, event, is_enabled, name, position, children):
-        super(TransientMenuEntry, self).__init__(event=event)
+    """
+    Transient menu entries are used in case menu customization is disabled. They provide a
+    lightweight alternative for the internal links that appear by default.
+
+    :param event: Event -- The event reference the entry applies to
+    :param is_enabled: bool -- True, if the entry is enabled
+    :param name: str -- The name of the menu entry
+    :param position: int -- The position in the menu the entry is at
+    :param children: list[MenuEntry] -- The child entries of this menu entry
+    :param new_tab: bool -- If the link/page should be opened in a new tab
+    """
+
+    def __init__(self, event, is_enabled, name, position, children, new_tab=False):
+        super().__init__(event=event)
         self.is_enabled = is_enabled
         self.title = None
         self.name = name
         self.position = position
         self.children = children
+        self.new_tab = new_tab
         self.type = None
         self.plugin = None
         self.link_url = None
@@ -193,29 +213,34 @@ class TransientMenuEntry(MenuEntryMixin):
     def id(self):
         return self.name
 
+    def can_access(self, user, allow_admin=True):
+        return True
 
-class MenuEntry(MenuEntryMixin, db.Model):
+
+class MenuEntry(MenuEntryMixin, ProtectionMixin, db.Model):
+    #: Allow speakers in the ProtectionMixin
+    allow_speakers = True
+
     __tablename__ = 'menu_entries'
     __table_args__ = (
         db.CheckConstraint(
-            '(type IN ({type.internal_link.value}, {type.plugin_link.value}) AND name IS NOT NULL) OR '
+            '(type IN ({type.internal_link.value}, {type.plugin_link.value}) AND name IS NOT NULL) OR '  # noqa: UP032
             '(type NOT IN ({type.internal_link.value}, {type.plugin_link.value}) and name IS NULL)'
             .format(type=MenuEntryType),
             'valid_name'),
         db.CheckConstraint(
-            '(type = {type.user_link.value}) = (link_url IS NOT NULL)'
-            .format(type=MenuEntryType),
+            f'(type = {MenuEntryType.user_link.value}) = (link_url IS NOT NULL)',
             'valid_link_url'),
         db.CheckConstraint(
-            '(type = {type.page.value} AND page_id IS NOT NULL) OR'
-            ' (type != {type.page.value} AND page_id IS NULL)'.format(type=MenuEntryType),
+            f'(type = {MenuEntryType.page.value} AND page_id IS NOT NULL) OR'
+            f' (type != {MenuEntryType.page.value} AND page_id IS NULL)',
             'valid_page_id'),
         db.CheckConstraint(
-            '(type = {type.plugin_link.value} AND plugin IS NOT NULL) OR'
-            ' (type != {type.plugin_link.value} AND plugin IS NULL)'.format(type=MenuEntryType),
+            f'(type = {MenuEntryType.plugin_link.value} AND plugin IS NOT NULL) OR'
+            f' (type != {MenuEntryType.plugin_link.value} AND plugin IS NULL)',
             'valid_plugin'),
         db.CheckConstraint(
-            '(type = {type.separator.value} AND title IS NULL) OR'
+            '(type = {type.separator.value} AND title IS NULL) OR'  # noqa: UP032
             ' (type IN ({type.user_link.value}, {type.page.value}) AND title IS NOT NULL) OR'
             ' (type NOT IN ({type.separator.value}, {type.user_link.value}, {type.page.value}))'
             .format(type=MenuEntryType),
@@ -223,9 +248,13 @@ class MenuEntry(MenuEntryMixin, db.Model):
         db.CheckConstraint(
             "title != ''",
             'title_not_empty'),
-        db.Index(None, 'event_id', 'name', unique=True,
-                 postgresql_where=db.text('(type = {type.internal_link.value} OR type = {type.plugin_link.value})'
-                                          .format(type=MenuEntryType))),
+        db.Index(
+            None, 'event_id', 'name', unique=True,
+            postgresql_where=db.text(
+                '(type = {type.internal_link.value} OR type = {type.plugin_link.value})'  # noqa: UP032
+                .format(type=MenuEntryType)
+            )
+        ),
         {'schema': 'events'}
     )
 
@@ -276,6 +305,15 @@ class MenuEntry(MenuEntryMixin, db.Model):
         nullable=False,
         default=False
     )
+    #: ACLs for page visibility
+    acl_entries = db.relationship(
+        'MenuEntryPrincipal',
+        backref='menu_entry',
+        cascade='all, delete-orphan',
+        collection_class=set
+    )
+    acl = association_proxy('acl_entries', 'principal', creator=lambda v: MenuEntryPrincipal(principal=v))
+
     #: The target URL of a custom link
     link_url = db.Column(
         db.String,
@@ -385,6 +423,14 @@ class MenuEntry(MenuEntryMixin, db.Model):
         self.parent = parent
         self.position = position + 1
 
+    @property
+    def protection_parent(self):
+        return self.parent or self.event_ref
+
+    def log(self, *args, **kwargs):
+        """Log with prefilled metadata for the entry."""
+        return self.event.log(*args, meta={'menu_entry_id': self.id}, **kwargs)
+
 
 class EventPage(db.Model):
     __tablename__ = 'pages'
@@ -424,14 +470,17 @@ class EventPage(db.Model):
     # - legacy_mapping (LegacyPageMapping.page)
     # - menu_entry (MenuEntry.page)
 
-    @property
+    @locator_property
     def locator(self):
-        return dict(self.menu_entry.event.locator, page_id=self.id, slug=slugify(self.menu_entry.title))
+        return dict(self.menu_entry.event.locator, page_id=self.id, slug=slugify(self.menu_entry.title, fallback=None))
+
+    @locator.noslug
+    def locator(self):
+        return dict(self.menu_entry.event.locator, page_id=self.id)
 
     @property
     def is_default(self):
         return self.menu_entry.event.default_page_id == self.id
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', _text=text_to_repr(self.html, html=True))

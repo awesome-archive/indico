@@ -20,11 +20,12 @@
 {% endblock %}
 
 {% block overview %}
+    {% set width = 100 / events_by_day|length %}
     <table>
         <tr>
             {% for day, events in events_by_day %}
-                <th>
-                    {{ day|format_date(format='EEE d MMM') }}
+                <th style="width: {{ width }}%;">
+                    {{ day|format_skeleton('EEEdMMM') }}
                 </th>
             {% endfor %}
         </tr>

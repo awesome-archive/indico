@@ -8,6 +8,27 @@
     {% trans %}Participant Roles{% endtrans %}
 {% endblock %}
 
+{% block title_actions %}
+    {%- if event.type == 'conference' -%}
+        <button class="i-button borderless icon-settings arrow js-dropdown" data-toggle="dropdown">
+            {%- trans %}Settings{% endtrans -%}
+        </button>
+        <ul class="i-dropdown">
+            <li>
+                <a href="#"
+                   title="{% trans %}Manage person lists{% endtrans %}"
+                   data-reload-after="customData"
+                   data-title="{% trans %}Manage person lists{% endtrans %}"
+                   data-href="{{ url_for('.manage_person_lists', event) }}"
+                   data-qtip-position="right"
+                   data-ajax-dialog>
+                    {% trans %}Person lists{% endtrans %}
+                </a>
+            </li>
+        </ul>
+    {%- endif -%}
+{% endblock %}
+
 {% block content %}
     {%- set has_no_account = persons|selectattr('roles.no_account')|any -%}
     {%- set has_uninvited = persons|selectattr('roles.no_account')|selectattr('person.invited_dt', 'none')|any -%}
@@ -17,36 +38,35 @@
         <div class="toolbars space-after">
             <div class="toolbar hide-if-locked">
                 <div class="group">
-                    <a class="icon-checkbox-checked i-button arrow js-dropdown" href="#" data-toggle="dropdown"></a>
-                    <ul class="dropdown">
+                    <button class="icon-checkbox-checked i-button arrow js-dropdown" data-toggle="dropdown"></button>
+                    <ul class="i-dropdown">
                         <li>
                             <a href="#" data-select-all="#event-participants-list input.select-row:visible:not(:disabled)">
-                                {% trans %}All{% endtrans %}
+                                {% trans 'Selection' %}All{% endtrans %}
                             </a>
                         </li>
                         <li>
                             <a href="#" data-select-none="#event-participants-list input.select-row:visible">
-                                {% trans %}None{% endtrans %}
+                                {% trans 'Selection' %}None{% endtrans %}
                             </a>
                         </li>
                     </ul>
                 </div>
                 <div class="group">
-                    <a href="#" class="i-button icon-mail highlight disabled js-requires-selected-row"
-                       data-href="{{ url_for('persons.email_event_persons', event) }}"
-                       data-title="{% trans %}Send email{% endtrans %}"
-                       data-method="POST"
-                       data-params-selector="#event-participants-list input.id-field:checkbox:checked:visible"
-                       data-ajax-dialog
-                       data-reload-after>
-                        {%- trans %}Send emails{% endtrans -%}
-                    </a>
+                    <div id="persons-email"
+                         data-event-id="{{ event.id }}"
+                         data-person-selector="#event-participants-list input[name=person_identifier][type=checkbox]:checked">
+                    </div>
+                    <button id="persons-email-trigger"
+                            class="i-button icon-mail right highlight disabled js-requires-selected-row">
+                        {%- trans %}Send email{% endtrans -%}
+                    </button>
                 </div>
                 {% if event.type != 'lecture' %}
                     <div class="group i-selection">
                         <span class="i-button label">{% trans %}Privileges{% endtrans %}</span>
-                        <a href="#" class="i-button icon-collapse arrow js-dropdown" data-toggle="dropdown"></a>
-                        <ul class="dropdown">
+                        <button class="i-button icon-collapse arrow js-dropdown" data-toggle="dropdown"></button>
+                        <ul class="i-dropdown">
                             <li>
                                 <a href="#"
                                    title="{% trans %}Grant submission rights to all speakers{% endtrans %}"
@@ -66,8 +86,8 @@
                                     {% trans %}Modification rights{% endtrans %}</a>
                             </li>
                         </ul>
-                        <a href="#" class="i-button icon-expand arrow js-dropdown" data-toggle="dropdown"></a>
-                        <ul class="dropdown">
+                        <button class="i-button icon-expand arrow js-dropdown" data-toggle="dropdown"></button>
+                        <ul class="i-dropdown">
                             <li>
                                 <a href="#"
                                    title="{% trans %}Revoke submission rights{% endtrans %}"
@@ -81,21 +101,27 @@
                     </div>
                 {% endif %}
                 <div class="group">
+                    <div id="invitation-email-all"
+                         data-event-id="{{ event.id }}"
+                         data-person-selector="#event-participants-list tr[data-no-account] input[name=person_identifier][type=checkbox]"
+                         data-no-account></div>
+                    {% if has_uninvited %}
+                        <div id="invitation-email-not-invited"
+                             data-event-id="{{ event.id }}"
+                             data-person-selector="#event-participants-list tr[data-no-account] input[name=person_identifier][type=checkbox]"
+                             data-no-account
+                             data-not-invited-only></div>
+                    {% endif %}
                     <a href="#"
                        class="i-button arrow highlight js-dropdown {{ 'disabled' if not has_no_account }}"
                        data-toggle="dropdown">
                         {% trans %}Send invitation{% endtrans %}
                     </a>
-                    <ul class="dropdown">
+                    <ul class="i-dropdown">
                         <li>
                             <a href="#"
                                title="{% trans %}Send an email to all users with no Indico account{% endtrans %}"
-                               data-href="{{ url_for('persons.email_event_persons', event, no_account=true) }}"
-                               data-params-selector="#event-participants-list [data-no-account] input.id-field:checkbox"
-                               data-title="{% trans %}Send email{% endtrans %}"
-                               data-method="POST"
-                               data-ajax-dialog
-                               data-reload-after>
+                               id="invitation-email-all-trigger">
                                 {% trans %}To all users with no account{% endtrans %}
                             </a>
                         </li>
@@ -104,13 +130,7 @@
                                 <a href="#"
                                    title="{% trans %}Send an email to all users with no Indico account who have not
                                          received an invitation email yet{% endtrans %}"
-                                   data-href="{{ url_for('persons.email_event_persons', event, no_account=true,
-                                                          not_invited_only=true) }}"
-                                   data-params-selector="#event-participants-list [data-no-account] input.id-field:checkbox"
-                                   data-title="{% trans %}Send email{% endtrans %}"
-                                   data-method="POST"
-                                   data-ajax-dialog
-                                   data-reload-after>
+                                   id="invitation-email-not-invited-trigger">
                                     {% trans %}To users not invited yet{% endtrans %}
                                 </a>
                             </li>
@@ -121,47 +141,50 @@
             <div class="toolbar">
                 {{ render_displayed_entries_fragment(persons|length, persons|length) }}
                 <div id="person-filters" class="group list-filter">
-                    <a class="i-button arrow highlight js-dropdown" data-toggle="dropdown">Filter role</a>
-                    <ul class="dropdown">
-                        <li class="enabled">
-                            <input type="checkbox" id="filter-chairpersons" data-filter="chairperson" checked>
-                            <i class="icon-checkmark"></i>
-                            <i class="icon-stop colored-square" style="color: #{{ builtin_roles.chairperson.color }};"></i>
-                            <label for="filter-chairpersons">
-                                {%- if event.type == 'lecture' -%}
-                                    {%- trans %}Speakers{% endtrans -%}
-                                {%- else -%}
-                                    {%- trans %}Chairpersons{% endtrans -%}
-                                {%- endif -%}
-                            </label>
-                        </li>
+                    <button class="i-button arrow highlight js-dropdown" data-toggle="dropdown">
+                        {% trans %}Filter role{% endtrans %}
+                    </button>
+                    <ul class="i-dropdown">
                         {% if event.type != 'lecture' %}
                             <li class="enabled">
-                                <input type="checkbox" id="filter-speakers" data-filter="speaker" checked>
+                                <input type="checkbox" id="filter-chairpersons" data-filter="chairperson">
+                                <i class="icon-checkmark"></i>
+                                <i class="icon-stop colored-square" style="color: #{{ builtin_roles.chairperson.color }};"></i>
+                                <label for="filter-chairpersons">
+                                    {%- trans %}Chairpersons{% endtrans -%}
+                                </label>
+                            </li>
+                            <li class="enabled">
+                                <input type="checkbox" id="filter-speakers" data-filter="speaker">
                                 <i class="icon-checkmark"></i>
                                 <i class="icon-stop colored-square" style="color: #{{ builtin_roles.speaker.color }};"></i>
                                 <label for="filter-speakers">{% trans %}Speakers{% endtrans %}</label>
                             </li>
                             <li class="enabled">
-                                <input type="checkbox" id="filter-conveners" data-filter="convener" checked>
+                                <input type="checkbox" id="filter-conveners" data-filter="convener">
                                 <i class="icon-checkmark"></i>
                                 <i class="icon-stop colored-square" style="color: #{{ builtin_roles.convener.color }};"></i>
                                 <label for="filter-conveners">{% trans %}Conveners{% endtrans %}</label>
                             </li>
-                            {% if event.has_feature('abstracts') %}
-                                <li class="enabled">
-                                    <input type="checkbox" id="filter-abstract-author" data-filter="author" checked>
-                                    <i class="icon-checkmark"></i>
-                                    <i class="icon-stop colored-square" style="color: #{{ builtin_roles.author.color }};"></i>
-                                    <label for="filter-abstract-author">
-                                        {%- trans %}Abstract authors{% endtrans -%}
-                                    </label>
-                                </li>
-                            {% endif %}
-                        {% endif %}
-                        {% for role_id, role_data in custom_roles.iteritems() %}
                             <li class="enabled">
-                                <input type="checkbox" id="filter-{{ role_id }}" data-filter="{{ role_id }}" checked>
+                                <input type="checkbox" id="filter-author" data-filter="author">
+                                <i class="icon-checkmark"></i>
+                                <i class="icon-stop colored-square" style="color: #{{ builtin_roles.author.color }};"></i>
+                                <label for="filter-author">
+                                    {%- trans %}Authors{% endtrans -%}
+                                </label>
+                            </li>
+                        {% else %}
+                            <li class="enabled">
+                                <input type="checkbox" id="filter-lecture-speakers" data-filter="lecture_speaker">
+                                <i class="icon-checkmark"></i>
+                                <i class="icon-stop colored-square" style="color: #{{ builtin_roles.lecture_speaker.color }};"></i>
+                                <label for="filter-lecture-speakers">{% trans %}Speakers{% endtrans %}</label>
+                            </li>
+                        {% endif %}
+                        {% for role_id, role_data in custom_roles.items() %}
+                            <li class="enabled">
+                                <input type="checkbox" id="filter-{{ role_id }}" data-filter="{{ role_id }}">
                                 <i class="icon-checkmark"></i>
                                 <i class="icon-stop colored-square" style="color: #{{ role_data.color }};"></i>
                                 <label for="filter-{{ role_id }}" title="{{ role_data.code }}">{{ role_data.name }}</label>
@@ -176,9 +199,27 @@
                             <i class="icon-stop colored-square no-account"></i>
                             <label for="filter-no-account">{% trans %}Users with no account{% endtrans %}</label>
                         </li>
+                        <li class="separator">
+                            <span class="titled-rule">{% trans %}or{% endtrans %}</span>
+                        </li>
+                        <li for="filter-no-registration">
+                            <input type="checkbox" id="filter-no-registration" data-filter="no_registration">
+                            <i class="icon-checkmark"></i>
+                            <i class="icon-stop colored-square no-registration"></i>
+                            <label for="filter-no-registration">{% trans %}Unregistered users{% endtrans %}</label>
+                        </li>
+                        <li class="separator">
+                            <span class="titled-rule">{% trans %}or{% endtrans %}</span>
+                        </li>
+                        <li for="filter-no-builtin-roles">
+                            <input type="checkbox" id="filter-no-builtin-roles" data-filter="no_builtin_roles">
+                            <i class="icon-checkmark"></i>
+                            <i class="icon-stop colored-square no-builtin-roles"></i>
+                            <label for="filter-no-builtin-roles">{% trans %}Users with no public roles{% endtrans %}</label>
+                        </li>
                     </ul>
-                    <a class="i-button highlight icon-close disabled js-reset-role-filter"
-                       title="{% trans %}Reset role filters{% endtrans %}"></a>
+                    <button class="i-button highlight icon-close disabled js-reset-role-filter"
+                       title="{% trans %}Reset role filters{% endtrans %}"></button>
                 </div>
                 <div class="group">
                     <span class="i-button label icon-search"></span>
@@ -206,7 +247,8 @@
                         {% if event_has_registration_forms %}
                             <th class="i-table registration-column thin-column" data-sorter="false"></th>
                         {% endif %}
-                        <th class="i-table name-column">{% trans %}Name{% endtrans %}</th>
+                        {# i18n: Full name of the person #}
+                        <th class="i-table name-column">{{ pgettext('Person', 'Name') }}</th>
                         <th class="i-table email-column">{% trans %}Email{% endtrans %}</th>
                         <th class="i-table affiliation-column">{% trans %}Affiliation{% endtrans %}</th>
                         <th class="i-table roles-column" data-sorter="false">{% trans %}Roles{% endtrans %}</th>
@@ -218,10 +260,10 @@
                 <tbody>
                     {% for person_data in persons -%}
                         <tr id="person-{{ person_data.person.id }}"
-                            class="i-table {{ 'untrusted' if person_data.person.is_untrusted }}"
+                            class="i-table {{ 'untrusted' if person_data.person.is_untrusted }} {{ 'no-roles' if person_data.roles.no_roles }}"
                             data-person-roles="{{ person_data.roles | tojson | forceescape }}"
                             {{ 'data-no-account' if person_data.roles.no_account }}>
-                            {{ render_person_row(person_data, event_has_registration_forms) }}
+                            {{ render_person_row(person_data, event_has_registration_forms, person_schema, has_predefined_affiliations, allow_custom_affiliations) }}
                         </tr>
                     {%- else -%}
                         <tr class="i-table">
@@ -237,7 +279,14 @@
     </div>
     <script>
         setupEventPersonsList({
-            hasNoAccountFilter: true
+            hasNoAccountFilter: true,
+            hasNoRegistrationFilter: true,
+            hasNoBuiltinRolesFilter: true,
         });
+        setupEmailButton('#persons-email', '#persons-email-trigger');
+        setupEmailButton('#invitation-email-all', '#invitation-email-all-trigger');
+        {% if has_uninvited %}
+            setupEmailButton('#invitation-email-not-invited', '#invitation-email-all-trigger');
+        {% endif %}
     </script>
 {% endblock %}

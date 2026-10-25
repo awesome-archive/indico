@@ -2,9 +2,9 @@
 
 
 {% block html %}
-    <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ field._value() | tojson | forceescape }}">
-    <input type="text" id="display-{{ field.id }}" placeholder="{% trans %}Choose user...{% endtrans %}" readonly>
-    <button type="button" id="choose-{{ field.id }}" class="i-button" data-tooltip-anchor>{% trans %}Choose{% endtrans %}</button>
+    <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ field._value() }}"
+           {{ input_args | html_params }}>
+    <div id="principalField-{{ field.id }}"></div>
 {% endblock %}
 
 
@@ -12,10 +12,10 @@
     <script>
         setupPrincipalWidget({
             fieldId: {{ field.id | tojson }},
-            eventId: {{ (field.event.id if field.event else none) | tojson }},
-            required: {{ field.flags.required | tojson }},
-            allowExternal: {{ field.allow_external | tojson }}
+            required: {{ input_args.required | default(false) | tojson }},
+            withExternalUsers: {{ field.allow_external_users | tojson }},
+            disabled: {{ (field.render_kw.disabled if field.render_kw else false) | tojson }},
+            searchToken: {{ field.search_token | tojson }},
         });
     </script>
 {% endblock %}
-

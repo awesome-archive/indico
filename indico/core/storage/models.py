@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 """
 Mixins that provide inheriting classes with the basic columns and
@@ -25,11 +16,9 @@ rudimentary version control. Inheriting classes will be responsible for
 specifying, among others, which storage backend to use.
 """
 
-
-from __future__ import unicode_literals
-
 from sqlalchemy.event import listen
 from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.orm import column_property
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import UTCDateTime
@@ -37,8 +26,7 @@ from indico.core.storage.backend import get_storage
 from indico.util.date_time import now_utc
 
 
-class VersionedResourceMixin(object):
-
+class VersionedResourceMixin:
     # Class that will inherit from StoredFileMixin
     stored_file_class = None
     # Foreign key that, from such a class, will point here
@@ -55,8 +43,10 @@ class VersionedResourceMixin(object):
 
     @classmethod
     def register_versioned_resource_events(cls):
-        """Register SQLAlchemy events. Should be called
-           right after class definition."""
+        """Register SQLAlchemy events.
+
+        Should be called right after class definition.
+        """
         listen(cls.file, 'set', cls._add_file_to_relationship)
 
     #: The ID of the latest file for a file resource
@@ -90,13 +80,13 @@ class VersionedResourceMixin(object):
             cascade='all, delete, delete-orphan',
             order_by=lambda: cls.stored_file_class.created_dt.desc(),
             backref=db.backref(
-                getattr(cls.stored_file_class, 'version_of'),
+                cls.stored_file_class.version_of,
                 lazy=False
             )
         )
 
 
-class StoredFileMixin(object):
+class StoredFileMixin:
     #: Name of attribute (backref) that will be made to point
     #: to the versioned resource (leave as ``None`` if you
     #: don't want versioning)
@@ -109,15 +99,20 @@ class StoredFileMixin(object):
 
     @declared_attr
     def filename(cls):
-        """The name of the file"""
+        """The name of the file."""
         return db.Column(
             db.String,
             nullable=not cls.file_required
         )
 
     @declared_attr
+    def extension(cls):
+        """The extension of the file."""
+        return column_property(db.func.regexp_replace(cls.filename, r'^.*\.', ''), deferred=True)
+
+    @declared_attr
     def content_type(cls):
-        """The MIME type of the file"""
+        """The MIME type of the file."""
         return db.Column(
             db.String,
             nullable=not cls.file_required
@@ -125,8 +120,7 @@ class StoredFileMixin(object):
 
     @declared_attr
     def size(cls):
-        """
-        The size of the file (in bytes).
+        """The size of the file (in bytes).
 
         Automatically assigned when `save()` is called.
         """
@@ -137,8 +131,7 @@ class StoredFileMixin(object):
 
     @declared_attr
     def md5(cls):
-        """
-        An MD5 hash of the file.
+        """An MD5 hash of the file.
 
         Automatically assigned when `save()` is called.
         """
@@ -163,7 +156,7 @@ class StoredFileMixin(object):
 
     @declared_attr
     def created_dt(cls):
-        """The date/time when the file was uploaded"""
+        """The date/time when the file was uploaded."""
         if not cls.add_file_date_column:
             return None
         return db.Column(
@@ -181,17 +174,21 @@ class StoredFileMixin(object):
 
     def get_local_path(self):
         """Return context manager that will yield physical path.
-           This should be avoided in favour of using the actual file contents"""
+
+        This should be avoided in favour of using the actual file contents.
+        """
         return self.storage.get_local_path(self.storage_file_id)
 
     def _build_storage_path(self):
-        """Should return a tuple containing the name of the storage backend
+        """
+        Should return a tuple containing the name of the storage backend
         to use and the actual path of that will be used to store the resource
-        using the former."""
+        using the former.
+        """
         raise NotImplementedError
 
     def save(self, data):
-        """Saves a file in the file storage.
+        """Save a file in the file storage.
 
         This requires the AttachmentFile to be associated with
         an Attachment which needs to be associated with a Folder since
@@ -200,7 +197,9 @@ class StoredFileMixin(object):
 
         :param data: bytes or a file-like object
         """
-        assert self.storage_backend is None and self.storage_file_id is None and self.size is None
+        assert self.storage_backend is None
+        assert self.storage_file_id is None
+        assert self.size is None
         if self.version_of:
             assert getattr(self, self.version_of) is not None
         self.storage_backend, path = self._build_storage_path()
@@ -208,24 +207,30 @@ class StoredFileMixin(object):
         self.size = self.storage.getsize(self.storage_file_id)
 
     def open(self):
-        """Returns the stored file as a file-like object"""
+        """Return the stored file as a file-like object."""
         if self.storage_file_id is None:
             raise Exception('There is no file to open')
         return self.storage.open(self.storage_file_id)
 
     def send(self, inline=True):
-        """Sends the file to the user"""
+        """Send the file to the user."""
         if self.storage_file_id is None:
             raise Exception('There is no file to send')
         return self.storage.send_file(self.storage_file_id, self.content_type, self.filename, inline=inline)
 
-    def delete(self):
-        """Delete the file from storage"""
+    def delete(self, delete_from_db=False):
+        """Delete the file from storage."""
         if self.storage_file_id is None:
             raise Exception('There is no file to delete')
-        self.storage.delete(self.storage_file_id)
-        self.storage_backend = None
-        self.storage_file_id = None
-        self.size = None
-        self.content_type = None
-        self.filename = None
+        storage = self.storage
+        storage_file_id = self.storage_file_id
+        if delete_from_db:
+            db.session.delete(self)
+            db.session.flush()
+        else:
+            self.storage_backend = None
+            self.storage_file_id = None
+            self.size = None
+            self.content_type = None
+            self.filename = None
+        storage.delete(storage_file_id)

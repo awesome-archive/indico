@@ -1,48 +1,40 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+import sys
 from collections import Counter
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 
+from marshmallow import ValidationError, fields, post_load, pre_load, validate, validates_schema
 from sqlalchemy.dialects.postgresql import ARRAY
-from wtforms.validators import ValidationError
 
 from indico.core.db import db
-from indico.modules.events.registration.fields.base import (RegistrationFormBillableField,
+from indico.core.marshmallow import mm
+from indico.modules.events.registration.custom import RegistrationListColumn
+from indico.modules.events.registration.fields.base import (FieldSetupSchemaBase, LimitedPlacesBillableItemSchema,
+                                                            RegistrationFormBillableField,
                                                             RegistrationFormBillableItemsField)
 from indico.modules.events.registration.models.form_fields import RegistrationFormFieldData
-from indico.modules.events.registration.models.registrations import RegistrationData
-from indico.util.date_time import format_date, iterdays
-from indico.util.i18n import _
-from indico.util.string import camelize_keys, snakify_keys
-from indico.web.forms.fields import JSONField
+from indico.modules.events.registration.models.registrations import Registration, RegistrationData
+from indico.util.date_time import format_date
+from indico.util.i18n import _, ngettext
+from indico.util.marshmallow import UUIDString, not_empty
+from indico.util.string import camelize_keys, natural_sort_key, snakify_keys
 
 
 def get_field_merged_options(field, registration_data):
     rdata = registration_data.get(field.id)
     result = deepcopy(field.view_data)
-    result['deletedChoice'] = []
-    result['modifiedChoice'] = []
     if not rdata or not rdata.data:
         return result
-    values = [rdata.data['choice']] if 'choice' in rdata.data else rdata.data.keys()
+    values = [rdata.data['choice']] if 'choice' in rdata.data else [k for k, v in rdata.data.items() if v]
     for val in values:
         if val and not any(item['id'] == val for item in result['choices']):
             field_data = rdata.field_data
@@ -50,8 +42,7 @@ def get_field_merged_options(field, registration_data):
                                                                 field_data.field.data)
             missing_option = next((choice for choice in merged_data['choices'] if choice['id'] == val), None)
             if missing_option:
-                result['choices'].append(missing_option)
-                result['deletedChoice'].append(missing_option['id'])
+                result['choices'].append(camelize_keys(missing_option) | {'_deleted': True})
         else:
             current_choice_data = _get_choice_by_id(val, result['choices'])
             registration_choice_data = dict(camelize_keys(
@@ -59,8 +50,7 @@ def get_field_merged_options(field, registration_data):
                 caption=current_choice_data['caption'])
             if current_choice_data != registration_choice_data:
                 pos = result['choices'].index(current_choice_data)
-                result['choices'][pos] = registration_choice_data
-                result['modifiedChoice'].append(val)
+                result['choices'][pos] = registration_choice_data | {'_modified': True}
     return result
 
 
@@ -70,10 +60,69 @@ def _get_choice_by_id(choice_id, choices):
             return choice
 
 
+class ChoiceItemSchema(LimitedPlacesBillableItemSchema):
+    id = fields.UUID()
+    is_enabled = fields.Bool(required=True)
+    max_extra_slots = fields.Integer(load_default=0, validate=validate.Range(0, 99))
+    extra_slots_pay = fields.Bool(load_default=False)
+    caption = fields.String(required=True, validate=not_empty)
+
+    @post_load
+    def _stringify_uuid(self, data, **kwargs):
+        if 'id' in data:
+            data['id'] = str(data['id'])
+        return data
+
+
+class ChoiceSetupSchema(FieldSetupSchemaBase):
+    with_extra_slots = fields.Bool(load_default=False)
+    choices = fields.List(fields.Nested(ChoiceItemSchema), required=True, validate=not_empty)
+
+    @pre_load
+    def _generate_new_uuids(self, data, **kwrags):
+        data = data.copy()
+        if 'choices' in data:
+            # generate uuids for the random client-side IDs
+            data['choices'] = data['choices'].copy()
+            for c in data['choices']:
+                orig_id = c.get('id', '')
+                if orig_id.startswith('new:'):
+                    c['id'] = str(uuid4())
+                    if data.get('default_item') == orig_id:
+                        data['default_item'] = c['id']
+        return data
+
+
+class MultiChoiceSetupSchema(ChoiceSetupSchema):
+    max_choices = fields.Int(load_default=None, validate=validate.Range(min=0,
+                                                                        error='Maximum choices must be greater than 0'))
+
+    @validates_schema(skip_on_field_errors=True)
+    def _validate_max_choices(self, data, **kwargs):
+        max_choices = data['max_choices']
+        choices = data['choices']
+
+        if max_choices and max_choices > len(choices):
+            raise ValidationError('Value must not be greater than the total number of choices', 'max_choices')
+
+
+class SingleChoiceSetupSchema(ChoiceSetupSchema):
+    default_item = fields.String(load_default=None)
+    item_type = fields.String(required=True, validate=validate.OneOf(['dropdown', 'radiogroup']))
+
+    @validates_schema(skip_on_field_errors=True)
+    def _validate_default_item(self, data, **kwargs):
+        ids = {c['id'] for c in data['choices']}
+        if data['default_item'] and data['default_item'] not in ids:
+            raise ValidationError('Invalid default item', 'default_item')
+
+
 class ChoiceBaseField(RegistrationFormBillableItemsField):
     versioned_data_fields = RegistrationFormBillableItemsField.versioned_data_fields | {'choices'}
     has_default_item = False
-    wtf_field_class = JSONField
+    mm_field_class = fields.Dict
+    mm_field_kwargs = {'keys': fields.String(), 'values': fields.Integer()}
+    allow_condition = True
 
     @classmethod
     def unprocess_field_data(cls, versioned_data, unversioned_data):
@@ -84,25 +133,46 @@ class ChoiceBaseField(RegistrationFormBillableItemsField):
 
     @property
     def filter_choices(self):
-        return self.form_item.data['captions']
+        captions = self.form_item.data['captions']
+        current_choice_ids = {c['id'] for c in self.form_item.versioned_data['choices']}
+        deleted_ids = set(captions) - current_choice_ids
+        hidden_ids = deleted_ids - self._get_used_choice_ids() if deleted_ids else set()
+        visible_choices = [(k, v) for k, v in captions.items() if k not in hidden_ids]
+        return dict(sorted(visible_choices, key=lambda item: natural_sort_key(item[1])))
+
+    def _get_used_choice_ids(self):
+        query = (RegistrationData.query
+                 .join(RegistrationData.registration)
+                 .filter(Registration.registration_form == self.form_item.registration_form,
+                         ~Registration.is_deleted,
+                         RegistrationData.field_data.has(field_id=self.form_item.id)))
+        choice_key = RegistrationData.data.op('?')('choice')
+        non_legacy_ids = (query.filter(~choice_key)
+                          .with_entities(db.func.jsonb_object_keys(RegistrationData.data).label('choice_id')))
+        legacy_ids = (query.filter(choice_key)
+                      .with_entities(RegistrationData.data['choice'].astext.label('choice_id')))
+        used_ids = non_legacy_ids.union_all(legacy_ids).distinct()
+        return {row.choice_id for row in used_ids}
 
     @property
     def view_data(self):
-        return dict(super(ChoiceBaseField, self).view_data, places_used=self.get_places_used())
+        return dict(super().view_data, places_used=self.get_places_used())
 
-    @property
-    def validators(self):
-        def _check_number_of_places(form, field):
-            if not field.data:
-                return
+    def get_data_for_condition(self, value) -> set:
+        return {id for id, slots in value.items() if slots > 0}
+
+    def get_validators(self, existing_registration):
+        def _check_number_of_places(new_data):
+            if not new_data:
+                return True
             old_data = None
-            if form.modified_registration:
-                old_data = form.modified_registration.data_by_field.get(self.form_item.id)
-                if not old_data or not self.has_data_changed(field.data, old_data):
+            if existing_registration:
+                old_data = existing_registration.data_by_field.get(self.form_item.id)
+                if old_data and not self.has_data_changed(new_data, old_data):
                     return
             choices = self.form_item.versioned_data['choices']
             captions = self.form_item.data['captions']
-            for k in field.data:
+            for k in new_data:
                 choice = next((x for x in choices if x['id'] == k), None)
                 # Need to check the selected choice, because it might have been deleted.
                 if choice:
@@ -111,27 +181,26 @@ class ChoiceBaseField(RegistrationFormBillableItemsField):
                     places_used_dict.setdefault(k, 0)
                     if old_data and old_data.data:
                         places_used_dict[k] -= old_data.data.get(k, 0)
-                    places_used_dict[k] += field.data[k]
+                    places_used_dict[k] += new_data[k]
                     if places_limit and (places_limit - places_used_dict.get(k, 0)) < 0:
                         raise ValidationError(_('No places left for the option: {0}').format(captions[k]))
         return [_check_number_of_places]
 
     @classmethod
     def process_field_data(cls, data, old_data=None, old_versioned_data=None):
-        unversioned_data, versioned_data = super(ChoiceBaseField, cls).process_field_data(data, old_data,
-                                                                                          old_versioned_data)
+        unversioned_data, versioned_data = super().process_field_data(data, old_data, old_versioned_data)
         items = [x for x in versioned_data['choices'] if not x.get('remove')]
         captions = dict(old_data['captions']) if old_data is not None else {}
         if cls.has_default_item:
             unversioned_data.setdefault('default_item', None)
         for item in items:
             if 'id' not in item:
-                item['id'] = unicode(uuid4())
-            item.setdefault('is_billable', False)
+                item['id'] = str(uuid4())
+            assert 'is_billable' not in item
             item['price'] = float(item['price']) if item.get('price') else 0
             item['places_limit'] = int(item['places_limit']) if item.get('places_limit') else 0
             item['max_extra_slots'] = int(item['max_extra_slots']) if item.get('max_extra_slots') else 0
-            if cls.has_default_item and unversioned_data['default_item'] in {item['caption'], item['id']}:
+            if cls.has_default_item and unversioned_data['default_item'] == item['id']:
                 unversioned_data['default_item'] = item['id']
             captions[item['id']] = item.pop('caption')
         versioned_data['choices'] = items
@@ -140,6 +209,8 @@ class ChoiceBaseField(RegistrationFormBillableItemsField):
 
     def get_places_used(self):
         places_used = Counter()
+        if not any(x.get('places_limit') for x in self.form_item.versioned_data['choices']):
+            return dict(places_used)
         for registration in self.form_item.registration_form.active_registrations:
             if self.form_item.id not in registration.data_by_field:
                 continue
@@ -155,18 +226,20 @@ class ChoiceBaseField(RegistrationFormBillableItemsField):
     def calculate_price(self, reg_data, versioned_data):
         if not reg_data:
             return 0
-        billable_choices = [x for x in versioned_data['choices'] if x['id'] in reg_data and x['is_billable']]
+        billable_choices = [x for x in versioned_data['choices'] if x['id'] in reg_data and x['price']]
         price = 0
         for billable_field in billable_choices:
-            price += billable_field['price']
+            field_price = Decimal(str(billable_field['price']))
+            price += field_price
             if billable_field.get('extra_slots_pay'):
-                price += (reg_data[billable_field['id']] - 1) * billable_field['price']
+                price += (reg_data[billable_field['id']] - 1) * field_price
         return price
 
 
 class SingleChoiceField(ChoiceBaseField):
     name = 'single_choice'
     has_default_item = True
+    setup_schema_base_cls = SingleChoiceSetupSchema
 
     @property
     def default_value(self):
@@ -179,12 +252,16 @@ class SingleChoiceField(ChoiceBaseField):
         # only use the default item if it exists in the current version
         return {default_item: 1} if any(x['id'] == default_item for x in versioned_data['choices']) else {}
 
+    @property
+    def empty_value(self):
+        return {}
+
     def get_friendly_data(self, registration_data, for_humans=False, for_search=False):
         if not registration_data.data:
             return ''
-        uuid, number_of_slots = registration_data.data.items()[0]
+        uuid, number_of_slots = list(registration_data.data.items())[0]
         caption = registration_data.field_data.field.data['captions'][uuid]
-        return '{} (+{})'.format(caption, number_of_slots - 1) if number_of_slots > 1 else caption
+        return f'{caption} (+{number_of_slots - 1})' if number_of_slots > 1 else caption
 
     def process_form_data(self, registration, value, old_data=None, billable_items_locked=False, new_data_version=None):
         if billable_items_locked and old_data.price:
@@ -193,36 +270,71 @@ class SingleChoiceField(ChoiceBaseField):
         # always store no-option as empty dict
         if value is None:
             value = {}
-        return super(SingleChoiceField, self).process_form_data(registration, value, old_data, billable_items_locked,
-                                                                new_data_version)
+        # get rid of entries with 0 slots; they shouldn't happen at all but just in case
+        value = {k: v for k, v in value.items() if v}
+        return super().process_form_data(registration, value, old_data, billable_items_locked, new_data_version)
 
 
 def _hashable_choice(choice):
-    return frozenset(choice.iteritems())
+    return frozenset(choice.items())
 
 
 class MultiChoiceField(ChoiceBaseField):
     name = 'multi_choice'
+    setup_schema_base_cls = MultiChoiceSetupSchema
 
     @property
     def default_value(self):
         return {}
 
+    def _get_display_index(self, choice_order, uuid):
+        try:
+            return choice_order.index(uuid)
+        except ValueError:
+            return sys.maxsize
+
     def get_friendly_data(self, registration_data, for_humans=False, for_search=False):
         def _format_item(uuid, number_of_slots):
             caption = self.form_item.data['captions'][uuid]
-            return '{} (+{})'.format(caption, number_of_slots - 1) if number_of_slots > 1 else caption
+            return f'{caption} (+{number_of_slots - 1})' if number_of_slots > 1 else caption
 
         reg_data = registration_data.data
+
         if not reg_data:
             return ''
-        choices = sorted(_format_item(uuid, number_of_slots) for uuid, number_of_slots in reg_data.iteritems())
+
+        # Preserve the original multi choice field order given by
+        # the field when getting the selected choices.
+        field_choice_order = [x['id'] for x in registration_data.field_data.field.view_data['choices']]
+        reg_data = dict(sorted(reg_data.items(), key=lambda x: self._get_display_index(field_choice_order, x[0])))
+        choices = [_format_item(uuid, number_of_slots) for uuid, number_of_slots in reg_data.items()]
+
         return ', '.join(choices) if for_humans or for_search else choices
+
+    def render_reglist_column(self, data):
+        display_text = self.get_friendly_data(data, for_humans=True)
+        return RegistrationListColumn(display_text, display_text)
+
+    def get_validators(self, existing_registration):
+        def _check_max_choices(new_data):
+            if not new_data:
+                return
+
+            max_choices = self.form_item.data.get('max_choices')
+            # If `max_choices` is set, ensure that it is
+            # less than or equal to the total number of choices.
+            if max_choices and len(new_data) > max_choices:
+                raise ValidationError(ngettext('At most {max_choices} option can be selected',
+                                               'At most {max_choices} options can be selected', max_choices)
+                                      .format(max_choices=max_choices))
+        return [_check_max_choices, *super().get_validators(existing_registration)]
 
     def process_form_data(self, registration, value, old_data=None, billable_items_locked=False, new_data_version=None):
         # always store no-option as empty dict
         if value is None:
             value = {}
+        # get rid of entries with 0 slots; they're filtered client-side but just in case...
+        value = {k: v for k, v in value.items() if v}
 
         return_value = {}
         has_old_data = old_data is not None and old_data.data is not None
@@ -238,17 +350,17 @@ class MultiChoiceField(ChoiceBaseField):
             selected_choice_hashes.update({c['id']: _hashable_choice(c)
                                            for c in self.form_item.versioned_data['choices']
                                            if c['id'] in value and c['id'] not in selected_choice_hashes})
-            selected_choice_hashes = set(selected_choice_hashes.itervalues())
+            selected_choice_hashes = set(selected_choice_hashes.values())
             existing_version_hashes = {c['id']: _hashable_choice(c)
                                        for c in old_data.field_data.versioned_data['choices']}
             latest_version_hashes = {c['id']: _hashable_choice(c) for c in self.form_item.versioned_data['choices']}
-            deselected_ids = old_data.data.viewkeys() - value.viewkeys()
+            deselected_ids = old_data.data.keys() - value.keys()
             modified_deselected = any(latest_version_hashes.get(id_) != existing_version_hashes.get(id_)
                                       for id_ in deselected_ids)
-            if selected_choice_hashes <= set(latest_version_hashes.itervalues()):
+            if selected_choice_hashes <= set(latest_version_hashes.values()):
                 # all choices available in the latest version - upgrade to that version
                 return_value['field_data'] = self.form_item.current_data
-            elif not modified_deselected and selected_choice_hashes <= set(existing_version_hashes.itervalues()):
+            elif not modified_deselected and selected_choice_hashes <= set(existing_version_hashes.values()):
                 # all choices available in the previously selected version - stay with it
                 return_value['field_data'] = old_data.field_data
             else:
@@ -277,9 +389,9 @@ class MultiChoiceField(ChoiceBaseField):
             new_choices = return_value['field_data'].versioned_data['choices']
 
         if not billable_items_locked:
-            processed_data = super(MultiChoiceField, self).process_form_data(registration, value, old_data, False,
-                                                                             return_value.get('field_data'))
-            return {key: return_value.get(key, value) for key, value in processed_data.iteritems()}
+            processed_data = super().process_form_data(registration, value, old_data, False,
+                                                       return_value.get('field_data'))
+            return {key: return_value.get(key, value) for key, value in processed_data.items()}
         # XXX: This code still relies on the client sending data for the disabled fields.
         # This is pretty ugly but especially in case of non-billable extra slots it makes
         # sense to keep it like this.  If someone tampers with the list of billable fields
@@ -287,10 +399,8 @@ class MultiChoiceField(ChoiceBaseField):
         if has_old_data:
             old_choices_mapping = {x['id']: x for x in old_data.field_data.versioned_data['choices']}
             new_choices_mapping = {x['id']: x for x in new_choices}
-            old_billable = {uuid: num for uuid, num in old_data.data.iteritems()
-                            if old_choices_mapping[uuid]['is_billable'] and old_choices_mapping[uuid]['price']}
-            new_billable = {uuid: num for uuid, num in value.iteritems()
-                            if new_choices_mapping[uuid]['is_billable'] and new_choices_mapping[uuid]['price']}
+            old_billable = {uuid: num for uuid, num in old_data.data.items() if old_choices_mapping[uuid]['price']}
+            new_billable = {uuid: num for uuid, num in value.items() if new_choices_mapping[uuid]['price']}
         if has_old_data and old_billable != new_billable:
             # preserve existing data
             return return_value
@@ -299,39 +409,142 @@ class MultiChoiceField(ChoiceBaseField):
             # TODO: check item prices (in case there's a change between old/new version)
             # for now we simply ignore field changes in this case (since the old/new price
             # check in the base method will fail)
-            processed_data = super(MultiChoiceField, self).process_form_data(registration, value, old_data, True,
-                                                                             return_value.get('field_data'))
-            return {key: return_value.get(key, value) for key, value in processed_data.iteritems()}
+            processed_data = super().process_form_data(registration, value, old_data, True,
+                                                       return_value.get('field_data'))
+            return {key: return_value.get(key, value) for key, value in processed_data.items()}
 
 
-def _to_machine_date(date):
-    return datetime.strptime(date, '%d/%m/%Y').strftime('%Y-%m-%d')
+class AccommodationItemSchema(LimitedPlacesBillableItemSchema):
+    id = fields.UUID()
+    is_enabled = fields.Bool(required=True)
+    is_no_accommodation = fields.Bool(load_default=False)
+    caption = fields.String(required=True, validate=not_empty)
+
+    @pre_load
+    def _remove_garbage(self, data, **kwargs):
+        # legacy leftover
+        data.pop('placeholder', None)
+        return data
+
+    @post_load
+    def _stringify_uuid(self, data, **kwargs):
+        if 'id' in data:
+            data['id'] = str(data['id'])
+        return data
 
 
-def _to_date(date):
-    return datetime.strptime(date, '%Y-%m-%d').date()
+class AccommodationDateRangeSchema(mm.Schema):
+    start_date = fields.Date(required=True)
+    end_date = fields.Date(required=True)
+
+    @validates_schema(skip_on_field_errors=True)
+    def _validate_dates(self, data, **kwargs):
+        if data['start_date'] > data['end_date']:
+            raise ValidationError('The end date cannot be before the start date', 'end_date')
+
+
+class AccommodationSetupSchema(FieldSetupSchemaBase):
+    choices = fields.List(fields.Nested(AccommodationItemSchema), required=True, validate=not_empty)
+    arrival = fields.Nested(AccommodationDateRangeSchema, required=True)
+    departure = fields.Nested(AccommodationDateRangeSchema, required=True)
+
+    @validates_schema(skip_on_field_errors=True)
+    def _validate_periods(self, data, **kwargs):
+        if data['departure']['start_date'] < data['arrival']['start_date']:
+            raise ValidationError('The departure period cannot begin before the arrival period.', 'departure')
+        if data['arrival']['end_date'] > data['departure']['end_date']:
+            raise ValidationError('The arrival period cannot end after the departure period.', 'arrival')
+
+    @pre_load
+    def _generate_new_uuids(self, data, **kwrags):
+        data = data.copy()
+        if 'choices' in data:
+            # generate uuids for the random client-side IDs
+            data['choices'] = data['choices'].copy()
+            for c in data['choices']:
+                if c.get('id', '').startswith('new:'):
+                    c['id'] = str(uuid4())
+        return data
+
+    @post_load
+    def _split_dates(self, data, **kwargs):
+        data['arrival_date_from'] = data['arrival']['start_date']
+        data['arrival_date_to'] = data['arrival']['end_date']
+        data['departure_date_from'] = data['departure']['start_date']
+        data['departure_date_to'] = data['departure']['end_date']
+        del data['arrival']
+        del data['departure']
+        return data
+
+
+class AccommodationSchema(mm.Schema):
+    choice = UUIDString()
+    isNoAccommodation = fields.Bool(load_default=False)  # noqa: N815
+    arrivalDate = fields.Date(allow_none=True)  # noqa: N815
+    departureDate = fields.Date(allow_none=True)  # noqa: N815
+
+    @validates_schema(skip_on_field_errors=True)
+    def validate_everything(self, data, **kwargs):
+        if not data['isNoAccommodation']:
+            if not data['choice']:
+                raise ValidationError('Choice is required', 'choice')
+            elif not data.get('arrivalDate'):
+                raise ValidationError('Arrival date is required', 'arrivalDate')
+            elif not data.get('departureDate'):
+                raise ValidationError('Departure date is required', 'departureDate')
 
 
 class AccommodationField(RegistrationFormBillableItemsField):
     name = 'accommodation'
-    wtf_field_class = JSONField
     versioned_data_fields = RegistrationFormBillableField.versioned_data_fields | {'choices'}
+    setup_schema_base_cls = AccommodationSetupSchema
+    mm_field_class = fields.Nested
+    mm_field_args = (AccommodationSchema,)
+    allow_condition = True
+    management = False
+
+    def _get_default_value(self, *, ui):
+        versioned_data = self.form_item.versioned_data
+        no_accommodation_option = next(
+            (c for c in versioned_data['choices'] if c.get('is_no_accommodation') and c['is_enabled']), None)
+        if not ui and not no_accommodation_option:
+            return NotImplemented
+        return {
+            'choice': no_accommodation_option['id'] if no_accommodation_option else None,
+            'isNoAccommodation': bool(no_accommodation_option),
+            'arrivalDate': None,
+            'departureDate': None,
+        }
+
+    @property
+    def default_value(self):
+        return self._get_default_value(ui=False)
+
+    @property
+    def ui_default_value(self):
+        return self._get_default_value(ui=True)
+
+    @property
+    def empty_value(self):
+        return {'choice': None}
+
+    def get_data_for_condition(self, value) -> set:
+        return {value['choice']}
 
     @classmethod
     def process_field_data(cls, data, old_data=None, old_versioned_data=None):
-        unversioned_data, versioned_data = super(AccommodationField, cls).process_field_data(data, old_data,
-                                                                                             old_versioned_data)
+        unversioned_data, versioned_data = super().process_field_data(data, old_data, old_versioned_data)
         items = [x for x in versioned_data['choices'] if not x.get('remove')]
         captions = dict(old_data['captions']) if old_data is not None else {}
         for item in items:
             if 'id' not in item:
-                item['id'] = unicode(uuid4())
-            item.setdefault('is_billable', False)
+                item['id'] = str(uuid4())
+            assert 'is_billable' not in item
             item['price'] = float(item['price']) if item.get('price') else 0
             item['places_limit'] = int(item['places_limit']) if item.get('places_limit') else 0
             captions[item['id']] = item.pop('caption')
-        for key in {'arrival_date_from', 'arrival_date_to', 'departure_date_from', 'departure_date_to'}:
-            unversioned_data[key] = _to_machine_date(unversioned_data[key])
+        for key in ('arrival_date_from', 'arrival_date_to', 'departure_date_from', 'departure_date_to'):
+            unversioned_data[key] = unversioned_data[key].isoformat()
         versioned_data['choices'] = items
         unversioned_data['captions'] = captions
         return unversioned_data, versioned_data
@@ -339,64 +552,93 @@ class AccommodationField(RegistrationFormBillableItemsField):
     @classmethod
     def unprocess_field_data(cls, versioned_data, unversioned_data):
         data = {}
-        arrival_date_from = _to_date(unversioned_data['arrival_date_from'])
-        arrival_date_to = _to_date(unversioned_data['arrival_date_to'])
-        departure_date_from = _to_date(unversioned_data['departure_date_from'])
-        departure_date_to = _to_date(unversioned_data['departure_date_to'])
-        data['arrival_dates'] = [(dt.date().isoformat(), format_date(dt))
-                                 for dt in iterdays(arrival_date_from, arrival_date_to)]
-        data['departure_dates'] = [(dt.date().isoformat(), format_date(dt))
-                                   for dt in iterdays(departure_date_from, departure_date_to)]
+        data['arrival'] = {
+            'start_date': unversioned_data['arrival_date_from'],
+            'end_date': unversioned_data['arrival_date_to'],
+        }
+        data['departure'] = {
+            'start_date': unversioned_data['departure_date_from'],
+            'end_date': unversioned_data['departure_date_to'],
+        }
         items = deepcopy(versioned_data['choices'])
         for item in items:
             item['caption'] = unversioned_data['captions'][item['id']]
         data['choices'] = items
         return data
 
-    @property
-    def validators(self):
-        def _stay_dates_valid(form, field):
-            if not field.data:
-                return
-            data = snakify_keys(field.data)
+    def get_validators(self, existing_registration):
+        def _check_choice_data(new_data):
+            item = None
+            if existing_registration:
+                old_data = existing_registration.data_by_field.get(self.form_item.id)
+                if old_data and not self.has_data_changed(snakify_keys(new_data), old_data):
+                    return
+                elif old_data:
+                    # try to get choice from existing data
+                    item = next((c for c in old_data.field_data.versioned_data['choices']
+                                 if c['id'] == new_data['choice']), None)
+            if item is None:
+                item = next((c for c in self.form_item.versioned_data['choices'] if c['id'] == new_data['choice']),
+                            None)
+            # this should never happen unless someone tampers with the data
+            if item is None or not item['is_enabled']:
+                raise ValidationError('Invalid choice')
+            if item.get('is_no_accommodation', False) != new_data['isNoAccommodation']:
+                raise ValidationError('Invalid data')
+
+        def _stay_dates_valid(new_data):
+            if not new_data:
+                return True
+            data = snakify_keys(new_data)
             if not data.get('is_no_accommodation'):
                 try:
                     arrival_date = data['arrival_date']
                     departure_date = data['departure_date']
                 except KeyError:
-                    raise ValidationError(_("Arrival/departure date is missing"))
-                if _to_date(arrival_date) > _to_date(departure_date):
+                    raise ValidationError(_('Arrival/departure date is missing'))
+                if arrival_date > departure_date:
                     raise ValidationError(_("Arrival date can't be set after the departure date."))
+                # Managers can set dates outside the allowed range (e.g. for late arrivals or exceptions)
+                if not self.management:
+                    arrival_date_from = date.fromisoformat(self.form_item.data['arrival_date_from'])
+                    arrival_date_to = date.fromisoformat(self.form_item.data['arrival_date_to'])
+                    departure_date_from = date.fromisoformat(self.form_item.data['departure_date_from'])
+                    departure_date_to = date.fromisoformat(self.form_item.data['departure_date_to'])
+                    if not (arrival_date_from <= arrival_date <= arrival_date_to):
+                        raise ValidationError(_('Arrival date is not within the required range.'))
+                    if not (departure_date_from <= departure_date <= departure_date_to):
+                        raise ValidationError(_('Departure date is not within the required range.'))
 
-        def _check_number_of_places(form, field):
-            if not field.data:
-                return
-            if form.modified_registration:
-                old_data = form.modified_registration.data_by_field.get(self.form_item.id)
-                if not old_data or not self.has_data_changed(snakify_keys(field.data), old_data):
+        def _check_number_of_places(new_data):
+            if not new_data:
+                return True
+            if existing_registration:
+                old_data = existing_registration.data_by_field.get(self.form_item.id)
+                if old_data and not self.has_data_changed(snakify_keys(new_data), old_data):
                     return
-            item = next((x for x in self.form_item.versioned_data['choices'] if x['id'] == field.data['choice']),
+            item = next((x for x in self.form_item.versioned_data['choices'] if x['id'] == new_data['choice']),
                         None)
             captions = self.form_item.data['captions']
             places_used_dict = self.get_places_used()
             if (item and item['places_limit'] and
-                    (item['places_limit'] < places_used_dict.get(field.data['choice'], 0))):
+                    (item['places_limit'] < places_used_dict.get(new_data['choice'], 0))):
                 raise ValidationError(_("Not enough rooms in '{0}'").format(captions[item['id']]))
-        return [_stay_dates_valid, _check_number_of_places]
+
+        return [_check_choice_data, _stay_dates_valid, _check_number_of_places]
 
     @property
     def view_data(self):
-        return dict(super(AccommodationField, self).view_data, places_used=self.get_places_used())
+        return dict(super().view_data, places_used=self.get_places_used())
 
     def get_friendly_data(self, registration_data, for_humans=False, for_search=False):
-        friendly_data = dict(registration_data.data)
-        if not friendly_data:
+        if not registration_data.data:
             return '' if for_humans or for_search else {}
+        friendly_data = dict(registration_data.data)
         unversioned_data = registration_data.field_data.field.data
         friendly_data['choice'] = unversioned_data['captions'][friendly_data['choice']]
         if not friendly_data.get('is_no_accommodation'):
-            friendly_data['arrival_date'] = _to_date(friendly_data['arrival_date'])
-            friendly_data['departure_date'] = _to_date(friendly_data['departure_date'])
+            friendly_data['arrival_date'] = date.fromisoformat(friendly_data['arrival_date'])
+            friendly_data['departure_date'] = date.fromisoformat(friendly_data['departure_date'])
             friendly_data['nights'] = (friendly_data['departure_date'] - friendly_data['arrival_date']).days
         else:
             friendly_data['arrival_date'] = ''
@@ -407,12 +649,11 @@ class AccommodationField(RegistrationFormBillableItemsField):
     def calculate_price(self, reg_data, versioned_data):
         if not reg_data:
             return 0
-        item = next((x for x in versioned_data['choices']
-                     if reg_data['choice'] == x['id'] and x.get('is_billable', False)), None)
-        if not item or not item['price']:
+        item = next((x for x in versioned_data['choices'] if reg_data['choice'] == x['id'] and x['price']), None)
+        if not item:
             return 0
-        nights = (_to_date(reg_data['departure_date']) - _to_date(reg_data['arrival_date'])).days
-        return item['price'] * nights
+        nights = (date.fromisoformat(reg_data['departure_date']) - date.fromisoformat(reg_data['arrival_date'])).days
+        return Decimal(str(item['price'])) * nights
 
     def process_form_data(self, registration, value, old_data=None, billable_items_locked=False, new_data_version=None):
         if billable_items_locked and old_data.price:
@@ -424,13 +665,14 @@ class AccommodationField(RegistrationFormBillableItemsField):
             data = {'choice': value['choice'],
                     'is_no_accommodation': is_no_accommodation}
             if not is_no_accommodation:
-                data.update({'arrival_date': value['arrivalDate'],
-                             'departure_date': value['departureDate']})
-        return super(AccommodationField, self).process_form_data(registration, data, old_data, billable_items_locked,
-                                                                 new_data_version)
+                data.update({'arrival_date': value['arrivalDate'].isoformat(),
+                             'departure_date': value['departureDate'].isoformat()})
+        return super().process_form_data(registration, data, old_data, billable_items_locked, new_data_version)
 
     def get_places_used(self):
         places_used = Counter()
+        if not any(x.get('places_limit') for x in self.form_item.versioned_data['choices']):
+            return dict(places_used)
         for registration in self.form_item.registration_form.active_registrations:
             if self.form_item.id not in registration.data_by_field:
                 continue
@@ -441,10 +683,10 @@ class AccommodationField(RegistrationFormBillableItemsField):
         return dict(places_used)
 
     def iter_placeholder_info(self):
-        yield 'name', 'Accommodation name for "{}" ({})'.format(self.form_item.title, self.form_item.parent.title)
-        yield 'nights', 'Number of nights for "{}" ({})'.format(self.form_item.title, self.form_item.parent.title)
-        yield 'arrival', 'Arrival date for "{}" ({})'.format(self.form_item.title, self.form_item.parent.title)
-        yield 'departure', 'Departure date for "{}" ({})'.format(self.form_item.title, self.form_item.parent.title)
+        yield 'name', f'Accommodation name for "{self.form_item.title}" ({self.form_item.parent.title})'
+        yield 'nights', f'Number of nights for "{self.form_item.title}" ({self.form_item.parent.title})'
+        yield 'arrival', f'Arrival date for "{self.form_item.title}" ({self.form_item.parent.title})'
+        yield 'departure', f'Departure date for "{self.form_item.title}" ({self.form_item.parent.title})'
 
     def render_placeholder(self, data, key=None):
         mapping = {'name': 'choice',
@@ -452,6 +694,10 @@ class AccommodationField(RegistrationFormBillableItemsField):
                    'arrival': 'arrival_date',
                    'departure': 'departure_date'}
         rv = self.get_friendly_data(data).get(mapping[key], '')
-        if isinstance(rv, date):
-            rv = format_date(rv).decode('utf-8')
-        return rv
+        return format_date(rv) if isinstance(rv, date) else rv
+
+    def render_reglist_column(self, data):
+        content_dict = self.get_friendly_data(data)
+        nights = ngettext('{n} night', '{n} nights', content_dict['nights']).format(n=content_dict['nights'])
+        text_val = f"{content_dict['choice']} ({nights})"
+        return RegistrationListColumn(content_dict, text_val)

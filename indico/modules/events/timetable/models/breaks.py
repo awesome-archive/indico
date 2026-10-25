@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy import DDL
 from sqlalchemy.event import listens_for
@@ -27,12 +16,14 @@ from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
 from indico.core.db.sqlalchemy.locations import LocationMixin
 from indico.core.db.sqlalchemy.util.models import auto_table_args
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr
 
 
 class Break(DescriptionMixin, ColorMixin, LocationMixin, db.Model):
     __tablename__ = 'breaks'
-    __auto_table_args = {'schema': 'events'}
+    __auto_table_args = (db.CheckConstraint("date_trunc('minute', duration) = duration", 'duration_no_seconds'),
+                         db.CheckConstraint("duration >= '0'", 'nonnegative_duration'),
+                         {'schema': 'events'})
     location_backref_name = 'breaks'
     default_colors = ColorTuple('#202020', '#90c0f0')
     possible_render_modes = {RenderMode.markdown}
@@ -83,7 +74,6 @@ class Break(DescriptionMixin, ColorMixin, LocationMixin, db.Model):
     def end_dt(self):
         return self.timetable_entry.start_dt + self.duration if self.timetable_entry else None
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', _text=self.title)
 
@@ -106,12 +96,12 @@ def _set_duration(target, value, oldvalue, *unused):
 
 @listens_for(Break.__table__, 'after_create')
 def _add_timetable_consistency_trigger(target, conn, **kw):
-    sql = """
+    sql = f'''
         CREATE CONSTRAINT TRIGGER consistent_timetable
         AFTER INSERT OR UPDATE OF duration
-        ON {}
+        ON {target.fullname}
         DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW
         EXECUTE PROCEDURE events.check_timetable_consistency('break');
-    """.format(target.fullname)
+    '''
     DDL(sql).execute(conn)

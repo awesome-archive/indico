@@ -1,30 +1,42 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import current_app, g
 
-from indico.modules.events.papers.controllers import display, management, paper, templates
+from indico.modules.events.papers.controllers import api, common, display, management, paper, templates
 from indico.web.flask.wrappers import IndicoBlueprint
 
 
-_bp = IndicoBlueprint('papers', __name__, url_prefix='/event/<confId>', template_folder='templates',
+_bp = IndicoBlueprint('papers', __name__, url_prefix='/event/<int:event_id>', template_folder='templates',
                       virtual_template_folder='events/papers')
 
+# API
+_bp.add_url_rule('/papers/api/<int:contrib_id>', 'api_paper_details', api.RHPaperDetails)
+_bp.add_url_rule('/papers/api/<int:contrib_id>', 'api_reset_paper_state', api.RHResetPaperState, methods=('DELETE',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/comment', 'api_create_comment', api.RHCreatePaperComment,
+                 methods=('POST',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/revision/<int:revision_id>/comment/<int:comment_id>',
+                 'api_comment_actions', api.RHCommentActions, methods=('DELETE', 'PATCH'))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/judge', 'api_judge_paper', api.RHJudgePaper, methods=('POST',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/paper/submit-single', 'submit_revision_new_single',
+                 api.RHSubmitRevisionUntyped, methods=('POST',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/paper/submit', 'submit_revision_new', api.RHSubmitRevision,
+                 methods=('POST',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/review/<any(content,layout):review_type>', 'api_create_review',
+                 api.RHCreateReview, methods=('POST',))
+_bp.add_url_rule('/papers/api/<int:contrib_id>/revision/<int:revision_id>/review/<int:review_id>/edit',
+                 'api_update_review', api.RHUpdateReview, methods=('POST',))
+
+_bp.add_url_rule('/papers/api/file-types/', 'api_file_types',
+                 common.RHPapersFileTypes)
+_bp.add_url_rule('/papers/api/file-types/', 'api_add_file_type',
+                 management.RHPapersCreateFileType, methods=('POST',))
+_bp.add_url_rule('/papers/api/file-types/<int:file_type_id>', 'api_edit_file_type',
+                 management.RHPapersEditFileType, methods=('PATCH', 'DELETE'))
 
 # Display pages
 _bp.add_url_rule('/papers/', 'call_for_papers', display.RHCallForPapers)
@@ -34,24 +46,13 @@ _bp.add_url_rule('/papers/<int:contrib_id>/files/<int:file_id>-<filename>', 'dow
                  display.RHDownloadPaperFile)
 _bp.add_url_rule('/papers/templates/<int:template_id>-<filename>', 'download_template',
                  templates.RHDownloadPaperTemplate)
+_bp.add_url_rule('/contributions/<int:contrib_id>/paper/submit-single', 'submit_revision_single',
+                 api.RHSubmitPaperUntyped, methods=('POST',))
 _bp.add_url_rule('/contributions/<int:contrib_id>/paper/submit', 'submit_revision',
-                 display.RHSubmitPaper, methods=('GET', 'POST'))
-# Paper reviews/judgments
-_bp.add_url_rule('/papers/<int:contrib_id>/review/type/<review_type>', 'submit_review',
-                 display.RHSubmitPaperReview, methods=('GET', 'POST'))
-_bp.add_url_rule('/papers/<int:contrib_id>/revision/<int:revision_id>/review/<int:review_id>/edit', 'edit_review',
-                 display.RHEditPaperReview, methods=('GET', 'POST'))
-_bp.add_url_rule('/papers/<int:contrib_id>/judgment', 'judge_paper',
-                 display.RHJudgePaper, methods=('POST',))
-_bp.add_url_rule('/papers/<int:contrib_id>/judgment', 'reset_paper_state',
-                 display.RHResetPaperState, methods=('DELETE',))
-# Paper comments
-_bp.add_url_rule('/papers/<int:contrib_id>/comment', 'submit_comment',
-                 display.RHSubmitPaperComment, methods=('POST',))
-_bp.add_url_rule('/papers/<int:contrib_id>/revision/<int:revision_id>/comment/<int:comment_id>', 'edit_comment',
-                 display.RHEditPaperComment, methods=('GET', 'POST'))
-_bp.add_url_rule('/papers/<int:contrib_id>/revision/<int:revision_id>/comment/<int:comment_id>', 'delete_comment',
-                 display.RHDeletePaperComment, methods=('DELETE',))
+                 api.RHSubmitPaper, methods=('POST',))
+_bp.add_url_rule('/contributions/<int:contrib_id>/paper/upload', 'api_upload',
+                 display.RHPapersUploadFile, methods=('POST',))
+
 # Reviewing area
 _bp.add_url_rule('/papers/reviewing/', 'reviewing_area', display.RHReviewingArea)
 
@@ -91,6 +92,9 @@ _bp.add_url_rule('/manage/papers/schedule', 'schedule_cfp', management.RHSchedul
 _bp.add_url_rule('/manage/papers/open', 'open_cfp', management.RHOpenCFP, methods=('POST',))
 _bp.add_url_rule('/manage/papers/close', 'close_cfp', management.RHCloseCFP, methods=('POST',))
 
+# File types
+_bp.add_url_rule('/manage/papers/types', 'manage_file_types', management.RHPapersManageFileTypes)
+
 # URLs available in both management and display areas
 # Note: When adding a new one here make sure to specify `defaults=defaults`
 #       for each rule. Otherwise you may not get the correct one.
@@ -106,6 +110,9 @@ for prefix, is_management in (('/manage/papers/assignment-list', True), ('/paper
                      paper.RHAssignPapers, methods=('POST',), defaults=defaults)
     _bp.add_url_rule(prefix + '/unassign/<any(judge,content_reviewer,layout_reviewer):role>', 'unassign_papers',
                      paper.RHUnassignPapers, methods=('POST',), defaults=defaults)
+    if is_management:
+        _bp.add_url_rule(prefix + '/export-json', 'export_json', paper.RHExportPapersJSON, methods=('GET', 'POST'),
+                         defaults=defaults)
 
 
 @_bp.url_defaults
@@ -116,8 +123,3 @@ def _add_management_flag(endpoint, values):
         # XXX: using getattr because the conference menu builds the url from an
         # RH without the management attribute
         values['management'] = getattr(g.rh, 'management', False)
-
-
-# Legacy URLs
-_compat_bp = IndicoBlueprint('compat_papers', __name__, url_prefix='/event/<int:confId>')
-# TODO...

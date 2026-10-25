@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from itertools import chain
 from operator import attrgetter
@@ -24,15 +13,17 @@ from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.core.db.sqlalchemy.descriptions import RenderMode, RenderModeMixin
 from indico.modules.events.models.reviews import ProposalRevisionMixin
 from indico.modules.events.papers.models.reviews import PaperJudgmentProxy, PaperReviewType
+from indico.util.caching import memoize_request
 from indico.util.date_time import now_utc
-from indico.util.i18n import _
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import pgettext
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
-from indico.util.struct.enum import RichIntEnum
+from indico.util.string import format_repr
 
 
 class PaperRevisionState(RichIntEnum):
-    __titles__ = [None, _("Submitted"), _("Accepted"), _("Rejected"), _("To be corrected")]
+    __titles__ = [None, pgettext('Paper revision', 'Submitted'), pgettext('Paper revision', 'Accepted'),
+                  pgettext('Paper revision', 'Rejected'), pgettext('Paper revision', 'To be corrected')]
     __css_classes__ = [None, 'highlight', 'success', 'error', 'warning']
     submitted = 1
     accepted = 2
@@ -43,13 +34,13 @@ class PaperRevisionState(RichIntEnum):
 class PaperRevision(ProposalRevisionMixin, RenderModeMixin, db.Model):
     __tablename__ = 'revisions'
     __table_args__ = (db.Index(None, 'contribution_id', unique=True,
-                               postgresql_where=db.text('state = {}'.format(PaperRevisionState.accepted))),
+                               postgresql_where=db.text(f'state = {PaperRevisionState.accepted}')),
                       db.UniqueConstraint('contribution_id', 'submitted_dt'),
-                      db.CheckConstraint('(state IN ({}, {}, {})) = (judge_id IS NOT NULL)'
+                      db.CheckConstraint('(state IN ({}, {}, {})) = (judge_id IS NOT NULL)'  # noqa: UP032
                                          .format(PaperRevisionState.accepted, PaperRevisionState.rejected,
                                                  PaperRevisionState.to_be_corrected),
                                          name='judge_if_judged'),
-                      db.CheckConstraint('(state IN ({}, {}, {})) = (judgment_dt IS NOT NULL)'
+                      db.CheckConstraint('(state IN ({}, {}, {})) = (judgment_dt IS NOT NULL)'  # noqa: UP032
                                          .format(PaperRevisionState.accepted, PaperRevisionState.rejected,
                                                  PaperRevisionState.to_be_corrected),
                                          name='judgment_dt_if_judged'),
@@ -142,9 +133,8 @@ class PaperRevision(ProposalRevisionMixin, RenderModeMixin, db.Model):
         paper = kwargs.pop('paper', None)
         if paper:
             kwargs.setdefault('_contribution', paper.contribution)
-        super(PaperRevision, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', '_contribution_id', state=None)
 
@@ -163,6 +153,19 @@ class PaperRevision(ProposalRevisionMixin, RenderModeMixin, db.Model):
     @property
     def number(self):
         return self.paper.revisions.index(self) + 1
+
+    @property
+    def spotlight_file(self):
+        return self.get_spotlight_file()
+
+    @property
+    def timeline(self):
+        return self.get_timeline()
+
+    @property
+    @memoize_request
+    def publishable_files(self):
+        return [pf for pf in self.files if not pf.file_type or pf.file_type.publishable]
 
     @paper.setter
     def paper(self, paper):
@@ -186,17 +189,23 @@ class PaperRevision(ProposalRevisionMixin, RenderModeMixin, db.Model):
 
     def get_reviewed_for_groups(self, user, include_reviewed=False):
         from indico.modules.events.papers.models.reviews import PaperTypeProxy
-        reviewed_for = {x.type for x in self.reviews if x.user == user} if include_reviewed else set()
-        if self.paper.cfp.content_reviewing_enabled and user in self.paper.cfp.content_reviewers:
+        from indico.modules.events.papers.util import is_type_reviewing_possible
+
+        cfp = self.paper.cfp
+        contrib = self.paper.contribution
+        reviewed_for = set()
+        if include_reviewed:
+            reviewed_for = {x.type for x in self.reviews if x.user == user and is_type_reviewing_possible(cfp, x.type)}
+        if is_type_reviewing_possible(cfp, PaperReviewType.content) and user in contrib.paper_content_reviewers:
             reviewed_for.add(PaperReviewType.content)
-        if self.paper.cfp.layout_reviewing_enabled and user in self.paper.cfp.layout_reviewers:
+        if is_type_reviewing_possible(cfp, PaperReviewType.layout) and user in contrib.paper_layout_reviewers:
             reviewed_for.add(PaperReviewType.layout)
         return set(map(PaperTypeProxy, reviewed_for))
 
     def has_user_reviewed(self, user, review_type=None):
         from indico.modules.events.papers.models.reviews import PaperReviewType
         if review_type:
-            if isinstance(review_type, basestring):
+            if isinstance(review_type, str):
                 review_type = PaperReviewType[review_type]
             return any(review.user == user and review.type == review_type for review in self.reviews)
         else:
@@ -212,5 +221,5 @@ class PaperRevision(ProposalRevisionMixin, RenderModeMixin, db.Model):
                 return bool(content_review)
 
     def get_spotlight_file(self):
-        pdf_files = [paper_file for paper_file in self.files if paper_file.content_type == 'application/pdf']
+        pdf_files = [pf for pf in self.publishable_files if pf.content_type == 'application/pdf']
         return pdf_files[0] if len(pdf_files) == 1 else None

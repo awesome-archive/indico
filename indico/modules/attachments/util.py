@@ -1,29 +1,18 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
 from indico.core.db import db
+from indico.util.signals import make_interceptable
 
 
 def get_attached_folders(linked_object, include_empty=True, include_hidden=True, preload_event=False):
-    """
-    Return a list of all the folders linked to an object.
+    """Return a list of all the folders linked to an object.
 
     :param linked_object: The object whose attachments are to be returned
     :param include_empty: Whether to return empty folders as well.
@@ -44,6 +33,7 @@ def get_attached_folders(linked_object, include_empty=True, include_hidden=True,
     return folders
 
 
+@make_interceptable
 def get_attached_items(linked_object, include_empty=True, include_hidden=True, preload_event=False):
     """
     Return a structured representation of all the attachments linked
@@ -71,44 +61,39 @@ def get_attached_items(linked_object, include_empty=True, include_hidden=True, p
     }
 
 
-def get_nested_attached_items(obj):
-    """
-    Returns a structured representation of all attachments linked to an object
-    and all its nested objects.
-
-    :param obj: A :class:`Event`, :class:`Session`, :class:`Contribution`
-                or :class:`SubContribution` object.
-    """
-    attachments = get_attached_items(obj, include_empty=False, include_hidden=False)
-    nested_objects = []
-    if isinstance(obj, db.m.Event):
-        nested_objects = obj.sessions + obj.contributions
-    elif isinstance(obj, db.m.Session):
-        nested_objects = obj.contributions
-    elif isinstance(obj, db.m.Contribution):
-        nested_objects = obj.subcontributions
-    if nested_objects:
-        children = filter(None, map(get_nested_attached_items, nested_objects))
-        if children:
-            attachments['children'] = children
-    if attachments:
-        attachments['object'] = obj
-    return attachments
-
-
-def can_manage_attachments(obj, user):
-    """Checks if a user can manage attachments for the object"""
+def can_manage_attachments(obj, user, allow_admin=True):
+    """Check if a user can manage attachments for the object."""
+    from indico.modules.attachments.settings import attachments_settings
     if not user:
         return False
-    if obj.can_manage(user):
+    if obj.can_manage(user, allow_admin=allow_admin):
         return True
-    if isinstance(obj, db.m.Event) and obj.can_manage(user, 'submit'):
+    event = getattr(obj, 'event', None)
+    if event and attachments_settings.get(event, 'managers_only'):
+        return False
+    if isinstance(obj, db.m.Event) and obj.can_manage(user, 'submit', allow_admin=allow_admin):
         return True
-    if isinstance(obj, db.m.Contribution) and obj.can_manage(user, 'submit'):
+    if isinstance(obj, db.m.Contribution) and obj.can_manage(user, 'submit', allow_admin=allow_admin):
         return True
     if isinstance(obj, db.m.SubContribution):
-        return can_manage_attachments(obj.contribution, user)
+        subcontrib_speakers_can_submit = obj.contribution.event.subcontrib_speakers_can_submit
+        if subcontrib_speakers_can_submit and any(speaker.person.user == user for speaker in obj.speakers):
+            return True
+        return can_manage_attachments(obj.contribution, user, allow_admin=allow_admin)
     return False
+
+
+def can_generate_attachment_package(event, user):
+    """Check if the user can generate a material package."""
+    from indico.modules.attachments.settings import AttachmentPackageAccess, attachments_settings
+    mode = attachments_settings.get(event, 'generate_package')
+    match mode:
+        case AttachmentPackageAccess.everyone:
+            return True
+        case AttachmentPackageAccess.logged_in:
+            return user is not None
+        case AttachmentPackageAccess.managers:
+            return event.can_manage(user)
 
 
 def get_default_folder_names():

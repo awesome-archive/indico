@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from operator import attrgetter
 
@@ -23,6 +12,7 @@ from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import mapper
 
+from indico.core import signals
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime, db
 from indico.core.db.sqlalchemy.principals import EmailPrincipal
 from indico.core.db.sqlalchemy.util.models import auto_table_args, override_attr
@@ -30,10 +20,29 @@ from indico.core.db.sqlalchemy.util.session import no_autoflush
 from indico.modules.users.models.users import PersonMixin, UserTitle
 from indico.util.decorators import strict_classproperty
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr
 
 
-class PersonLinkDataMixin(object):
+class PersonLinkMixin:
+    person_link_relation_name = None
+    person_link_backref_name = None
+
+    @declared_attr
+    def person_links(cls):
+        return db.relationship(
+            cls.person_link_relation_name,
+            lazy=True,
+            cascade='all, delete-orphan',
+            backref=db.backref(
+                cls.person_link_backref_name,
+                lazy=True
+            )
+        )
+
+    @property
+    def sorted_person_links(self):
+        return sorted(self.person_links, key=attrgetter('display_order_key'))
+
     @property
     def person_link_data(self):
         return {x: x.is_submitter for x in self.person_links}
@@ -42,22 +51,22 @@ class PersonLinkDataMixin(object):
     @no_autoflush
     def person_link_data(self, value):
         # Revoke submission rights for removed persons
-        for person_link in set(self.person_links) - value.viewkeys():
+        for person_link in set(self.person_links) - value.keys():
             principal = person_link.person.principal
             if principal:
-                self.update_principal(principal, del_permissions={'submit'})
+                self.update_principal(principal, del_permissions={'submit'}, quiet=True)
         # Update person links
-        self.person_links = value.keys()
-        for person_link, is_submitter in value.iteritems():
+        self.person_links = list(value.keys())
+        for person_link, is_submitter in value.items():
             person = person_link.person
             principal = person.principal
             if not principal:
                 continue
             action = {'add_permissions': {'submit'}} if is_submitter else {'del_permissions': {'submit'}}
-            self.update_principal(principal, **action)
+            self.update_principal(principal, **action, quiet=True)
 
 
-class AuthorsSpeakersMixin(object):
+class AuthorsSpeakersMixin:
     AUTHORS_SPEAKERS_DISPLAY_ORDER_ATTR = 'display_order_key'
 
     @property
@@ -128,6 +137,12 @@ class EventPerson(PersonMixin, db.Model):
         nullable=False,
         default=UserTitle.none
     )
+    #: the id of the underlying predefined affiliation
+    affiliation_id = db.Column(
+        db.ForeignKey('indico.affiliations.id'),
+        nullable=True,
+        index=True
+    )
     affiliation = db.Column(
         db.String,
         nullable=False,
@@ -172,6 +187,15 @@ class EventPerson(PersonMixin, db.Model):
             lazy='dynamic'
         )
     )
+    affiliation_link = db.relationship(
+        'Affiliation',
+        lazy=False,
+        backref=db.backref(
+            'event_person_affiliations',
+            lazy='dynamic',
+            cascade_backrefs=False
+        )
+    )
 
     # relationship backrefs:
     # - abstract_links (AbstractPersonLink.person)
@@ -184,7 +208,6 @@ class EventPerson(PersonMixin, db.Model):
     def locator(self):
         return dict(self.event.locator, person_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', is_untrusted=False, _text=self.full_name)
 
@@ -196,16 +219,36 @@ class EventPerson(PersonMixin, db.Model):
             return EmailPrincipal(self.email)
         return None
 
+    @property
+    def identifier(self):
+        return f'EventPerson:{self.id}'
+
+    @property
+    def persistent_identifier(self):
+        """A persistent version of this object's identifier.
+
+        This is currently identical to the regular identifier, since it does not
+        contain any signatures or similar data that could change.
+        """
+        return self.identifier
+
     @classmethod
     def create_from_user(cls, user, event=None, is_untrusted=False):
         return EventPerson(user=user, event=event, first_name=user.first_name, last_name=user.last_name,
-                           email=user.email, affiliation=user.affiliation, address=user.address, phone=user.phone,
+                           title=user._title, email=user.email, affiliation=user.affiliation,
+                           affiliation_link=user.affiliation_link, address=user.address, phone=user.phone,
                            is_untrusted=is_untrusted)
 
     @classmethod
     def for_user(cls, user, event=None, is_untrusted=False):
-        """Return EventPerson for a matching User in Event creating if needed"""
+        """Return EventPerson for a matching User in Event creating if needed."""
         person = event.persons.filter_by(user=user).first() if event else None
+        email_person = event.persons.filter(EventPerson.email.in_(user.all_emails)).first() if event else None
+        if not person and email_person:
+            if email_person.user is None:
+                email_person.user = user
+            assert email_person.user == user
+            person = email_person
         return person or cls.create_from_user(user, event, is_untrusted=is_untrusted)
 
     @classmethod
@@ -228,7 +271,7 @@ class EventPerson(PersonMixin, db.Model):
     @classmethod
     def link_user_by_email(cls, user):
         """
-        Links all email-based persons matching the user's
+        Link all email-based persons matching the user's
         email addresses with the user.
 
         :param user: A User object.
@@ -250,14 +293,44 @@ class EventPerson(PersonMixin, db.Model):
                 db.session.delete(event_person)
         db.session.flush()
 
+    def get_unsynced_data(self):
+        """Return data no longer in sync with the user."""
+        if not self.user:
+            return {}
+        fields = ('first_name', 'last_name', '_title', 'email', 'affiliation', 'affiliation_link', 'address', 'phone')
+        changes = {}
+        for field in fields:
+            person_data = getattr(self, field)
+            user_data = getattr(self.user, field)
+            if person_data != user_data:
+                changes[field] = (person_data, user_data)
+        return changes
+
+    def sync_user(self, *, notify=True):
+        """Update all person data based on the current user data.
+
+        :param notify: Whether to trigger the ``person_updated`` signal.
+        """
+        if not self.user:
+            return
+        fields = ('first_name', 'last_name', '_title', 'email', 'affiliation', 'affiliation_link', 'address', 'phone')
+        has_changes = False
+        for field in fields:
+            new = getattr(self.user, field)
+            if getattr(self, field) != new:
+                setattr(self, field, new)
+                has_changes = True
+        if notify and has_changes:
+            signals.event.person_updated.send(self)
+
     @no_autoflush
     def merge_person_info(self, other):
         from indico.modules.events.contributions.models.persons import AuthorType
-        for column_name in {'_title', 'affiliation', 'address', 'phone', 'first_name', 'last_name'}:
+        for column_name in ('_title', 'affiliation', 'address', 'phone', 'first_name', 'last_name'):
             value = getattr(self, column_name) or getattr(other, column_name)
             setattr(self, column_name, value)
 
-        for event_link in other.event_links:
+        for event_link in other.event_links[:]:
             existing_event_link = next((link for link in self.event_links if link.event_id == event_link.event_id),
                                        None)
             if existing_event_link is None:
@@ -265,7 +338,7 @@ class EventPerson(PersonMixin, db.Model):
             else:
                 other.event_links.remove(event_link)
 
-        for abstract_link in other.abstract_links:
+        for abstract_link in other.abstract_links[:]:
             existing_abstract_link = next((link for link in self.abstract_links
                                            if link.abstract_id == abstract_link.abstract_id), None)
 
@@ -277,7 +350,7 @@ class EventPerson(PersonMixin, db.Model):
                                                                             abstract_link.author_type)
                 other.abstract_links.remove(abstract_link)
 
-        for contribution_link in other.contribution_links:
+        for contribution_link in other.contribution_links[:]:
             existing_contribution_link = next((link for link in self.contribution_links
                                                if link.contribution_id == contribution_link.contribution_id), None)
 
@@ -289,7 +362,7 @@ class EventPerson(PersonMixin, db.Model):
                                                                                 contribution_link.author_type)
                 other.contribution_links.remove(contribution_link)
 
-        for subcontribution_link in other.subcontribution_links:
+        for subcontribution_link in other.subcontribution_links[:]:
             existing_subcontribution_link = next(
                 (link for link in self.subcontribution_links
                  if link.subcontribution_id == subcontribution_link.subcontribution_id), None)
@@ -298,7 +371,7 @@ class EventPerson(PersonMixin, db.Model):
             else:
                 other.subcontribution_links.remove(subcontribution_link)
 
-        for session_block_link in other.session_block_links:
+        for session_block_link in other.session_block_links[:]:
             existing_session_block_link = next((link for link in self.session_block_links
                                                 if link.session_block_id == session_block_link.session_block_id),
                                                None)
@@ -310,19 +383,32 @@ class EventPerson(PersonMixin, db.Model):
         db.session.flush()
 
     def has_role(self, role, obj):
-        """Whether the person has a role in the ACL list of a given object"""
+        """Whether the person has a role in the ACL list of a given object."""
         principals = [x for x in obj.acl_entries if x.has_management_permission(role, explicit=True)]
         return any(x
                    for x in principals
                    if ((self.user_id is not None and self.user_id == x.user_id) or
                        (self.email is not None and self.email == x.email)))
 
+    @property
+    def has_links(self):
+        """Whether the person is an author, speaker, etc., in the event."""
+        chairpersons = {link.person for link in self.event.person_links}
+        return (
+            self in chairpersons or
+            # Check regardless of the abstract feature being enabled
+            any(link for link in self.abstract_links if not link.abstract.is_deleted) or
+            any(link for link in self.session_block_links if not link.session_block.session.is_deleted) or
+            any(link for link in self.contribution_links if not link.contribution.is_deleted) or
+            any(link for link in self.subcontribution_links if (not link.subcontribution.is_deleted and
+                                                                not link.subcontribution.contribution.is_deleted))
+        )
+
 
 class PersonLinkBase(PersonMixin, db.Model):
     """Base class for EventPerson associations."""
 
     __abstract__ = True
-    __auto_table_args = {'schema': 'events'}
     #: The name of the backref on the `EventPerson`
     person_link_backref_name = None
     #: The columns which should be included in the unique constraint.
@@ -372,11 +458,20 @@ class PersonLinkBase(PersonMixin, db.Model):
         )
 
     @declared_attr
-    def _title(cls):
+    def _title_col(cls):
         return db.Column(
             'title',
             PyIntEnum(UserTitle),
             nullable=True
+        )
+
+    @declared_attr
+    def _affiliation_id(cls):
+        return db.Column(
+            'affiliation_id',
+            db.ForeignKey('indico.affiliations.id'),
+            nullable=True,
+            index=True
         )
 
     @declared_attr
@@ -417,6 +512,18 @@ class PersonLinkBase(PersonMixin, db.Model):
         )
 
     @declared_attr
+    def _affiliation_link(cls):
+        return db.relationship(
+            'Affiliation',
+            lazy=False,
+            backref=db.backref(
+                cls.person_link_backref_name,
+                cascade_backrefs=False,
+                lazy='dynamic',
+            )
+        )
+
+    @declared_attr
     def display_order(cls):
         return db.Column(
             db.Integer,
@@ -443,14 +550,17 @@ class PersonLinkBase(PersonMixin, db.Model):
     first_name = override_attr('first_name', 'person')
     last_name = override_attr('last_name', 'person')
     title = override_attr('title', 'person', fget=lambda self, __: self._get_title())
+    _title = override_attr('_title', 'person', own_attr_name='_title_col')
     affiliation = override_attr('affiliation', 'person')
+    affiliation_id = override_attr('affiliation_id', 'person', check_attr_name='_affiliation')
+    affiliation_link = override_attr('affiliation_link', 'person', check_attr_name='_affiliation')
     address = override_attr('address', 'person')
     phone = override_attr('phone', 'person')
 
     def __init__(self, *args, **kwargs):
         # Needed in order to ensure `person` is set before the overridable attrs
         self.person = kwargs.pop('person', None)
-        super(PersonLinkBase, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class EventPersonLink(PersonLinkBase):
@@ -478,10 +588,9 @@ class EventPersonLink(PersonLinkBase):
     @property
     def is_submitter(self):
         if not self.event:
-            raise Exception("No event to check submission rights against")
+            raise Exception('No event to check submission rights against')
         return self.person.has_role('submit', self.event)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'person_id', 'event_id', _text=self.full_name)
 

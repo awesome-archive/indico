@@ -11,7 +11,7 @@
                         data-method="post"
                         data-href="{{ url_for('static_site.build', event) }}"
                         data-title="{% trans %}Build an offline copy{% endtrans %}"
-                        data-confirm="{% trans %}Are you sure you want to build an offline copy of this event?<br>Beware that it is a heavy operation, especially for large events, and it might take some time to finish.{% endtrans %}">
+                        data-confirm="{% trans %}Are you sure you want to build an offline copy of this event? Beware that it is a heavy operation, especially for large events, and it might take some time to finish.{% endtrans %}">
                     {%- trans %}Build offline copy{% endtrans -%}
                 </button>
             </div>
@@ -35,8 +35,8 @@
                     <table class="i-table-widget">
                         <thead>
                             <tr>
-                                <th>{% trans %}Requested by{% endtrans %}</th>
-                                <th>{% trans %}Requested on{% endtrans %}</th>
+                                <th>{% trans 'Offline copy of an event' %}Requested by{% endtrans %}</th>
+                                <th>{% trans 'Offline copy of an event' %}Requested on{% endtrans %}</th>
                                 <th>{% trans %}Status{% endtrans %}</th>
                                 {% if has_downloads %}
                                     <th>{% trans %}Download{% endtrans %}</th>

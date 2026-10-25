@@ -1,32 +1,31 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from indico.modules.events.persons.controllers import (RHEditEventPerson, RHEmailEventPersons,
+from indico.modules.events.persons.controllers import (RHAPIEmailEventPersonsMetadata, RHAPIEmailEventPersonsSend,
+                                                       RHAPIEmailEventPersonsUpload, RHDeleteUnusedEventPerson,
+                                                       RHEmailEventPersonsPreview, RHEventPersonSearch,
                                                        RHGrantModificationRights, RHGrantSubmissionRights,
-                                                       RHPersonsList, RHRevokeSubmissionRights)
+                                                       RHManagePersonLists, RHPersonsList, RHRevokeSubmissionRights,
+                                                       RHSyncEventPerson, RHUpdateEventPerson)
 from indico.web.flask.wrappers import IndicoBlueprint
 
 
 _bp = IndicoBlueprint('persons', __name__, template_folder='templates', virtual_template_folder='events/persons',
-                      url_prefix='/event/<confId>/manage')
+                      url_prefix='/event/<int:event_id>/manage')
 
 _bp.add_url_rule('/persons/', 'person_list', RHPersonsList)
-_bp.add_url_rule('/persons/email', 'email_event_persons', RHEmailEventPersons, methods=('POST',))
+_bp.add_url_rule('/api/persons/email/upload', 'api_email_event_persons_upload', RHAPIEmailEventPersonsUpload,
+                 methods=('POST',))
+_bp.add_url_rule('/api/persons/email/send', 'api_email_event_persons_send', RHAPIEmailEventPersonsSend,
+                 methods=('POST',))
+_bp.add_url_rule('/api/persons/email/metadata', 'api_email_event_persons_metadata', RHAPIEmailEventPersonsMetadata,
+                 methods=('POST',))
+_bp.add_url_rule('/api/persons/email/preview', 'email_event_persons_preview', RHEmailEventPersonsPreview,
+                 methods=('POST',))
 _bp.add_url_rule('/persons/grant-submission', 'grant_submission_rights', RHGrantSubmissionRights, methods=('POST',))
 _bp.add_url_rule('/persons/grant-modification', 'grant_modification_rights', RHGrantModificationRights,
                  methods=('POST',))
@@ -35,4 +34,11 @@ _bp.add_url_rule('/persons/revoke-submission', 'revoke_submission_rights', RHRev
 
 
 # EventPerson operations
-_bp.add_url_rule('/persons/<int:person_id>/edit', 'edit_person', RHEditEventPerson, methods=('GET', 'POST'))
+_bp.add_url_rule('/persons/<int:person_id>', 'update_person', RHUpdateEventPerson, methods=('PATCH',))
+_bp.add_url_rule('/persons/<int:person_id>/sync', 'sync_with_user', RHSyncEventPerson, methods=('POST',))
+_bp.add_url_rule('/persons/<int:person_id>', 'delete_unused_person', RHDeleteUnusedEventPerson, methods=('DELETE',))
+_bp.add_url_rule('/api/persons/search', 'event_person_search', RHEventPersonSearch)
+
+
+# Manage person list settings
+_bp.add_url_rule('/persons/person-lists', 'manage_person_lists', RHManagePersonLists, methods=('GET', 'POST'))

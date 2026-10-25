@@ -28,6 +28,16 @@
 {% block content %}
     {{ form_header(form) }}
         {{ form_rows(form, fields=form.BASIC_FIELDS) }}
+        {% if indico_config.ENABLE_GOOGLE_WALLET %}
+            {% call form_fieldset(_('Google Wallet')) %}
+                {{ form_rows(form, fields=form.GOOGLE_WALLET_FIELDS) }}
+            {% endcall %}
+        {% endif %}
+        {% if indico_config.ENABLE_APPLE_WALLET %}
+            {% call form_fieldset(_('Apple Wallet')) %}
+                {{ form_rows(form, fields=form.APPLE_WALLET_FIELDS) }}
+            {% endcall %}
+        {% endif %}
         {% call form_fieldset(_('Event Header')) %}
             {{ form_rows(form, fields=form.EVENT_HEADER_FIELDS) }}
         {% endcall %}
@@ -40,6 +50,8 @@
     {% set delete_logo_prompt = _("Are you sure you want to remove the logo of this category?") %}
     {{ render_image_form(icon_form, 'icon', '.manage_icon', _('Icon'), _('Delete Icon?'), delete_icon_prompt) }}
     {{ render_image_form(logo_form, 'logo', '.manage_logo', _('Logo'), _('Delete Logo?'), delete_logo_prompt) }}
+
+    {% block after_forms %}{% endblock %}
 
     <script>
         (function() {

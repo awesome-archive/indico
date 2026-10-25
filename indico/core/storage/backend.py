@@ -1,23 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
-import sys
 from contextlib import contextmanager
 from hashlib import md5
 from io import BytesIO
@@ -28,12 +16,11 @@ from werkzeug.security import safe_join
 from indico.core import signals
 from indico.core.config import config
 from indico.util.signals import named_objects_from_signal
-from indico.util.string import return_ascii
 from indico.web.flask.util import send_file
 
 
 def get_storage(backend_name):
-    """Returns an FS object for the given backend.
+    """Return an FS object for the given backend.
 
     The backend must be defined in the STORAGE_BACKENDS dict in the
     indico config.  Once a backend has been used it is assumed to
@@ -46,29 +33,29 @@ def get_storage(backend_name):
     try:
         definition = config.STORAGE_BACKENDS[backend_name]
     except KeyError:
-        raise RuntimeError('Storage backend does not exist: {}'.format(backend_name))
+        raise RuntimeError(f'Storage backend does not exist: {backend_name}')
     name, data = definition.split(':', 1)
     try:
         backend = get_storage_backends()[name]
     except KeyError:
-        raise RuntimeError('Storage backend {} has invalid type {}'.format(backend_name, name))
+        raise RuntimeError(f'Storage backend {backend_name} has invalid type {name}')
     return backend(data)
 
 
 def get_storage_backends():
-    return named_objects_from_signal(signals.get_storage_backends.send(), plugin_attr='plugin')
+    return named_objects_from_signal(signals.core.get_storage_backends.send(), plugin_attr='plugin')
 
 
 class StorageError(Exception):
-    """Exception used when a storage operation fails for any reason"""
+    """Exception used when a storage operation fails for any reason."""
 
 
 class StorageReadOnlyError(StorageError):
-    """Exception used when trying to write to a read-only storage"""
+    """Exception used when trying to write to a read-only storage."""
 
 
-class Storage(object):
-    """Base class for storage backends
+class Storage:
+    """Base class for storage backends.
 
     To create a new storage backend, subclass this class and register
     it using the `get_storage_backends` signal.
@@ -88,6 +75,7 @@ class Storage(object):
                  key-value pairs: ``key=value,key2=value2,..``
 
     """
+
     #: unique name of the storage backend
     name = None
     #: plugin containing this backend - assigned automatically
@@ -99,11 +87,11 @@ class Storage(object):
         pass
 
     def _parse_data(self, data):
-        """Util to parse a key=value data string to a dict"""
+        """Util to parse a key=value data string to a dict."""
         return dict((x.strip() for x in item.split('=', 1)) for item in data.split(',')) if data else {}
 
     def _ensure_fileobj(self, fileobj):
-        """Ensures that fileobj is a file-like object and not a string"""
+        """Ensure that fileobj is a file-like object and not a string."""
         return BytesIO(fileobj) if not hasattr(fileobj, 'read') else fileobj
 
     def _copy_file(self, source, target, chunk_size=1024*1024):
@@ -118,10 +106,10 @@ class Storage(object):
                 break
             target.write(chunk)
             checksum.update(chunk)
-        return checksum.hexdigest().decode('ascii')
+        return checksum.hexdigest()
 
     def open(self, file_id):  # pragma: no cover
-        """Opens a file in the storage for reading.
+        """Open a file in the storage for reading.
 
         This returns a file-like object which contains the content of
         the file.
@@ -132,7 +120,7 @@ class Storage(object):
 
     @contextmanager
     def get_local_path(self, file_id):
-        """Returns a local path for the file.
+        """Return a local path for the file.
 
         While this path MAY point to the permanent location of the
         stored file, it MUST NOT be used for anything but read
@@ -147,8 +135,8 @@ class Storage(object):
                 tmpfile.flush()
                 yield tmpfile.name
 
-    def save(self, name, content_type, filename, fileobj):  # pragma: no cover
-        """Creates a new file in the storage.
+    def save(self, name, content_type, filename, fileobj, *, dry_run=False):  # pragma: no cover
+        """Create a new file in the storage.
 
         This returns a a string identifier which can be used later to
         retrieve the file from the storage.
@@ -171,27 +159,32 @@ class Storage(object):
                          not be used depending on the backend).
         :param fileobj: A file-like object containing the file data as
                         bytes or a bytestring.
+        :param dry_run: Whether to skip actually saving the file and
+                        just return the storage file identifier with
+                        which the file would be saved. When this is
+                        set to True, the returned checksum will
+                        always be ``None``.
         :return: (unicode, unicode) -- A tuple containing a unique
                         identifier for the file and an MD5 checksum.
         """
         raise NotImplementedError
 
     def delete(self, file_id):  # pragma: no cover
-        """Deletes a file from the storage.
+        """Delete a file from the storage.
 
         :param file_id: The ID of the file within the storage backend.
         """
         raise NotImplementedError
 
     def getsize(self, file_id):  # pragma: no cover
-        """Gets the size in bytes of a file
+        """Get the size in bytes of a file.
 
         :param file_id: The ID of the file within the storage backend.
         """
         raise NotImplementedError
 
     def send_file(self, file_id, content_type, filename, inline=True):  # pragma: no cover
-        """Sends the file to the client.
+        """Send the file to the client.
 
         This returns a flask response that will eventually result in
         the user being offered to download the file (or view it in the
@@ -212,13 +205,13 @@ class Storage(object):
         raise NotImplementedError
 
     def __repr__(self):
-        return '<{}()>'.format(type(self).__name__)
+        return f'<{type(self).__name__}()>'
 
 
-class ReadOnlyStorageMixin(object):
-    """Mixin that makes write operations fail with an error"""
+class ReadOnlyStorageMixin:
+    """Mixin that makes write operations fail with an error."""
 
-    def save(self, name, content_type, filename, fileobj):
+    def save(self, name, content_type, filename, fileobj, *, dry_run=False):
         raise StorageReadOnlyError('Cannot write to read-only storage')
 
     def delete(self, file_id):
@@ -235,20 +228,22 @@ class FileSystemStorage(Storage):
     def _resolve_path(self, path):
         full_path = safe_join(self.path, path)
         if full_path is None:
-            raise ValueError('Invalid path: {}'.format(path))
+            raise ValueError(f'Invalid path: {path}')
         return full_path
 
     def open(self, file_id):
         try:
             return open(self._resolve_path(file_id), 'rb')
         except Exception as e:
-            raise StorageError('Could not open "{}": {}'.format(file_id, e)), None, sys.exc_info()[2]
+            raise StorageError(f'Could not open "{file_id}": {e}') from e
 
     @contextmanager
     def get_local_path(self, file_id):
         yield self._resolve_path(file_id)
 
-    def save(self, name, content_type, filename, fileobj):
+    def save(self, name, content_type, filename, fileobj, *, dry_run=False):
+        if dry_run:
+            return name, None
         try:
             fileobj = self._ensure_fileobj(fileobj)
             filepath = self._resolve_path(name)
@@ -261,46 +256,44 @@ class FileSystemStorage(Storage):
                 checksum = self._copy_file(fileobj, f)
             return name, checksum
         except Exception as e:
-            raise StorageError('Could not save "{}": {}'.format(name, e)), None, sys.exc_info()[2]
+            raise StorageError(f'Could not save "{name}": {e}') from e
 
     def delete(self, file_id):
         try:
             os.remove(self._resolve_path(file_id))
         except Exception as e:
-            raise StorageError('Could not delete "{}": {}'.format(file_id, e)), None, sys.exc_info()[2]
+            raise StorageError(f'Could not delete "{file_id}": {e}') from e
 
     def getsize(self, file_id):
         try:
             return os.path.getsize(self._resolve_path(file_id))
         except Exception as e:
-            raise StorageError('Could not get size of "{}": {}'.format(file_id, e)), None, sys.exc_info()[2]
+            raise StorageError(f'Could not get size of "{file_id}": {e}') from e
 
     def send_file(self, file_id, content_type, filename, inline=True):
         try:
-            return send_file(filename, self._resolve_path(file_id).encode('utf-8'), content_type, inline=inline)
+            return send_file(filename, self._resolve_path(file_id), content_type, inline=inline)
         except Exception as e:
-            raise StorageError('Could not send "{}": {}'.format(file_id, e)), None, sys.exc_info()[2]
+            raise StorageError(f'Could not send "{file_id}": {e}') from e
 
-    @return_ascii
     def __repr__(self):
-        return '<FileSystemStorage: {}>'.format(self.path)
+        return f'<FileSystemStorage: {self.path}>'
 
 
 class ReadOnlyFileSystemStorage(ReadOnlyStorageMixin, FileSystemStorage):
     name = 'fs-readonly'
 
-    @return_ascii
     def __repr__(self):
-        return '<ReadOnlyFileSystemStorage: {}>'.format(self.path)
+        return f'<ReadOnlyFileSystemStorage: {self.path}>'
 
 
-@signals.get_storage_backends.connect
+@signals.core.get_storage_backends.connect
 def _get_storage_backends(sender, **kwargs):
     yield FileSystemStorage
     yield ReadOnlyFileSystemStorage
 
 
-@signals.app_created.connect
+@signals.core.app_created.connect
 def _check_storage_backends(app, **kwargs):
     # This will raise RuntimeError if the backend names are not unique
     get_storage_backends()

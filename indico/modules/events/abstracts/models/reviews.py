@@ -1,33 +1,22 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import division, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime, db
 from indico.core.db.sqlalchemy.descriptions import RenderMode, RenderModeMixin
 from indico.modules.events.models.reviews import ProposalReviewMixin
 from indico.util.date_time import now_utc
+from indico.util.enum import RichIntEnum
 from indico.util.i18n import _
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
-from indico.util.struct.enum import RichIntEnum
+from indico.util.string import format_repr
 
 
 class AbstractAction(RichIntEnum):
-    __titles__ = [None, _("Accept"), _("Reject"), _("Change track"), _("Mark as duplicate"), _("Merge")]
+    __titles__ = [None, _('Accept'), _('Reject'), _('Change track'), _('Mark as duplicate'), _('Merge')]
     __css_classes__ = [None, 'success', 'error', 'warning', 'strong', 'visited']
     accept = 1
     reject = 2
@@ -37,7 +26,7 @@ class AbstractAction(RichIntEnum):
 
 
 class AbstractReview(ProposalReviewMixin, RenderModeMixin, db.Model):
-    """Represents an abstract review, emitted by a reviewer"""
+    """An abstract review, emitted by a reviewer."""
 
     possible_render_modes = {RenderMode.markdown}
     default_render_mode = RenderMode.markdown
@@ -48,13 +37,20 @@ class AbstractReview(ProposalReviewMixin, RenderModeMixin, db.Model):
     marshmallow_aliases = {'_comment': 'comment'}
 
     __tablename__ = 'abstract_reviews'
-    __table_args__ = (db.UniqueConstraint('abstract_id', 'user_id', 'track_id'),
-                      db.CheckConstraint("proposed_action = {} OR (proposed_contribution_type_id IS NULL)"
-                                         .format(AbstractAction.accept), name='prop_contrib_id_only_accepted'),
-                      db.CheckConstraint("(proposed_action IN ({}, {})) = (proposed_related_abstract_id IS NOT NULL)"
-                                         .format(AbstractAction.mark_as_duplicate, AbstractAction.merge),
-                                         name='prop_abstract_id_only_duplicate_merge'),
-                      {'schema': 'event_abstracts'})
+    __table_args__ = (
+        db.UniqueConstraint('abstract_id', 'user_id', 'track_id'),
+        db.CheckConstraint(
+            f'proposed_action = {AbstractAction.accept} OR (proposed_contribution_type_id IS NULL)',
+            name='prop_contrib_id_only_accepted',
+        ),
+        db.CheckConstraint(
+            '(proposed_action IN ({}, {})) = (proposed_related_abstract_id IS NOT NULL)'.format(  # noqa: UP032
+                AbstractAction.mark_as_duplicate, AbstractAction.merge
+            ),
+            name='prop_abstract_id_only_duplicate_merge',
+        ),
+        {'schema': 'event_abstracts'},
+    )
 
     id = db.Column(
         db.Integer,
@@ -174,24 +170,28 @@ class AbstractReview(ProposalReviewMixin, RenderModeMixin, db.Model):
     def locator(self):
         return dict(self.abstract.locator, review_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'abstract_id', 'user_id', proposed_action=None)
 
     @property
     def visibility(self):
-        return AbstractCommentVisibility.reviewers
+        return AbstractCommentVisibility.conveners
+
+    @property
+    def scores(self):
+        return {r.question: r.value for r in self.ratings
+                if not r.question.no_score and not r.question.is_deleted and r.value is not None}
 
     @property
     def score(self):
-        ratings = [r for r in self.ratings if not r.question.no_score and not r.question.is_deleted and
-                   r.value is not None]
-        if not ratings:
+        if not (ratings := self.scores):
             return None
-        return sum(x.value for x in ratings) / len(ratings)
+        return sum(x for x in ratings.values()) / len(ratings)
 
     def can_edit(self, user, check_state=False):
         if user is None:
+            return False
+        if self.track is None:
             return False
         if check_state and self.abstract.public_state.name != 'under_review':
             return False
@@ -205,17 +205,18 @@ class AbstractReview(ProposalReviewMixin, RenderModeMixin, db.Model):
         if self.abstract.can_judge(user):
             return True
         else:
-            return self.track.can_convene(user)
+            return self.track.can_convene(user) if self.track else False
 
 
 class AbstractCommentVisibility(RichIntEnum):
-    """Most to least restrictive visibility for abstract comments"""
+    """Most to least restrictive visibility for abstract comments."""
+
     __titles__ = [None,
-                  _("Visible only to judges"),
-                  _("Visible to conveners and judges"),
-                  _("Visible to reviewers, conveners, and judges"),
-                  _("Visible to contributors, reviewers, conveners, and judges"),
-                  _("Visible to all users")]
+                  _('Visible only to judges'),
+                  _('Visible to conveners and judges'),
+                  _('Visible to reviewers, conveners, and judges'),
+                  _('Visible to contributors, reviewers, conveners, and judges'),
+                  _('Visible to all users')]
     judges = 1
     conveners = 2
     reviewers = 3

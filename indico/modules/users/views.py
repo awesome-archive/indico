@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import request
 
@@ -35,23 +24,55 @@ class WPUser(WPJinjaMixin, WPDecorated):
     """
 
     template_prefix = 'users/'
+    ALLOW_JSON = False
 
     def __init__(self, rh, active_menu_item, **kwargs):
         kwargs['active_menu_item'] = active_menu_item
         WPDecorated.__init__(self, rh, **kwargs)
 
-    def _get_breadcrumbs(self):
+    def _get_user_page_title(self):
         if 'user_id' in request.view_args:
             user = User.get(request.view_args['user_id'])
-            profile_breadcrumb = _('Profile of {name}').format(name=user.full_name)
+            return _('Profile of {name}').format(name=user.full_name)
         else:
-            profile_breadcrumb = _('My Profile')
-        return render_breadcrumbs(profile_breadcrumb)
+            return _('My Profile')
 
-    def _getBody(self, params):
-        return self._getPageContent(params)
+    @property
+    def _extra_title_parts(self):
+        return [self._get_user_page_title()]
+
+    def _get_breadcrumbs(self):
+        return render_breadcrumbs(self._get_user_page_title())
+
+    def _get_body(self, params):
+        return self._get_page_content(params)
+
+
+class WPUserDashboard(WPUser):
+    bundles = ('module_users.dashboard.js',)
+
+
+class WPUserProfilePic(WPUser):
+    bundles = ('module_users.profile_picture.js', 'module_users.profile_picture.css')
+
+
+class WPUserPersonalData(WPUser):
+    bundles = ('module_users.personal_data.js', 'module_users.personal_data.css')
+
+
+class WPUserFavorites(WPUser):
+    bundles = ('module_users.favorites.js', 'module_users.favorites.css')
+
+
+class WPUserDataExport(WPUser):
+    bundles = ('module_users.data_export.js', 'module_users.data_export.css')
 
 
 class WPUsersAdmin(WPAdmin):
     template_prefix = 'users/'
     bundles = ('module_users.js',)
+
+
+class WPAffiliationsDashboard(WPAdmin):
+    template_prefix = 'users/'
+    bundles = ('module_users.affiliations_dashboard.js', 'module_users.affiliations_dashboard.css')

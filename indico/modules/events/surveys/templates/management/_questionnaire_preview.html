@@ -18,17 +18,21 @@
                 </div>
                 <div class="i-box-buttons toolbar right hide-if-locked">
                     <div class="group">
-                        <a href="#" data-href="{{ url_for('.edit_section', section) }}"
-                           title="{% trans %}Edit section{% endtrans %}"
-                           class="i-button js-survey-item-dialog icon-edit"
-                           data-title="{% trans %}Edit section{% endtrans %}"></a>
-                        <a href="#" class="i-button js-delete-item icon-remove"
-                           title="{% trans %}Delete section{% endtrans %}"
-                           data-qtip-style="danger"
-                           data-href="{{ url_for('.delete_section', section) }}"
-                           data-method="DELETE"
-                           data-confirm="{% trans %}Are you sure you want to delete this section and all questions inside it?{% endtrans %}"
-                           data-title="{% trans %}Delete section{% endtrans %}"></a>
+                        <button data-href="{{ url_for('.add_section', section, clone=section.id) }}"
+                                title="{% trans %}Clone section{% endtrans %}"
+                                class="i-button js-survey-item-dialog icon-copy"
+                                data-title="{% trans %}Clone section{% endtrans %}"></button>
+                        <button data-href="{{ url_for('.edit_section', section) }}"
+                                title="{% trans %}Edit section{% endtrans %}"
+                                class="i-button js-survey-item-dialog icon-edit"
+                                data-title="{% trans %}Edit section{% endtrans %}"></button>
+                        <button class="i-button js-delete-item icon-remove"
+                                title="{% trans %}Delete section{% endtrans %}"
+                                data-qtip-style="danger"
+                                data-href="{{ url_for('.delete_section', section) }}"
+                                data-method="DELETE"
+                                data-confirm="{% trans %}Are you sure you want to delete this section and all questions inside it?{% endtrans %}"
+                                data-title="{% trans %}Delete section{% endtrans %}"></button>
                     </div>
                     <div class="group">
                         <a href="#" data-href="{{ url_for('.add_text', section) }}"
@@ -36,10 +40,10 @@
                            data-title="{% trans %}Add text item{% endtrans %}">
                             {% trans %}Add text item{% endtrans %}
                         </a>
-                        <a class="i-button arrow js-add-question-dropdown" data-toggle="dropdown">
+                        <button class="i-button arrow js-add-question-dropdown" data-toggle="dropdown">
                             {% trans %}Add question{% endtrans %}
-                        </a>
-                        <ul class="dropdown">
+                        </button>
+                        <ul class="i-dropdown">
                             {% for field_type in field_types.values()|sort(attribute='friendly_name') %}
                                 <li>
                                     <a href="#" data-href="{{ url_for('.add_question', section, type=field_type.name) }}"
@@ -85,7 +89,7 @@
 
 
 {% macro _render_item() %}
-    <div class="ui-sortable-handle hide-if-locked">
+    <div class="js-sort-handle hide-if-locked">
         <div class="handle"></div>
     </div>
     <div class="ui-sortable-content item-row flexrow f-a-center">

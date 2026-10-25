@@ -1,23 +1,15 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 export {default as Preloader} from './Preloader';
 export {default as Slot} from './Slot';
-export {default as Overridable, RouteAwareOverridable, parametrize} from './Overridable';
-export {toClasses} from './html';
+export {toClasses, injectModal} from './html';
 export {default as IndicoPropTypes} from './propTypes';
 export {default as Markdown} from './Markdown';
+export {default as ConditionalRoute} from './ConditionalRoute';
+export {default as Responsive, useResponsive} from './Responsive';
+export {default as AutoLinkerPlugin} from './autolinker';

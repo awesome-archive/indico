@@ -1,48 +1,64 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2019 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-import React, {useState} from 'react';
 import PropTypes from 'prop-types';
+import React, {useState, useEffect} from 'react';
 import {Sticky} from 'semantic-ui-react';
 
 import {ScrollButton} from 'indico/react/components';
+import {useResponsive} from 'indico/react/util';
 
 import './StickyWithScrollBack.module.scss';
 
+const MIN_RESPONSIVE_OFFSET = 200;
 
-export default function StickyWithScrollBack({children, context}) {
-    const [scrollButtonVisible, setScrollButtonVisible] = useState(false);
+export default function StickyWithScrollBack({children, context, responsive}) {
+  const [scrollButtonVisible, setScrollButtonVisible] = useState(false);
+  const [responsiveScrollOffset, setResponsiveScrollOffset] = useState(window.pageYOffset);
 
-    return (
-        <Sticky context={context} styleName="sticky-content"
-                onStick={() => setScrollButtonVisible(true)}
-                onUnstick={() => setScrollButtonVisible(false)}>
-            {children}
-            <ScrollButton visible={scrollButtonVisible} />
-        </Sticky>
-    );
+  const {isPhone, isTablet, isLandscape} = useResponsive();
+  const isResponsiveDevice = responsive && (isPhone || isTablet) && isLandscape;
+
+  useEffect(() => {
+    window.addEventListener('scroll', onScroll, false);
+    return () => window.removeEventListener('scroll', onScroll, false);
+  });
+
+  function onScroll() {
+    setResponsiveScrollOffset(window.pageYOffset);
+  }
+
+  return (
+    <Sticky
+      context={context}
+      styleName="sticky-content"
+      onStick={() => setScrollButtonVisible(true)}
+      onUnstick={() => setScrollButtonVisible(false)}
+      active={!isResponsiveDevice}
+    >
+      {children}
+      <ScrollButton
+        visible={
+          scrollButtonVisible ||
+          (isResponsiveDevice && responsiveScrollOffset > MIN_RESPONSIVE_OFFSET)
+        }
+      />
+    </Sticky>
+  );
 }
 
 StickyWithScrollBack.propTypes = {
-    children: PropTypes.node,
-    context: PropTypes.object,
+  children: PropTypes.node,
+  context: PropTypes.object,
+  responsive: PropTypes.bool,
 };
 
 StickyWithScrollBack.defaultProps = {
-    children: null,
-    context: null,
+  children: null,
+  context: null,
+  responsive: false,
 };

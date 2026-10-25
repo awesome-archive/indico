@@ -1,25 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+import fnmatch
 import json
+import os
 
+from flask import session
+from marshmallow import ValidationError
+from marshmallow.fields import Dict, Enum
+
+from indico.modules.events.papers.file_types import PaperFileType
+from indico.modules.events.papers.models.reviews import PaperAction
 from indico.modules.events.papers.settings import RoleConverter
 from indico.modules.events.papers.settings import paper_reviewing_settings as settings
+from indico.util.marshmallow import FilesField, ModelField
 from indico.web.forms.fields import JSONField
 from indico.web.forms.widgets import JinjaWidget
 
@@ -36,7 +34,7 @@ class PaperEmailSettingsField(JSONField):
         if valuelist:
             self.data = json.loads(valuelist[0])
             data = {}
-            for key, value in self.data.iteritems():
+            for key, value in self.data.items():
                 data[key] = RoleConverter.to_python(value) if isinstance(value, list) else value
             self.data = data
 
@@ -48,3 +46,89 @@ class PaperEmailSettingsField(JSONField):
             'notify_judge_on_review': settings.get(self.event, 'notify_judge_on_review'),
             'notify_author_on_judgment': settings.get(self.event, 'notify_author_on_judgment')
         }
+
+
+class PaperFilesField(Dict):
+    def __init__(self, **kwargs):
+        def _get_query(m, ctx):
+            # can't use self.event here because `self` is different than the one used during deserialization
+            return self._get_file_types_query(ctx['event'])
+
+        keys_field = ModelField(PaperFileType, get_query=_get_query)
+        values_field = FilesField(required=True)
+        super().__init__(keys=keys_field, values=values_field, **kwargs)
+
+    @property
+    def event(self):
+        return self.context['event']
+
+    @property
+    def contribution(self):
+        return self.context['contribution']
+
+    def _get_file_types_query(self, event):
+        return PaperFileType.query.with_parent(event)
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        rv = super()._deserialize(value, attr, data, **kwargs)
+        self.validate_files(rv)
+        return rv
+
+    def validate_files(self, value):
+        required_types = {ft for ft in self._get_file_types_query(self.event) if ft.required}
+
+        # ensure all required file types have files
+        required_missing = required_types - {ft for ft, files in value.items() if files}
+        if required_missing:
+            raise ValidationError('Required file types missing: {}'
+                                  .format(', '.join(ft.name for ft in required_missing)))
+
+        seen = set()
+        for file_type, files in value.items():
+            # ensure single-file types don't have too many files
+            if not file_type.allow_multiple_files and len(files) > 1:
+                raise ValidationError(f'File type "{file_type.name}" allows only one file')
+
+            # ensure all files have allowed extensions
+            valid_extensions = {ext.lower() for ext in file_type.extensions}
+            if valid_extensions:
+                extensions = {os.path.splitext(f.filename)[1].lstrip('.').lower() for f in files}
+                invalid_extensions = extensions - valid_extensions
+                if invalid_extensions:
+                    raise ValidationError('File type "{}" does not allow these extensions: {}'
+                                          .format(file_type.name, ', '.join(invalid_extensions)))
+
+            # ensure all filenames conform to the template
+            if file_type.filename_template:
+                filenames = {os.path.splitext(f.filename)[0] for f in files}
+                filename_template = file_type.filename_template.replace('{code}', self.contribution.code)
+                if not all(fnmatch.fnmatch(filename, filename_template) for filename in filenames):
+                    raise ValidationError(
+                        f"Some files do not conform to the filename template '{file_type.filename_template}'"
+                    )
+
+            # ensure each file is only used in one type
+            duplicates = set(files) & seen
+            if duplicates:
+                raise ValidationError('Files found in multiple types: {}'
+                                      .format(', '.join(str(f.uuid) for f in duplicates)))
+
+            # ensure no duplicate filenames
+            if len({f.filename for f in files}) != len(files):
+                raise ValidationError(f'Duplicate filenames found in file type "{file_type.name}"')
+
+            seen |= set(files)
+
+
+class PaperActionField(Enum):
+    def __init__(self, **kwargs):
+        super().__init__(PaperAction, **kwargs)
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        rv = super()._deserialize(value, attr, data, **kwargs)
+        paper = self.context['paper']
+        if rv == PaperAction.to_be_corrected and not paper.can_ask_corrections(session.user):
+            raise ValidationError(
+                'You cannot ask for corrections, this paper has reached the limited number of revisions'
+            )
+        return rv

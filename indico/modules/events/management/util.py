@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from contextlib import contextmanager
 
@@ -25,11 +14,11 @@ from sqlalchemy.orm import joinedload
 from indico.core.db import db
 from indico.core.db.sqlalchemy.links import LinkType
 from indico.util.i18n import _, ngettext
-from indico.util.struct.iterables import materialize_iterable
+from indico.util.iterables import materialize_iterable
 from indico.web.flask.util import url_for
 
 
-class _ProtectedObjectWrapper(object):
+class _ProtectedObjectWrapper:
     def __init__(self, obj):
         self.object = obj
 
@@ -52,7 +41,7 @@ class _ProtectedObjectWrapper(object):
         elif isinstance(self.object, db.m.Attachment):
             return _('File')
         else:
-            raise TypeError('Unexpected object of type {}: {}'.format(type(self.object).__name__, self.object))
+            raise TypeError(f'Unexpected object of type {type(self.object).__name__}: {self.object}')
 
     @property
     def edit_link_attrs(self):
@@ -73,15 +62,15 @@ class _ProtectedObjectWrapper(object):
                     'data-title': _('Edit attachment "{name}"').format(name=self.object.title),
                     'data-href': url_for('attachments.modify_attachment', self.object)}
         else:
-            raise TypeError('Unexpected object of type {}: {}'.format(type(self.object).__name__, self.object))
+            raise TypeError(f'Unexpected object of type {type(self.object).__name__}: {self.object}')
 
     def __repr__(self):
-        return '<_ProtectedObjectWrapper({})>'.format(self.object)
+        return f'<_ProtectedObjectWrapper({self.object})>'
 
 
 @materialize_iterable(set)
 def get_non_inheriting_objects(root):
-    """Get a set of child objects that do not inherit protection
+    """Get a set of child objects that do not inherit protection.
 
     :param root: An event object (`Event`, `Session`, `Contribution`
                  or `AttachmentFolder`) which may contain objects
@@ -176,19 +165,19 @@ def get_non_inheriting_objects(root):
                 yield _ProtectedObjectWrapper(attachment)
 
     else:
-        raise TypeError('Unexpected object of type {}: {}'.format(type(root).__name__, root))
+        raise TypeError(f'Unexpected object of type {type(root).__name__}: {root}')
 
 
 @contextmanager
 def flash_if_unregistered(event, get_person_links):
-    """Flash message when adding users with no indico account
+    """Flash message when adding users with no Indico account.
 
     :param event: Current event
     :param get_person_links: Callable returning list of person links to
                              check
     """
     old_non_users = {pl for pl in get_person_links() if pl.person.user is None}
-    yield
+    yield  # noqa: RUF075
     new_non_users = {pl for pl in get_person_links() if pl.person.user is None}
     added_non_users = len(new_non_users - old_non_users)
     if not added_non_users:

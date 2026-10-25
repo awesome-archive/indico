@@ -1,45 +1,43 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import redirect, request
 
 from indico.modules.categories.compat import compat_category
 from indico.modules.categories.controllers.admin import RHManageUpcomingEvents
-from indico.modules.categories.controllers.display import (RHCategoryCalendarView, RHCategoryIcon, RHCategoryInfo,
-                                                           RHCategoryLogo, RHCategoryOverview, RHCategorySearch,
-                                                           RHCategoryStatistics, RHCategoryUpcomingEvent,
+from indico.modules.categories.controllers.display import (RHCategoryCalendarView, RHCategoryCalendarViewEvents,
+                                                           RHCategoryClosestEvent, RHCategoryIcon, RHCategoryInfo,
+                                                           RHCategoryLogo, RHCategoryManagedEventSearch,
+                                                           RHCategoryOverview, RHCategoryPreviousEvent,
+                                                           RHCategorySearch, RHCategoryStatistics,
+                                                           RHCategoryStatisticsJSON, RHCategoryUpcomingEvent,
                                                            RHDisplayCategory, RHEventList, RHExportCategoryAtom,
                                                            RHExportCategoryICAL, RHReachableCategoriesInfo,
                                                            RHShowFutureEventsInCategory, RHShowPastEventsInCategory,
-                                                           RHSubcatInfo, RHXMLExportCategoryInfo)
-from indico.modules.categories.controllers.management import (RHCreateCategory, RHDeleteCategory, RHDeleteEvents,
-                                                              RHDeleteSubcategories, RHManageCategoryContent,
-                                                              RHManageCategoryIcon, RHManageCategoryLogo,
+                                                           RHSubcatInfo)
+from indico.modules.categories.controllers.management import (RHAddCategoryRole, RHAddCategoryRoleMembers,
+                                                              RHAPIEventMoveRequests, RHCategoryRoleMembersExportCSV,
+                                                              RHCategoryRoleMembersImportCSV, RHCategoryRoles,
+                                                              RHCategoryRolesAPI, RHCreateCategory, RHDeleteCategory,
+                                                              RHDeleteCategoryRole, RHDeleteEvents,
+                                                              RHDeleteSubcategories, RHEditCategoryRole,
+                                                              RHManageCategoryContent, RHManageCategoryIcon,
+                                                              RHManageCategoryLogo, RHManageCategoryModeration,
                                                               RHManageCategoryProtection, RHManageCategorySettings,
                                                               RHMoveCategory, RHMoveEvents, RHMoveSubcategories,
-                                                              RHSortSubcategories, RHSplitCategory)
+                                                              RHRemoveCategoryRoleMember, RHSortSubcategories,
+                                                              RHSplitCategory)
 from indico.modules.users import User
 from indico.web.flask.util import make_compat_redirect_func, redirect_view, url_for
 from indico.web.flask.wrappers import IndicoBlueprint
 
 
 def _redirect_event_creation(category_id, event_type):
-    anchor = 'create-event:{}:{}'.format(event_type, category_id)
+    anchor = f'create-event:{event_type}:{category_id}'
     return redirect(url_for('.display', category_id=category_id, _anchor=anchor))
 
 
@@ -54,6 +52,21 @@ _bp.add_url_rule('/manage/logo', 'manage_logo', RHManageCategoryLogo, methods=('
 _bp.add_url_rule('/manage/move', 'move', RHMoveCategory, methods=('POST',))
 _bp.add_url_rule('/manage/protection', 'manage_protection', RHManageCategoryProtection, methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/settings', 'manage_settings', RHManageCategorySettings, methods=('POST', 'GET'))
+_bp.add_url_rule('/manage/moderation', 'manage_moderation', RHManageCategoryModeration)
+
+# Role management
+_bp.add_url_rule('/manage/roles', 'manage_roles', RHCategoryRoles, methods=('POST', 'GET'))
+_bp.add_url_rule('/manage/roles/create', 'add_role', RHAddCategoryRole, methods=('GET', 'POST'))
+_bp.add_url_rule('/manage/roles/<int:role_id>/edit', 'edit_role', RHEditCategoryRole, methods=('GET', 'POST'))
+_bp.add_url_rule('/manage/roles/<int:role_id>', 'delete_role', RHDeleteCategoryRole, methods=('DELETE',))
+_bp.add_url_rule('/manage/roles/<int:role_id>/members', 'add_role_members', RHAddCategoryRoleMembers, methods=('POST',))
+_bp.add_url_rule('/manage/roles/<int:role_id>/members/<int:user_id>', 'remove_role_member', RHRemoveCategoryRoleMember,
+                 methods=('DELETE',))
+_bp.add_url_rule('/manage/roles/<int:role_id>/members/import', 'add_members_import_csv',
+                 RHCategoryRoleMembersImportCSV, methods=('GET', 'POST'))
+_bp.add_url_rule('/manage/roles/<int:role_id>/members.csv', 'members_export_csv', RHCategoryRoleMembersExportCSV)
+_bp.add_url_rule('/manage/roles/api/roles/', 'api_roles', RHCategoryRolesAPI)
+
 
 # Event management
 _bp.add_url_rule('/manage/events/delete', 'delete_events', RHDeleteEvents, methods=('GET', 'POST'))
@@ -81,15 +94,16 @@ _bp.add_url_rule('/overview', 'overview', RHCategoryOverview)
 _bp.add_url_rule('/show-future-events', 'show_future_events', RHShowFutureEventsInCategory, methods=('DELETE', 'PUT'))
 _bp.add_url_rule('/show-past-events', 'show_past_events', RHShowPastEventsInCategory, methods=('DELETE', 'PUT'))
 _bp.add_url_rule('/statistics', 'statistics', RHCategoryStatistics)
+_bp.add_url_rule('/statistics.json', 'statistics_json', RHCategoryStatisticsJSON)
 _bp.add_url_rule('/subcat-info', 'subcat_info', RHSubcatInfo)
 _bp.add_url_rule('/calendar', 'calendar', RHCategoryCalendarView)
+_bp.add_url_rule('/calendar/events', 'calendar_events', RHCategoryCalendarViewEvents)
+_bp.add_url_rule('/previous', 'previous_event', RHCategoryPreviousEvent)
 _bp.add_url_rule('/upcoming', 'upcoming_event', RHCategoryUpcomingEvent)
+_bp.add_url_rule('/closest', 'closest_event', RHCategoryClosestEvent)
 
 # Event creation - redirect to anchor page opening the dialog
 _bp.add_url_rule('/create/event/<any(lecture,meeting,conference):event_type>', view_func=_redirect_event_creation)
-
-# TODO: remember to refactor it at some point
-_bp.add_url_rule('!/xmlGateway.py/getCategoryInfo', 'category_xml_info', RHXMLExportCategoryInfo)
 
 # Short URLs
 _bp.add_url_rule('!/categ/<int:category_id>', view_func=redirect_view('.display'), strict_slashes=False)
@@ -97,6 +111,8 @@ _bp.add_url_rule('!/c/<int:category_id>', view_func=redirect_view('.display'), s
 
 # Internal API
 _bp.add_url_rule('!/category/search', 'search', RHCategorySearch)
+_bp.add_url_rule('/api/event-move-requests', 'api_event_move_requests', RHAPIEventMoveRequests, methods=('GET', 'POST'))
+_bp.add_url_rule('/api/events/search-for-series', 'event_search', RHCategoryManagedEventSearch)
 
 # Administration
 _bp.add_url_rule('!/admin/upcoming-events', 'manage_upcoming', RHManageUpcomingEvents, methods=('GET', 'POST'))

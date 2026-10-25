@@ -1,26 +1,15 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from collections import defaultdict
 from enum import Enum
 
 from flask import g, has_request_context
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.principals import PrincipalMixin, PrincipalType
@@ -33,8 +22,8 @@ def _coerce_value(value):
     return value
 
 
-class SettingsBase(object):
-    """Base class for any kind of setting tables"""
+class SettingsBase:
+    """Base class for any kind of setting tables."""
 
     id = db.Column(
         db.Integer,
@@ -61,13 +50,16 @@ class SettingsBase(object):
     def delete(cls, module, *names, **kwargs):
         if not names:
             return
-        cls.find(cls.name.in_(names), cls.module == module, **kwargs).delete(synchronize_session='fetch')
+        (cls.query
+         .filter(cls.name.in_(names), cls.module == module)
+         .filter_by(**kwargs)
+         .delete(synchronize_session='fetch'))
         db.session.flush()
         cls._clear_cache()
 
     @classmethod
     def delete_all(cls, module, **kwargs):
-        cls.find(module=module, **kwargs).delete()
+        cls.query.filter_by(module=module, **kwargs).delete()
         db.session.flush()
         cls._clear_cache()
 
@@ -76,12 +68,12 @@ class SettingsBase(object):
         if not has_request_context():
             # disable the cache by always returning an empty one
             return defaultdict(dict), False
-        key = (cls, frozenset(kwargs.viewitems()))
+        key = (cls, frozenset(kwargs.items()))
         try:
             return g.global_settings_cache[key], True
         except AttributeError:
             # no cache at all
-            g.global_settings_cache = cache = dict()
+            g.global_settings_cache = cache = {}
             cache[key] = rv = defaultdict(dict)
             return rv, False
         except KeyError:
@@ -95,22 +87,22 @@ class SettingsBase(object):
 
 
 class JSONSettingsBase(SettingsBase):
-    """Base class for setting tables with a JSON value"""
+    """Base class for setting tables with a JSON value."""
 
     __tablename__ = 'settings'
 
     value = db.Column(
-        JSON,
+        JSONB,
         nullable=False
     )
 
     @classmethod
     def get_setting(cls, module, name, **kwargs):
-        return cls.find_first(module=module, name=name, **kwargs)
+        return cls.query.filter_by(module=module, name=name, **kwargs).first()
 
     @classmethod
     def get_all_settings(cls, module, **kwargs):
-        return {s.name: s for s in cls.find(module=module, **kwargs)}
+        return {s.name: s for s in cls.query.filter_by(module=module, **kwargs)}
 
     @classmethod
     def get_all(cls, module, **kwargs):
@@ -118,7 +110,7 @@ class JSONSettingsBase(SettingsBase):
         if hit:
             return cache[module]
         else:
-            for s in cls.find(**kwargs):
+            for s in cls.query.filter_by(**kwargs):
                 cache[s.module][s.name] = s.value
             return cache[module]
 
@@ -142,17 +134,17 @@ class JSONSettingsBase(SettingsBase):
     @classmethod
     def set_multi(cls, module, items, **kwargs):
         existing = cls.get_all_settings(module, **kwargs)
-        for name in items.viewkeys() - existing.viewkeys():
+        for name in items.keys() - existing.keys():
             setting = cls(module=module, name=name, value=_coerce_value(items[name]), **kwargs)
             db.session.add(setting)
-        for name in items.viewkeys() & existing.viewkeys():
+        for name in items.keys() & existing.keys():
             existing[name].value = _coerce_value(items[name])
         db.session.flush()
         cls._clear_cache()
 
 
 class PrincipalSettingsBase(PrincipalMixin, SettingsBase):
-    """Base class for principal setting tables"""
+    """Base class for principal setting tables."""
 
     __tablename__ = 'settings_principals'
     # Additional columns used to identitfy a setting (e.g. user/event id)
@@ -161,18 +153,18 @@ class PrincipalSettingsBase(PrincipalMixin, SettingsBase):
     @strict_classproperty
     @classmethod
     def unique_columns(cls):
-        return ('module', 'name') + cls.extra_key_cols
+        return ('module', 'name', *cls.extra_key_cols)
 
     @classmethod
     def get_all_acls(cls, module, **kwargs):
         rv = defaultdict(set)
-        for setting in cls.find(module=module, **kwargs):
+        for setting in cls.query.filter_by(module=module, **kwargs):
             rv[setting.name].add(setting.principal)
         return rv
 
     @classmethod
     def get_acl(cls, module, name, raw=False, **kwargs):
-        return {x if raw else x.principal for x in cls.find(module=module, name=name, **kwargs)}
+        return {x if raw else x.principal for x in cls.query.filter_by(module=module, name=name, **kwargs)}
 
     @classmethod
     def set_acl(cls, module, name, acl, **kwargs):
@@ -187,7 +179,7 @@ class PrincipalSettingsBase(PrincipalMixin, SettingsBase):
 
     @classmethod
     def set_acl_multi(cls, module, items, **kwargs):
-        for name, acl in items.iteritems():
+        for name, acl in items.items():
             cls.set_acl(module, name, acl, **kwargs)
 
     @classmethod
@@ -206,8 +198,8 @@ class PrincipalSettingsBase(PrincipalMixin, SettingsBase):
     @classmethod
     def merge_users(cls, module, target, source):
         settings = [(setting.module, setting.name, {x: getattr(setting, x) for x in cls.extra_key_cols})
-                    for setting in cls.find(module=module, type=PrincipalType.user, user=source)]
-        for module, name, extra in settings:
-            cls.remove_principal(module, name, source, **extra)
-            cls.add_principal(module, name, target, **extra)
+                    for setting in cls.query.filter_by(module=module, type=PrincipalType.user, user=source)]
+        for mod, name, extra in settings:
+            cls.remove_principal(mod, name, source, **extra)
+            cls.add_principal(mod, name, target, **extra)
         db.session.flush()

@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from operator import itemgetter
 
@@ -36,7 +27,7 @@ SPECIAL_FILTERS = {
 
 def make_query(model):
     return (model.query
-            .filter(model.md5 == '', model.storage_file_id.isnot(None))
+            .filter(model.md5 == '', model.storage_file_id.isnot(None))  # noqa: PLC1901
             .filter_by(**SPECIAL_FILTERS.get(model, {}))
             .options(lazyload('*'), load_only('storage_backend', 'storage_file_id', 'md5')))
 
@@ -57,11 +48,11 @@ def query_chunked(model, chunk_size):
 
 def main():
     models = {model: make_query(model).count() for model in StoredFileMixin.__subclasses__()}
-    models = {model: total for model, total in models.iteritems() if total}
+    models = {model: total for model, total in models.items() if total}
     labels = {model: cformat('Processing %{blue!}{}%{reset} (%{cyan}{}%{reset} rows)').format(model.__name__, total)
-              for model, total in models.iteritems()}
-    max_length = max(len(x) for x in labels.itervalues())
-    labels = {model: label.ljust(max_length) for model, label in labels.iteritems()}
+              for model, total in models.items()}
+    max_length = max(len(x) for x in labels.values())
+    labels = {model: label.ljust(max_length) for model, label in labels.items()}
     for model, total in sorted(models.items(), key=itemgetter(1)):
         with click.progressbar(query_chunked(model, 100), length=total, label=labels[model],
                                show_percent=True, show_pos=True) as objects:

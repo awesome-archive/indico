@@ -1,36 +1,26 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import json
+from enum import Enum
 
 from wtforms.fields import BooleanField, RadioField
 from wtforms.validators import Length, NumberRange
 from wtforms.widgets.core import HiddenInput, Input, Select, TextArea
 
-from indico.util.struct.enum import RichEnum
 from indico.web.forms.fields import (IndicoEnumRadioField, IndicoQuerySelectMultipleCheckboxField,
                                      IndicoSelectMultipleCheckboxField)
-from indico.web.forms.validators import ConfirmPassword, HiddenUnless, IndicoRegexp, SoftLength, WordCount
-from indico.web.forms.widgets import SelectizeWidget, TypeaheadWidget
+from indico.web.forms.validators import (ConfirmPassword, HiddenUnless, IndicoRegexp, SecurePassword, SoftLength,
+                                         WordCount)
+from indico.web.forms.widgets import DropdownWidget, TypeaheadWidget
 
 
 def is_single_line_field(field):
-    if isinstance(field.widget, (SelectizeWidget, TypeaheadWidget)):
+    if isinstance(field.widget, (DropdownWidget, TypeaheadWidget)):
         return True
     if isinstance(field.widget, Select):
         return not field.widget.multiple
@@ -60,6 +50,8 @@ def _attrs_for_validators(field, validators):
                 attrs['minlength'] = validator.min
             if validator.max >= 0:
                 attrs['maxlength'] = validator.max
+        elif isinstance(validator, SecurePassword):
+            attrs['minlength'] = validator.minlength
         elif isinstance(validator, IndicoRegexp) and validator.client_side:
             attrs['pattern'] = validator.regex.pattern
         elif isinstance(validator, NumberRange):
@@ -77,7 +69,7 @@ def _attrs_for_validators(field, validators):
                 val = []
             elif not isinstance(val, (set, list, tuple)):
                 val = [val]
-            values = [(v.name if isinstance(v, RichEnum) else v) for v in val]
+            values = [(v.name if isinstance(v, Enum) else v) for v in val]
 
             attrs['data-hidden-unless'] = json.dumps({'field': condition_field.name,
                                                       'values': values,
@@ -86,12 +78,12 @@ def _attrs_for_validators(field, validators):
 
 
 def render_field(field, widget_attrs, disabled=None):
-    """Renders a WTForms field, taking into account validators"""
+    """Render a WTForms field, taking into account validators."""
     if not widget_attrs.get('placeholder'):
         widget_attrs = dict(widget_attrs)
         widget_attrs.pop('placeholder', None)
     args = _attrs_for_validators(field, field.validators)
-    args['required'] = (field.flags.required and not field.flags.conditional and
+    args['required'] = (bool(field.flags.required) and not field.flags.conditional and
                         not isinstance(field, (IndicoSelectMultipleCheckboxField,
                                                IndicoQuerySelectMultipleCheckboxField)))
     args.update(widget_attrs)
@@ -101,7 +93,7 @@ def render_field(field, widget_attrs, disabled=None):
 
 
 def iter_form_fields(form, fields=None, skip=None, hidden_fields=False):
-    """Iterates over the fields in a WTForm
+    """Iterate over the fields in a WTForm.
 
     :param fields: If specified only fields that are in this list are
                    yielded. This also overrides the field order.
@@ -121,5 +113,4 @@ def iter_form_fields(form, fields=None, skip=None, hidden_fields=False):
         field_iter = (field for field in field_iter if field.short_name not in skip)
     if hidden_fields is not None:
         field_iter = (field for field in field_iter if isinstance(field.widget, HiddenInput) == hidden_fields)
-    for field in field_iter:
-        yield field
+    yield from field_iter

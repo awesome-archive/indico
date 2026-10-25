@@ -2,6 +2,7 @@
 
 {% from 'events/display/common/_conferences.html' import render_attachments %}
 {% from 'events/display/indico/_common.html' import render_location, render_speakers %}
+{% from 'events/timetable/display/indico/_common.html' import render_references, render_description %}
 
 {% block page_class %}conference-page item-summary{% endblock %}
 
@@ -16,7 +17,7 @@
 {%- endblock %}
 
 {% block description %}
-    <div class="time-data">
+    <div class="generic-data">
         <i class="icon-time header-data"></i>
         <span class="time-info">
             {% if subcontrib.timetable_entry -%}
@@ -30,19 +31,43 @@
 
 {% block page_actions -%}
     <div class="toolbar">
-        {% if subcontrib.can_manage(session.user) -%}
-            <a href="#" class="i-button icon-edit"
-               data-title="{% trans title=subcontrib.title %}Edit subcontribution '{{ title }}'{% endtrans %}"
-               data-href="{{ url_for('.manage_edit_subcontrib', subcontrib) }}"
-               data-ajax-dialog
-               data-reload-after></a>
+        {% if subcontrib.can_edit(session.user) -%}
+            <button class="i-button icon-edit"
+                    data-title="{% trans title=subcontrib.title %}Edit subcontribution '{{ title }}'{% endtrans %}"
+                    title="{% trans %}Edit subcontribution{% endtrans %}"
+                    data-href="{{ url_for('.manage_edit_subcontrib', subcontrib, standalone=true) }}"
+                    data-ajax-dialog
+                    data-reload-after></button>
         {%- endif %}
     </div>
 {%- endblock %}
 
 {% block content -%}
+    {% if subcontrib.description %}
+        <section>
+            <div class="header">
+                <div class="header-row">
+                    <h3>{% trans %}Description{% endtrans %}</h3>
+                </div>
+            </div>
+            <div class="description js-mathjax">
+                {{ render_description(subcontrib) }}
+            </div>
+        </section>
+    {% endif %}
     {{ render_speakers(subcontrib) }}
     {{ render_attachments(subcontrib) }}
+
+    {% if subcontrib.references -%}
+        <section>
+            <div class="header">
+                <div class="header-row">
+                    <h3>{% trans %}External references{% endtrans %}</h3>
+                </div>
+            </div>
+            {{ render_references(subcontrib, 'reference-list-conference') }}
+        </section>
+    {%- endif %}
 
     <script>
         setupAttachmentTreeView();

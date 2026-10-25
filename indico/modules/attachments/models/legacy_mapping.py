@@ -1,29 +1,18 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.ext.declarative import declared_attr
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.util.models import auto_table_args
-from indico.util.string import return_ascii
+from indico.util.string import format_repr
 
 
-class _LegacyLinkMixin(object):
+class _LegacyLinkMixin:
     events_backref_name = None
 
     @declared_attr
@@ -69,14 +58,14 @@ class _LegacyLinkMixin(object):
 
     @property
     def link_repr(self):
-        """A kwargs-style string suitable for the object's repr"""
+        """A kwargs-style string suitable for the object's repr."""
         _all_columns = {'event_id', 'contribution_id', 'subcontribution_id', 'session_id'}
         info = [(key, getattr(self, key)) for key in _all_columns if getattr(self, key) is not None]
-        return ', '.join('{}={}'.format(key, value) for key, value in info)
+        return ', '.join(f'{key}={value}' for key, value in info)
 
 
 class LegacyAttachmentFolderMapping(_LegacyLinkMixin, db.Model):
-    """Legacy attachmentfolder id mapping
+    """Legacy attachmentfolder id mapping.
 
     Legacy folders ("materials") had ids unique only within their
     linked object.  This table maps those ids for a specific object
@@ -106,15 +95,12 @@ class LegacyAttachmentFolderMapping(_LegacyLinkMixin, db.Model):
         backref=db.backref('legacy_mapping', uselist=False, lazy=True)
     )
 
-    @return_ascii
     def __repr__(self):
-        return '<LegacyAttachmentFolderMapping({}, material_id={}, {})>'.format(
-            self.folder, self.material_id, self.link_repr
-        )
+        return format_repr(self, 'material_id', 'folder_id', _rawtext=self.link_repr)
 
 
 class LegacyAttachmentMapping(_LegacyLinkMixin, db.Model):
-    """Legacy attachment id mapping
+    """Legacy attachment id mapping.
 
     Legacy attachments ("resources") had ids unique only within their
     folder and its linked object.  This table maps those ids for a
@@ -148,8 +134,5 @@ class LegacyAttachmentMapping(_LegacyLinkMixin, db.Model):
         backref=db.backref('legacy_mapping', uselist=False, lazy=True)
     )
 
-    @return_ascii
     def __repr__(self):
-        return '<LegacyAttachmentMapping({}, material_id={}, resource_id={}, {})>'.format(
-            self.attachment, self.material_id, self.resource_id, self.link_repr
-        )
+        return format_repr(self, 'material_id', 'resource_id', 'attachment_id', _rawtext=self.link_repr)

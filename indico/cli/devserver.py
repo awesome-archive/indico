@@ -1,33 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
+import traceback
+from threading import Lock, Thread
+from urllib.parse import urlsplit
 
-from flask.cli import DispatchingApp
-from werkzeug.contrib.fixers import ProxyFix
+import click
 from werkzeug.debug import DebuggedApplication
 from werkzeug.exceptions import NotFound
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import WSGIRequestHandler, run_simple
-from werkzeug.urls import url_parse
-from werkzeug.wsgi import DispatcherMiddleware
 
 
-def run_cmd(info, host, port, url, ssl, ssl_key, ssl_cert, quiet, proxy, enable_evalex, evalex_from, reloader_type):
+def run_cmd(info, **kwargs):
+    if kwargs.pop('reloader_type') == 'watchfiles':
+        run_watchfiles()
+        return
+
+    run_server(info, **kwargs)
+
+
+def run_watchfiles():
+    from .watchfiles import Watchfiles
+    Watchfiles().run()
+
+
+def run_server(info, host, port, url, ssl, ssl_key, ssl_cert, quiet, proxy, enable_evalex, evalex_from):
     if port is None:
         port = 8443 if ssl else 8000
 
@@ -47,23 +51,24 @@ def run_cmd(info, host, port, url, ssl, ssl_key, ssl_cert, quiet, proxy, enable_
 
     if not url:
         proto = 'https' if ssl else 'http'
-        url_host = '[{}]'.format(host) if ':' in host else host
+        url_host = f'[{host}]' if ':' in host else host
         if (port == 80 and not ssl) or (port == 443 and ssl):
-            url = '{}://{}'.format(proto, url_host)
+            url = f'{proto}://{url_host}'
         else:
-            url = '{}://{}:{}'.format(proto, url_host, port)
+            url = f'{proto}://{url_host}:{port}'
 
+    os.environ['INDICO_DEV_SERVER'] = '1'
     os.environ.pop('FLASK_DEBUG', None)
     os.environ['INDICO_CONF_OVERRIDE'] = repr({
         'BASE_URL': url,
     })
 
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
-        print ' * Serving Indico on {}'.format(url)
+        print(f' * Serving Indico on {url}')
         if evalex_whitelist:
-            print ' * Werkzeug debugger console on {}/console'.format(url)
-            if evalex_whitelist is True:  # noqa
-                print ' * Werkzeug debugger console is available to all clients!'
+            print(f' * Werkzeug debugger console on {url}/console')
+            if evalex_whitelist is True:
+                print(' * Werkzeug debugger console is available to all clients!')
 
     try:
         from indico.core.config import get_config_path
@@ -81,7 +86,7 @@ def run_cmd(info, host, port, url, ssl, ssl_key, ssl_cert, quiet, proxy, enable_
 
     app = _make_wsgi_app(info, url, evalex_whitelist, proxy)
     run_simple(host, port, app,
-               reloader_type=reloader_type, use_reloader=(reloader_type != 'none'),
+               reloader_type='none', use_reloader=False,
                use_debugger=False, use_evalex=False, threaded=True, ssl_context=ssl_ctx,
                extra_files=extra_files, request_handler=QuietWSGIRequestHandler if quiet else None)
 
@@ -104,12 +109,13 @@ def _make_wsgi_app(info, url, evalex_whitelist, proxy):
         _reset_state()
         return info.load_app()
 
-    url_data = url_parse(url)
+    url_data = urlsplit(url)
     app = DispatchingApp(_load_app)
     app = DebuggedIndico(app, evalex_whitelist)
+    app.trusted_hosts = [url_data.netloc]
     app = _make_indico_dispatcher(app, url_data.path)
     if proxy:
-        app = ProxyFix(app)
+        app = ProxyFix(app, x_for=1, x_proto=1, x_host=1)
     QuietWSGIRequestHandler.INDICO_URL_PREFIX = url_data.path.rstrip('/')
     return app
 
@@ -125,17 +131,82 @@ def _make_indico_dispatcher(wsgi_app, path):
         })
 
 
+# Taken from Flask - it was removed, but we want to keep the initial-lazy-loading
+# behavior to ensure fast startup e.g. after a reload from a file change watcher
+class DispatchingApp:
+    """
+    Special application that dispatches to a Flask application which
+    is imported by name in a background thread.  If an error happens
+    it is recorded and shown as part of the WSGI handling which in case
+    of the Werkzeug debugger means that it shows up in the browser.
+    """
+
+    def __init__(self, loader):
+        self.loader = loader
+        self._app = None
+        self._lock = Lock()
+        self._bg_loading_exc = None
+        self._load_in_background()
+
+    def _load_in_background(self):
+        # Store the Click context and push it in the loader thread so
+        # script_info is still available.
+        ctx = click.get_current_context(silent=True)
+
+        def _load_app():
+            __traceback_hide__ = True  # noqa: F841
+
+            with self._lock:
+                if ctx is not None:
+                    click.globals.push_context(ctx)
+
+                try:
+                    self._load_unlocked()
+                except Exception as e:
+                    traceback.print_exc()
+                    self._bg_loading_exc = e
+
+        t = Thread(target=_load_app, args=())
+        t.start()
+
+    def _flush_bg_loading_exception(self):
+        __traceback_hide__ = True  # noqa: F841
+        exc = self._bg_loading_exc
+
+        if exc is not None:
+            self._bg_loading_exc = None
+            raise exc
+
+    def _load_unlocked(self):
+        __traceback_hide__ = True  # noqa: F841
+        self._app = rv = self.loader()
+        self._bg_loading_exc = None
+        return rv
+
+    def __call__(self, environ, start_response):
+        __traceback_hide__ = True  # noqa: F841
+        if self._app is not None:
+            return self._app(environ, start_response)
+        self._flush_bg_loading_exception()
+        with self._lock:
+            if self._app is not None:
+                rv = self._app
+            else:
+                rv = self._load_unlocked()
+            return rv(environ, start_response)
+
+
 class DebuggedIndico(DebuggedApplication):
     def __init__(self, *args, **kwargs):
         self._evalex_whitelist = None
         self._request_ip = None
-        super(DebuggedIndico, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     @property
     def evalex(self):
         if not self._evalex_whitelist:
             return False
-        elif self._evalex_whitelist is True:  # noqa
+        elif self._evalex_whitelist is True:
             return True
         else:
             return self._request_ip in self._evalex_whitelist
@@ -145,11 +216,9 @@ class DebuggedIndico(DebuggedApplication):
         self._evalex_whitelist = value
 
     def __call__(self, environ, start_response):
-        self._request_ip = environ['REMOTE_ADDR']
-        if self._request_ip.startswith('::ffff:'):
-            # convert ipv6-style ipv4 to the regular ipv4 notation
-            self._request_ip = self._request_ip[7:]
-        return super(DebuggedIndico, self).__call__(environ, start_response)
+        # convert ipv6-style ipv4 to the regular ipv4 notation
+        self._request_ip = environ['REMOTE_ADDR'].removeprefix('::ffff:')
+        return super().__call__(environ, start_response)
 
 
 class QuietWSGIRequestHandler(WSGIRequestHandler):
@@ -158,8 +227,8 @@ class QuietWSGIRequestHandler(WSGIRequestHandler):
 
     def log_request(self, code='-', size='-'):
         if code not in (304, 200):
-            super(QuietWSGIRequestHandler, self).log_request(code, size)
+            super().log_request(code, size)
         elif '?__debugger__=yes&cmd=resource' in self.path:
             pass  # don't log debugger resources, they are quite uninteresting
         elif not any(self.path.startswith(self.INDICO_URL_PREFIX + x) for x in self.IGNORED_PATH_PREFIXES):
-            super(QuietWSGIRequestHandler, self).log_request(code, size)
+            super().log_request(code, size)

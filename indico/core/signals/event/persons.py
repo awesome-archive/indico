@@ -1,24 +1,28 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.signals.event import _signals
 
 
-person_updated = _signals.signal('person-updated', """
+person_updated = _signals.signal('person-updated', '''
 Called when an EventPerson is modified. The *sender* is the EventPerson.
-""")
+''')
+
+person_link_field_extra_params = _signals.signal('person-link-field-extra-params', '''
+The signal should return a dict containing extra parameters that will be passed to
+the PersonLinkFields. The *sender* is the field.
+
+The parameter `disable_affiliations` can be used to disable the affiliations
+field in the person details modal.
+
+All parameters are camelized and passed to the `personListItemActions` and
+`personLinkFieldModals` React hooks.
+''')
+
+person_required_fields = _signals.signal('person-required-fields', '''
+Get a set of fields that are required for a person. The *sender* is the form.
+''')

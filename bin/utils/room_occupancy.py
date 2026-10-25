@@ -1,27 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import date
 
 import click
 from dateutil.relativedelta import relativedelta
 
-from indico.modules.rb.models.rooms import Room
 from indico.modules.rb.models.locations import Location
+from indico.modules.rb.models.rooms import Room
 from indico.modules.rb.statistics import calculate_rooms_occupancy
+from indico.util.string import natural_sort_key
 from indico.web.flask.app import make_app
 
 
@@ -30,21 +22,21 @@ def _main(location):
     past_month = yesterday - relativedelta(days=29)
     past_year = yesterday - relativedelta(years=1)
 
-    if not location:
-        rooms = Room.find_all()
-    else:
-        rooms = Room.find_all(Location.name.in_(location), _join=Location)
+    query = Room.query
+    if location:
+        query = query.join(Location).filter(Location.name.in_(location))
+    rooms = sorted(query, key=lambda r: natural_sort_key(r.location_name + r.full_name))
 
-    print 'Month\tYear\tPublic?\tRoom'
+    print('Month\tYear\tPublic?\tRoom')
     for room in rooms:
-        print '{2:.2f}%\t{3:.2f}%\t{1}\t{0}'.format(room.full_name,
-                                                    "Y" if room.is_public else "N",
-                                                    calculate_rooms_occupancy([room], past_month, yesterday) * 100,
-                                                    calculate_rooms_occupancy([room], past_year, yesterday) * 100)
+        print('{:.2f}%\t{:.2f}%\t{}\t{}'.format(calculate_rooms_occupancy([room], past_month, yesterday) * 100,
+                                                calculate_rooms_occupancy([room], past_year, yesterday) * 100,
+                                                'Y' if room.is_public else 'N',
+                                                room.full_name))
 
 
 @click.command()
-@click.option('--location', '-l', multiple=True, help="Filter by given location")
+@click.option('--location', '-l', multiple=True, help='Filter by given location')
 def main(location):
     with make_app().app_context():
         _main(location)

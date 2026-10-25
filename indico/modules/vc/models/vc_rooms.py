@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from functools import partial
 from itertools import chain
@@ -23,18 +12,21 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.event import listen
 from sqlalchemy.ext.hybrid import Comparator, hybrid_property
 
+from indico.core import signals
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
 from indico.core.db.sqlalchemy.custom.utcdatetime import UTCDateTime
 from indico.core.logger import Logger
+from indico.modules.events.models.events import Event
+from indico.modules.users.models.users import User
 from indico.modules.vc.notifications import notify_deleted
 from indico.util.caching import memoize_request
 from indico.util.date_time import now_utc
-from indico.util.string import return_ascii
-from indico.util.struct.enum import IndicoEnum
+from indico.util.enum import IndicoIntEnum
+from indico.util.string import format_repr
 
 
-class VCRoomLinkType(int, IndicoEnum):
+class VCRoomLinkType(IndicoIntEnum):
     event = 1
     contribution = 2
     block = 3
@@ -48,17 +40,17 @@ _columns_for_types = {
 
 
 def _make_checks():
-    available_columns = set(chain.from_iterable(cols for type_, cols in _columns_for_types.iteritems()))
+    available_columns = set(chain.from_iterable(cols for cols in _columns_for_types.values()))
     for link_type in VCRoomLinkType:
         required_cols = available_columns & _columns_for_types[link_type]
         forbidden_cols = available_columns - required_cols
-        criteria = ['{} IS NULL'.format(col) for col in sorted(forbidden_cols)]
-        criteria += ['{} IS NOT NULL'.format(col) for col in sorted(required_cols)]
+        criteria = [f'{col} IS NULL' for col in sorted(forbidden_cols)]
+        criteria += [f'{col} IS NOT NULL' for col in sorted(required_cols)]
         condition = 'link_type != {} OR ({})'.format(link_type, ' AND '.join(criteria))
-        yield db.CheckConstraint(condition, 'valid_{}_link'.format(link_type.name))
+        yield db.CheckConstraint(condition, f'valid_{link_type.name}_link')
 
 
-class VCRoomStatus(int, IndicoEnum):
+class VCRoomStatus(IndicoIntEnum):
     created = 1
     deleted = 2
 
@@ -134,15 +126,35 @@ class VCRoom(db.Model):
     def locator(self):
         return {'vc_room_id': self.id, 'service': self.type}
 
-    @return_ascii
     def __repr__(self):
-        return '<VCRoom({}, {}, {})>'.format(self.id, self.name, self.type)
+        return f'<VCRoom({self.id}, {self.name}, {self.type})>'
+
+    def delete(self, user: User, event: Event | None = None):
+        """Delete a VC room and all its associations.
+
+        :param user: the user performing the deletion
+        :param event: the event in which the deletion happened
+        """
+        for assoc in self.events[:]:
+            Logger.get('modules.vc').info('Detaching videoconference %s from event %s (%s)',
+                                          self, assoc.event, assoc.link_object)
+            assoc.delete(user, check_vc_room=False)
+        db.session.flush()
+
+        # send signal
+        signals.vc.vc_room_deleted.send(self, event=event)
+
+        # process plugin actions
+        Logger.get('modules.vc').info(f'Deleting videoconference {self}')
+        if self.status != VCRoomStatus.deleted and self.plugin:
+            self.plugin.delete_room(self, event)
+            notify_deleted(self.plugin, self, self, event, user)
+        db.session.delete(self)
 
 
 class VCRoomEventAssociation(db.Model):
     __tablename__ = 'vc_room_events'
-    __table_args__ = tuple(_make_checks()) + (db.Index(None, 'data', postgresql_using='gin'),
-                                              {'schema': 'events'})
+    __table_args__ = (*_make_checks(), db.Index(None, 'data', postgresql_using='gin'), {'schema': 'events'})
 
     #: Association ID
     id = db.Column(
@@ -265,11 +277,11 @@ class VCRoomEventAssociation(db.Model):
                 assert event is not None
                 target.event = event
 
-        for rel, fn in event_mapping.iteritems():
+        for rel, fn in event_mapping.items():
             if rel is not None:
                 listen(rel, 'set', partial(_set_event_obj, fn))
 
-        for rel, link_type in type_mapping.iteritems():
+        for rel, link_type in type_mapping.items():
             if rel is not None:
                 listen(rel, 'set', partial(_set_link_type, link_type))
 
@@ -296,23 +308,22 @@ class VCRoomEventAssociation(db.Model):
         elif isinstance(obj, db.m.SessionBlock):
             self.linked_block = obj
         else:
-            raise TypeError('Unexpected object: {}'.format(obj))
+            raise TypeError(f'Unexpected object: {obj}')
 
     @link_object.comparator
     def link_object(cls):
         return _LinkObjectComparator(cls)
 
-    @return_ascii
     def __repr__(self):
-        return '<VCRoomEventAssociation({}, {})>'.format(self.event_id, self.vc_room)
+        return format_repr(self, 'id', 'link_object', 'vc_room')
 
     @classmethod
     def find_for_event(cls, event, include_hidden=False, include_deleted=False, only_linked_to_event=False, **kwargs):
-        """Returns a Query that retrieves the videoconference rooms for an event
+        """Return a Query that retrieves the videoconference rooms for an event.
 
         :param event: an indico Event
         :param only_linked_to_event: only retrieve the vc rooms linked to the whole event
-        :param kwargs: extra kwargs to pass to ``find()``
+        :param kwargs: extra kwargs to pass to ``filter_by()``
         """
         if only_linked_to_event:
             kwargs['link_type'] = int(VCRoomLinkType.event)
@@ -328,37 +339,38 @@ class VCRoomEventAssociation(db.Model):
     @classmethod
     @memoize_request
     def get_linked_for_event(cls, event):
-        """Get a dict mapping link objects to event vc rooms"""
+        """Get a dict mapping link objects to event vc rooms."""
         return {vcr.link_object: vcr for vcr in cls.find_for_event(event)}
 
-    def delete(self, user, delete_all=False):
-        """Deletes a VC room from an event
+    def delete(self, user: User, *, check_vc_room: bool = True):
+        """Delete a VC room from an event.
 
         If the room is not used anywhere else, the room itself is also deleted.
 
         :param user: the user performing the deletion
-        :param delete_all: if True, the room is detached from all
-                           events and deleted.
+        :param check_vc_room: whether to check as well if the VCRoom can be deleted
+                              (no more associations left)
         """
+        # send signals
+        signals.vc.vc_room_detached.send(self, vc_room=self.vc_room, old_link=self.link_object, event=self.event)
+
+        Logger.get('modules.vc').info(
+            'Detaching videoconference %s from event %s (%s)', self.vc_room, self.event, self.link_object
+        )
+
+        # do the actual deletion from the DB
         vc_room = self.vc_room
-        if delete_all:
-            for assoc in vc_room.events[:]:
-                Logger.get('modules.vc').info("Detaching VC room {} from event {} ({})".format(
-                    vc_room, assoc.event, assoc.link_object)
-                )
-                vc_room.events.remove(assoc)
-        else:
-            Logger.get('modules.vc').info("Detaching VC room {} from event {} ({})".format(
-                vc_room, self.event, self.link_object)
-            )
-            vc_room.events.remove(self)
+        self.vc_room.events.remove(self)
         db.session.flush()
-        if not vc_room.events:
-            Logger.get('modules.vc').info("Deleting VC room {}".format(vc_room))
-            if vc_room.status != VCRoomStatus.deleted:
-                vc_room.plugin.delete_room(vc_room, self.event)
-                notify_deleted(vc_room.plugin, vc_room, self, self.event, user)
-            db.session.delete(vc_room)
+
+        # process plugin actions
+        if plugin := vc_room.plugin:
+            plugin.detach_room(self, vc_room, self.event)
+
+        # if there are no associations left,
+        if check_vc_room and not vc_room.events:
+            # delete also the VCRoom itself
+            vc_room.delete(user, event=self.event)
 
 
 VCRoomEventAssociation.register_link_events()
@@ -383,4 +395,4 @@ class _LinkObjectComparator(Comparator):
             return db.and_(self.cls.link_type == VCRoomLinkType.contribution,
                            self.cls.contribution_id == other.id)
         else:
-            raise TypeError('Unexpected object type {}: {}'.format(type(other), other))
+            raise TypeError(f'Unexpected object type {type(other)}: {other}')

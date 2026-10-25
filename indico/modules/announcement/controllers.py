@@ -1,36 +1,38 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import flash, redirect
+from flask import flash, redirect, session
 
 from indico.modules.admin import RHAdminBase
 from indico.modules.announcement import announcement_settings
 from indico.modules.announcement.forms import AnnouncementForm
 from indico.modules.announcement.views import WPAnnouncement
+from indico.modules.logs import AppLogEntry, AppLogRealm, LogKind
+from indico.modules.logs.util import make_diff_log
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.forms.base import FormDefaults
 
 
 class RHAnnouncement(RHAdminBase):
+    def _log_changes(self, changes):
+        log_fields = {
+            'enabled': 'Enabled',
+            'message': 'Message',
+        }
+        AppLogEntry.log(AppLogRealm.admin, LogKind.change, 'Announcement', 'Data updated', session.user,
+                        data={'Changes': make_diff_log(changes, log_fields)})
+
     def _process(self):
-        form = AnnouncementForm(obj=FormDefaults(**announcement_settings.get_all()))
+        current_settings = announcement_settings.get_all()
+        form = AnnouncementForm(obj=FormDefaults(**current_settings))
         if form.validate_on_submit():
+            changes = {k: (current_settings[k], v) for k, v in form.data.items() if current_settings[k] != v}
+            self._log_changes(changes)
             announcement_settings.set_multi(form.data)
             flash(_('Settings have been saved'), 'success')
             return redirect(url_for('announcement.manage'))

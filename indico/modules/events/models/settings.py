@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.ext.declarative import declared_attr
 
@@ -22,10 +11,9 @@ from indico.core.db import db
 from indico.core.db.sqlalchemy.util.models import auto_table_args
 from indico.core.settings.models.base import JSONSettingsBase, PrincipalSettingsBase
 from indico.util.decorators import strict_classproperty
-from indico.util.string import return_ascii
 
 
-class EventSettingsMixin(object):
+class EventSettingsMixin:
     settings_backref_name = None
 
     @strict_classproperty
@@ -62,15 +50,14 @@ class EventSetting(JSONSettingsBase, EventSettingsMixin, db.Model):
     @strict_classproperty
     @staticmethod
     def __auto_table_args():
-        return db.UniqueConstraint('event_id', 'module', 'name'),
+        return (db.UniqueConstraint('event_id', 'module', 'name'),)
 
     @declared_attr
     def __table_args__(cls):
         return auto_table_args(cls)
 
-    @return_ascii
     def __repr__(self):
-        return '<EventSetting({}, {}, {}, {!r})>'.format(self.event_id, self.module, self.name, self.value)
+        return f'<EventSetting({self.event_id}, {self.module}, {self.name}, {self.value!r})>'
 
 
 class EventSettingPrincipal(PrincipalSettingsBase, EventSettingsMixin, db.Model):
@@ -78,11 +65,11 @@ class EventSettingPrincipal(PrincipalSettingsBase, EventSettingsMixin, db.Model)
     settings_backref_name = 'settings_principals'
     extra_key_cols = ('event_id',)
     allow_event_roles = True
+    allow_category_roles = True
 
     @declared_attr
     def __table_args__(cls):
         return auto_table_args(cls)
 
-    @return_ascii
     def __repr__(self):
-        return '<EventSettingPrincipal({}, {}, {}, {!r})>'.format(self.event_id, self.module, self.name, self.principal)
+        return f'<EventSettingPrincipal({self.event_id}, {self.module}, {self.name}, {self.principal!r})>'

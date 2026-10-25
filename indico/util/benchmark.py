@@ -1,11 +1,18 @@
+# This file is part of Indico.
+# Copyright (C) 2002 - 2026 CERN
+#
+# Indico is free software; you can redistribute it and/or
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
+
 import time
 from math import isinf
 
-from indico.util.console import cformat
+import click
 
 
-class Benchmark(object):
-    """Simple benchmark class
+class Benchmark:
+    """Simple benchmark class.
 
     Can be used manually or as a contextmanager:
 
@@ -44,19 +51,19 @@ class Benchmark(object):
         duration = float(self)
         if isinf(duration):
             return str(duration)
-        return '{:.05f}'.format(duration)
+        return f'{duration:.05f}'
 
     __repr__ = __str__
 
     def print_result(self, slow=float('inf'), veryslow=float('inf')):
         duration = float(self)
         if duration == float('-inf'):
-            print cformat('%{blue!}skipped')
+            click.secho('skipped', fg='blue')
         elif duration == float('inf'):
-            print cformat('%{red}running')
+            click.secho('running', fg='red')
         elif duration >= veryslow:
-            print cformat('%{red!}{}').format(self)
+            click.secho(str(self), fg='red', bold=True)
         elif duration >= slow:
-            print cformat('%{yellow!}{}').format(self)
+            click.secho(str(self), fg='yellow', bold=True)
         else:
-            print cformat('%{green!}{}').format(self)
+            click.secho(str(self), fg='green', bold=True)

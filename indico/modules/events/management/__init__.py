@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
@@ -26,16 +15,62 @@ from indico.web.menu import SideMenuItem, SideMenuSection
 
 @signals.menu.sections.connect_via('event-management-sidemenu')
 def _sidemenu_sections(sender, **kwargs):
-    yield SideMenuSection('organization', _("Organization"), 50, icon='list', active=True)
-    yield SideMenuSection('services', _("Services"), 40, icon='broadcast')
-    yield SideMenuSection('reports', _("Reports"), 30, icon='stack')
-    yield SideMenuSection('customization', _("Customization"), 20, icon='image')
-    yield SideMenuSection('advanced', _("Advanced options"), 10, icon='lamp')
+    yield SideMenuSection('organization', _('Organization'), 60, icon='list', active=True)
+    yield SideMenuSection('workflows', _('Workflows'), 55, icon='hammer')
+    yield SideMenuSection('services', _('Services'), 40, icon='broadcast')
+    yield SideMenuSection('reports', _('Reports'), 30, icon='stack')
+    yield SideMenuSection('customization', _('Customization'), 20, icon='image')
+    yield SideMenuSection('advanced', _('Advanced options'), 10, icon='lamp')
 
 
 @signals.menu.items.connect_via('event-management-sidemenu')
 def _sidemenu_items(sender, event, **kwargs):
+    from indico.modules.events.models.events import EventType
     if event.can_manage(session.user):
         yield SideMenuItem('settings', _('Settings'), url_for('event_management.settings', event), 100, icon='settings')
         yield SideMenuItem('protection', _('Protection'), url_for('event_management.protection', event),
-                           60, icon='shield')
+                           70, icon='shield')
+        yield SideMenuItem('privacy_dashboard', _('Privacy'),
+                           url_for('event_management.privacy_dashboard', event), 69, sui_icon='balance scale')
+        if event.type_ == EventType.conference:
+            yield SideMenuItem('program_codes', _('Program Codes'), url_for('event_management.program_codes', event),
+                               section='advanced')
+
+
+@signals.core.get_placeholders.connect_via('program-codes-contribution')
+def _get_placeholders(sender, contribution, **kwargs):
+    from . import program_codes as pc
+    yield pc.ContributionIDPlaceholder
+    yield pc.ContributionSessionCodePlaceholder
+    yield pc.ContributionSessionBlockCodePlaceholder
+    yield pc.ContributionTrackCodePlaceholder
+    yield pc.ContributionYearPlaceholder
+    yield pc.ContributionMonthPlaceholder
+    yield pc.ContributionDayPlaceholder
+    yield pc.ContributionWeekday2Placeholder
+    yield pc.ContributionWeekday3Placeholder
+
+
+@signals.core.get_placeholders.connect_via('program-codes-subcontribution')
+def _get_subcontribution_program_codes_placeholders(sender, subcontribution, **kwargs):
+    from . import program_codes as pc
+    yield pc.SubContributionIDPlaceholder
+    yield pc.SubContributionContributionCodePlaceholder
+
+
+@signals.core.get_placeholders.connect_via('program-codes-session')
+def _get_program_codes_session_placeholders(sender, session, **kwargs):
+    from . import program_codes as pc
+    yield pc.SessionIDPlaceholder
+    yield pc.SessionSessionTypeCodePlaceholder
+
+
+@signals.core.get_placeholders.connect_via('program-codes-session-block')
+def _get_program_codes_session_block_placeholders(sender, session_block, **kwargs):
+    from . import program_codes as pc
+    yield pc.SessionBlockSessionCodePlaceholder
+    yield pc.SessionBlockYearPlaceholder
+    yield pc.SessionBlockMonthPlaceholder
+    yield pc.SessionBlockDayPlaceholder
+    yield pc.SessionBlockWeekday2Placeholder
+    yield pc.SessionBlockWeekday3Placeholder

@@ -1,28 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import posixpath
 
 from indico.core.config import config
 from indico.core.db import db
 from indico.core.storage.models import StoredFileMixin
+from indico.modules.events.papers.file_types import PaperFileType
+from indico.util.fs import secure_filename
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii, strict_unicode, text_to_repr
+from indico.util.string import format_repr, strict_str, text_to_repr
 
 
 class PaperFile(StoredFileMixin, db.Model):
@@ -49,12 +40,26 @@ class PaperFile(StoredFileMixin, db.Model):
         index=True,
         nullable=True
     )
+    file_type_id = db.Column(
+        db.ForeignKey('event_paper_reviewing.file_types.id'),
+        index=True,
+        nullable=True
+    )
 
     _contribution = db.relationship(
         'Contribution',
         lazy=True,
         backref=db.backref(
             '_paper_files',
+            lazy=True
+        )
+    )
+    file_type = db.relationship(
+        lambda: PaperFileType,
+        lazy=False,
+        backref=db.backref(
+            'files',
+            cascade='all, delete-orphan',
             lazy=True
         )
     )
@@ -72,9 +77,8 @@ class PaperFile(StoredFileMixin, db.Model):
         paper = kwargs.pop('paper', None)
         if paper:
             kwargs.setdefault('_contribution', paper.contribution)
-        super(PaperFile, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', '_contribution_id', content_type=None, _text=text_to_repr(self.filename))
 
@@ -92,7 +96,8 @@ class PaperFile(StoredFileMixin, db.Model):
 
     def _build_storage_path(self):
         self.assign_id()
-        path_segments = ['event', strict_unicode(self._contribution.event.id), 'papers',
-                         '{}_{}'.format(self.id, strict_unicode(self._contribution.id))]
-        path = posixpath.join(*(path_segments + [self.filename]))
+        path_segments = ['event', strict_str(self._contribution.event.id), 'papers',
+                         f'{self.id}_{strict_str(self._contribution.id)}']
+        filename = secure_filename(self.filename, 'paper')
+        path = posixpath.join(*path_segments, filename)
         return config.ATTACHMENT_STORAGE, path

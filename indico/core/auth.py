@@ -1,50 +1,34 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from warnings import warn
+import functools
 
 from flask import current_app, request
 from flask_multipass import InvalidCredentials, Multipass, NoSuchUser
-from flask_multipass.providers.oauth import OAuthInvalidSessionState
+from werkzeug.local import LocalProxy
 
+from indico.core import signals
+from indico.core.config import config
+from indico.core.limiter import make_rate_limiter
 from indico.core.logger import Logger
+from indico.util.signals import values_from_signal
 
 
 logger = Logger.get('auth')
+login_rate_limiter = LocalProxy(functools.cache(lambda: make_rate_limiter('login', config.FAILED_LOGIN_RATE_LIMIT)))
+signup_rate_limiter = LocalProxy(functools.cache(lambda: make_rate_limiter('signup', config.SIGNUP_RATE_LIMIT)))
 
 
 class IndicoMultipass(Multipass):
     @property
     def default_local_auth_provider(self):
         """The default form-based auth provider."""
-        return next((p for p in self.auth_providers.itervalues() if not p.is_external and p.settings.get('default')),
+        return next((p for p in self.auth_providers.values() if not p.is_external and p.settings.get('default')),
                     None)
-
-    @property
-    def default_group_provider(self):
-        """The default group provider.
-
-        This is an identity provider which supports groups and which
-        is used in places where only a group name can be specified,
-        such as legacy data or room ACLs.
-        """
-        return next((p for p in self.identity_providers.itervalues()
-                     if p.supports_groups and p.settings.get('default_group_provider')), None)
 
     @property
     def sync_provider(self):
@@ -52,41 +36,59 @@ class IndicoMultipass(Multipass):
 
         This is the identity provider used to sync user data.
         """
-        return next((p for p in self.identity_providers.itervalues()
-                     if p.supports_refresh and p.settings.get('synced_fields')), None)
+        return next((p for p in self.identity_providers.values() if p.settings.get('synced_fields')), None)
+
+    @property
+    def has_moderated_providers(self):
+        return (
+            config.LOCAL_MODERATION or
+            any(p for p in self.identity_providers.values() if p.settings.get('moderated'))
+        )
 
     @property
     def synced_fields(self):
-        """The keys to be synchronized
+        """The keys to be synchronized.
 
         This is the set of keys to be synced to user data.
-        The ``email`` can never be synchronized.
         """
         provider = self.sync_provider
         if provider is None:
             return set()
         synced_fields = set(provider.settings.get('synced_fields'))
         synced_fields &= set(current_app.config['MULTIPASS_IDENTITY_INFO_KEYS'])
-        synced_fields.discard('email')
         return synced_fields
 
+    @property
+    def locked_fields(self):
+        """The keys that cannot be desynchronized.
+
+        This is a subset of the keys listed in ``synced_fields`` that cannot be
+        desynchronized by a non-admin user.
+        """
+        provider = self.sync_provider
+        if provider is None:
+            return set()
+        return (set(provider.settings.get('locked_fields', ())) & self.synced_fields) - {'email'}
+
+    @property
+    def locked_field_message(self):
+        provider = self.sync_provider
+        if provider is None:
+            return ''
+        return provider.settings.get('locked_field_message', '')
+
     def init_app(self, app):
-        super(IndicoMultipass, self).init_app(app)
+        super().init_app(app)
         with app.app_context():
             self._check_default_provider()
 
     def _check_default_provider(self):
-        # Warn if there is no default group provider
-        if not self.default_group_provider and any(p.supports_groups for p in self.identity_providers.itervalues()):
-            warn('There is no default group provider but you have providers with group support. '
-                 'This will break legacy ACLs referencing external groups and room ACLs will use local group IDs.')
         # Ensure that there is maximum one sync provider
-        sync_providers = [p for p in self.identity_providers.itervalues()
-                          if p.supports_refresh and p.settings.get('synced_fields')]
+        sync_providers = [p for p in self.identity_providers.values() if p.settings.get('synced_fields')]
         if len(sync_providers) > 1:
             raise ValueError('There can only be one sync provider.')
         # Ensure that there is exactly one form-based default auth provider
-        auth_providers = self.auth_providers.values()
+        auth_providers = list(self.auth_providers.values())
         external_providers = [p for p in auth_providers if p.is_external]
         local_providers = [p for p in auth_providers if not p.is_external]
         if any(p.settings.get('default') for p in external_providers):
@@ -104,12 +106,25 @@ class IndicoMultipass(Multipass):
 
     def handle_auth_error(self, exc, redirect_to_login=False):
         if isinstance(exc, (NoSuchUser, InvalidCredentials)):
+            if not getattr(exc, '_indico_no_rate_limit', False):
+                login_rate_limiter.hit()
             logger.warning('Invalid credentials (ip=%s, provider=%s): %s',
                            request.remote_addr, exc.provider.name if exc.provider else None, exc)
         else:
-            fn = logger.debug if isinstance(exc, OAuthInvalidSessionState) else logger.error
-            fn('Authentication via %s failed: %s (%r)', exc.provider.name if exc.provider else None, exc, exc.details)
-        return super(IndicoMultipass, self).handle_auth_error(exc, redirect_to_login=redirect_to_login)
+            exc_str = str(exc)
+            fn = logger.error
+            if exc_str.startswith(('mismatching_state:', 'invalid_grant:')):
+                fn = logger.debug
+            fn('Authentication via %s failed: %s (%r)', exc.provider.name if exc.provider else None, exc_str,
+               exc.details)
+        return super().handle_auth_error(exc, redirect_to_login=redirect_to_login)
+
+    def handle_login_form(self, provider, data):
+        signal_res = signals.users.check_login_data.send(type(provider), provider=provider, data=data)
+        if errors := values_from_signal(signal_res, as_list=True):
+            self.handle_auth_error(InvalidCredentials(errors[0], provider=provider))
+            return
+        return super().handle_login_form(provider, data)
 
 
 multipass = IndicoMultipass()

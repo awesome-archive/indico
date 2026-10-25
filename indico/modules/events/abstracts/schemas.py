@@ -1,41 +1,33 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from marshmallow.fields import Float, Nested
 
 from indico.core.marshmallow import mm
 from indico.modules.events.abstracts.models.abstracts import Abstract
 from indico.modules.events.abstracts.models.comments import AbstractComment
+from indico.modules.events.abstracts.models.files import AbstractFile
 from indico.modules.events.abstracts.models.persons import AbstractPersonLink
 from indico.modules.events.abstracts.models.review_questions import AbstractReviewQuestion
 from indico.modules.events.abstracts.models.review_ratings import AbstractReviewRating
 from indico.modules.events.abstracts.models.reviews import AbstractReview
 from indico.modules.events.contributions.schemas import ContributionFieldValueSchema, contribution_type_schema_basic
 from indico.modules.events.tracks.schemas import track_schema_basic
-from indico.modules.users.schemas import UserSchema
+from indico.modules.users.schemas import AffiliationSchema, BasicUserSchema
+from indico.util.mimetypes import icon_from_mimetype
+from indico.web.flask.util import url_for
 
 
 _basic_abstract_fields = ('id', 'friendly_id', 'title')
 
 
-class AbstractCommentSchema(mm.ModelSchema):
-    user = Nested(UserSchema)
-    modified_by = Nested(UserSchema)
+class AbstractCommentSchema(mm.SQLAlchemyAutoSchema):
+    user = Nested(BasicUserSchema)
+    modified_by = Nested(BasicUserSchema)
 
     class Meta:
         model = AbstractComment
@@ -44,21 +36,21 @@ class AbstractCommentSchema(mm.ModelSchema):
                   'modified_dt', 'modified_by')
 
 
-class AbstractReviewQuestionSchema(mm.ModelSchema):
+class AbstractReviewQuestionSchema(mm.SQLAlchemyAutoSchema):
     class Meta:
         model = AbstractReviewQuestion
         fields = ('id', 'no_score', 'position', 'title')
 
 
-class AbstractReviewRatingSchema(mm.ModelSchema):
+class AbstractReviewRatingSchema(mm.SQLAlchemyAutoSchema):
     class Meta:
         model = AbstractReviewRating
         fields = ('question', 'value')
 
 
-class AbstractReviewSchema(mm.ModelSchema):
+class AbstractReviewSchema(mm.SQLAlchemyAutoSchema):
     track = Nested(track_schema_basic)
-    user = Nested(UserSchema)
+    user = Nested(BasicUserSchema)
     proposed_related_abstract = Nested('AbstractSchema', only=_basic_abstract_fields)
     proposed_contrib_type = Nested(contribution_type_schema_basic, attribute='proposed_contribution_type')
     proposed_tracks = Nested(track_schema_basic, many=True)
@@ -71,19 +63,30 @@ class AbstractReviewSchema(mm.ModelSchema):
                   'ratings')
 
 
-class AbstractPersonLinkSchema(mm.ModelSchema):
+class AbstractPersonLinkSchema(mm.SQLAlchemyAutoSchema):
+    affiliation_link = Nested(AffiliationSchema)
+
     class Meta:
         model = AbstractPersonLink
-        fields = ('id', 'person_id', 'email', 'first_name', 'last_name', 'title', 'affiliation', 'address', 'phone',
-                  'is_speaker', 'author_type')
+        fields = ('id', 'person_id', 'email', 'first_name', 'last_name', 'title', 'affiliation', 'affiliation_link',
+                  'address', 'phone', 'is_speaker', 'author_type')
 
 
-class AbstractSchema(mm.ModelSchema):
-    submitter = Nested(UserSchema)
-    judge = Nested(UserSchema)
-    modified_by = Nested(UserSchema)
-    duplicate_of = Nested('self', only=_basic_abstract_fields)
-    merged_into = Nested('self', only=_basic_abstract_fields)
+class AbstractFileSchema(mm.SQLAlchemyAutoSchema):
+    icon = mm.Function(lambda af: icon_from_mimetype(af.content_type))
+    download_url = mm.Function(lambda af: url_for('abstracts.download_attachment', af))
+
+    class Meta:
+        model = AbstractFile
+        fields = ('id', 'content_type', 'md5', 'filename', 'icon', 'download_url')
+
+
+class AbstractSchema(mm.SQLAlchemyAutoSchema):
+    submitter = Nested(BasicUserSchema)
+    judge = Nested(BasicUserSchema)
+    modified_by = Nested(BasicUserSchema)
+    duplicate_of = Nested(lambda: AbstractSchema, only=_basic_abstract_fields)
+    merged_into = Nested(lambda: AbstractSchema, only=_basic_abstract_fields)
     submitted_contrib_type = Nested(contribution_type_schema_basic)
     accepted_contrib_type = Nested(contribution_type_schema_basic)
     accepted_track = Nested(track_schema_basic)
@@ -91,7 +94,9 @@ class AbstractSchema(mm.ModelSchema):
     reviewed_for_tracks = Nested(track_schema_basic, many=True)
     persons = Nested(AbstractPersonLinkSchema, attribute='person_links', many=True)
     custom_fields = Nested(ContributionFieldValueSchema, attribute='field_values', many=True)
+    files = Nested(AbstractFileSchema, many=True)
     score = Float()
+    score_std = Float()
     comments = Nested(AbstractCommentSchema, many=True)
     reviews = Nested(AbstractReviewSchema, many=True)
 
@@ -106,8 +111,8 @@ class AbstractSchema(mm.ModelSchema):
                   'submitted_contrib_type', 'accepted_contrib_type',
                   'accepted_track', 'submitted_for_tracks', 'reviewed_for_tracks',
                   'duplicate_of', 'merged_into',
-                  'persons', 'custom_fields',
-                  'score', 'comments', 'reviews')
+                  'persons', 'custom_fields', 'files',
+                  'score', 'score_std', 'comments', 'reviews')
 
 
 abstracts_schema = AbstractSchema(many=True)

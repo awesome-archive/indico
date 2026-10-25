@@ -20,6 +20,7 @@
 {% endblock %}
 
 {% block content %}
+<div id="abstract-review-page">
     {{ render_abstract_info(abstract) }}
 
     {% call(block, __) render_timeline(abstract, comment_form, review_form) %}
@@ -32,7 +33,7 @@
     {% endcall %}
 
     <div class="i-timeline">
-        {% if abstract.can_judge(session.user, check_state=true) and abstract.event.tracks %}
+        {% if abstract.can_change_tracks(session.user, check_state=true) and abstract.event.tracks %}
             {{ render_reviewed_for_tracks_box(abstract, review_track_list_form) }}
         {% endif %}
 
@@ -48,7 +49,7 @@
             </div>
         {% endif %}
 
-        {% if abstract.state.name not in ('submitted', 'withdrawn') %}
+        {% if abstract.state.name not in ('submitted', 'withdrawn', 'invited') %}
             {{ render_abstract_judgment(abstract) }}
         {% endif %}
     </div>
@@ -67,7 +68,7 @@
         </a>
     {% endif %}
 
-    {% if not no_javascript %}
+    {% if not no_javascript|default(false) %}
         <script>
             setupReviewingPage();
             setupAbstractJudgment({
@@ -75,4 +76,5 @@
             });
         </script>
     {% endif %}
+</div>
 {% endblock %}

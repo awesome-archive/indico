@@ -1,22 +1,32 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 export {handleSubmissionError} from './errors';
-export {ReduxFormField, ReduxRadioField, ReduxCheckboxField, ReduxDropdownField} from './fields';
+export {
+  ComboDropdown,
+  FinalCheckbox,
+  FinalComboDropdown,
+  FinalDropdown,
+  FinalField,
+  FinalInput,
+  FinalRadio,
+  FinalSubmitButton,
+  FinalTextArea,
+  FormFieldAdapter,
+  unsortedArraysEqual,
+} from './fields';
 export {default as validators} from './validators';
+export {default as parsers} from './parsers';
 export {default as formatters} from './formatters';
-export {getChangedValues, FieldCondition} from './final-form';
+export {
+  getChangedValues,
+  getValuesForFields,
+  FieldCondition,
+  handleSubmitError,
+} from './final-form';
+export {default as UnloadPrompt, FinalUnloadPrompt} from './unload';
+export {default as FormContext} from './context';

@@ -1,22 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import division, unicode_literals
-
-from collections import Counter, OrderedDict
+from collections import Counter
 
 from indico.modules.events.surveys.fields.base import SurveyField
 from indico.util.i18n import _
@@ -41,8 +30,8 @@ class SurveyNumberField(NumberField, SurveyField):
         results = {'total': sum(counter.elements()),
                    'max': max(counter.elements()),
                    'min': min(counter.elements()),
-                   'absolute': OrderedDict(sorted(counter.iteritems())),
-                   'relative': OrderedDict((k, v / total_answers) for k, v in sorted(counter.iteritems()))}
+                   'absolute': dict(sorted(counter.items())),
+                   'relative': {k: v / total_answers for k, v in sorted(counter.items())}}
         results['average'] = results['total'] / len(list(counter.elements()))
         return results
 
@@ -56,5 +45,5 @@ class SurveyBoolField(BoolField, SurveyField):
             return
         total = sum(counter.values())
         return {'total': total,
-                'absolute': OrderedDict(((_('Yes'), counter[True]), (_('No'), counter[False]))),
-                'relative': OrderedDict(((_('Yes'), counter[True] / total), (_('No'), counter[False] / total)))}
+                'absolute': {_('Yes'): counter[True], _('No'): counter[False]},
+                'relative': {_('Yes'): counter[True] / total, _('No'): counter[False] / total}}

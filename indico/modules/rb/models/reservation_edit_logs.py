@@ -1,25 +1,15 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.custom.utcdatetime import UTCDateTime
 from indico.util.date_time import now_utc
-from indico.util.string import return_ascii
 
 
 class ReservationEditLog(db.Model):
@@ -53,11 +43,5 @@ class ReservationEditLog(db.Model):
     # relationship backrefs:
     # - reservation (Reservation.edit_logs)
 
-    @return_ascii
     def __repr__(self):
-        return u'<ReservationEditLog({0}, {1}, {2}, {3})>'.format(
-            self.user_name,
-            self.reservation_id,
-            self.timestamp,
-            self.info
-        )
+        return f'<ReservationEditLog({self.user_name}, {self.reservation_id}, {self.timestamp}, {self.info})>'

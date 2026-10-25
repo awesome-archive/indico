@@ -1,34 +1,22 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
+from urllib.parse import urlsplit
 
 from flask import current_app, json, render_template, session
-from werkzeug.urls import url_join, url_parse
 
 from indico.core.auth import multipass
 from indico.core.config import config
 from indico.core.plugins import plugin_engine
 from indico.modules.auth.util import url_for_login
-from indico.modules.events.registration.util import url_rule_to_angular
-from indico.modules.rb.models.locations import Location
+from indico.modules.users.schemas import AffiliationSchema
 from indico.modules.users.util import serialize_user
-from indico.util.i18n import po_to_json
+from indico.util.i18n import get_all_locales, po_to_json
 from indico.web.flask.util import url_for, url_rule_to_js
 
 
@@ -51,6 +39,10 @@ def get_locale_data(path, name, domain, react=False):
 
 
 def generate_i18n_file(locale_name, react=False):
+    all_locales = get_all_locales()
+    if locale_name not in all_locales:
+        locale_name = config.DEFAULT_LOCALE if config.DEFAULT_LOCALE in all_locales else 'en_GB'
+
     root_path = os.path.join(current_app.root_path, 'translations')
     i18n_data = get_locale_data(root_path, locale_name, 'indico', react=react)
     if not i18n_data:
@@ -58,7 +50,7 @@ def generate_i18n_file(locale_name, react=False):
         i18n_data = {'indico': {'': {'domain': 'indico',
                                      'lang': locale_name}}}
 
-    for pid, plugin in plugin_engine.get_active_plugins().iteritems():
+    for pid, plugin in plugin_engine.get_active_plugins().items():
         data = {}
         if plugin.translation_path:
             data = get_locale_data(plugin.translation_path, locale_name, pid, react=react)
@@ -77,83 +69,54 @@ def generate_user_file(user=None):
     else:
         user_vars = {
             'id': user.id,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
+            'identifier': user.identifier,
+            'title': user._title.name,
+            'firstName': user.first_name,
+            'lastName': user.last_name,
+            'fullName': user.full_name,
             'email': user.email,
-            'favorite_users': {u.id: serialize_user(u) for u in user.favorite_users},
+            'favoriteUsers': {u.id: serialize_user(u) for u in user.favorite_users},
             'language': session.lang,
-            'avatar_bg_color': user.avatar_bg_color,
-            'is_admin': user.is_admin
+            'avatarURL': user.avatar_url,
+            'isAdmin': user.is_admin,
+            'affiliation': user.affiliation,
+            'affiliationId': user.affiliation_id,
+            'affiliationMeta': AffiliationSchema().dump(user.affiliation_link) if user.affiliation_link else None,
+            'address': user.address,
+            'phone': user.phone,
+            'type': user.principal_type.name,  # always 'user'
+            'mastodonServerURL': user.settings.get('mastodon_server_url') or '',
+            'mastodonServerName': user.settings.get('mastodon_server_name') or '',
         }
     return render_template('assets/vars_user.js', user_vars=user_vars, user=user)
 
 
 def generate_global_file():
-    locations = Location.find_all() if config.ENABLE_ROOMBOOKING else []
-    location_names = {loc.name: loc.name for loc in locations}
-    default_location = next((loc.name for loc in locations if loc.is_default), None)
     ext_auths = [{
         'name': auth.name,
         'title': auth.title,
         'supports_groups': auth.supports_groups
-    } for auth in multipass.identity_providers.itervalues() if auth.supports_search]
+    } for auth in multipass.identity_providers.values() if auth.supports_search]
 
     indico_vars = {
+        'ExperimentalEditingService': config.EXPERIMENTAL_EDITING_SERVICE,
         'Urls': {
             'Base': config.BASE_URL,
-            'BasePath': url_parse(config.BASE_URL).path.rstrip('/'),
-            'JsonRpcService': url_for('api.jsonrpc'),
+            'BasePath': urlsplit(config.BASE_URL).path.rstrip('/'),
             'ExportAPIBase': url_for('api.httpapi', prefix='export'),
             'APIBase': url_for('api.httpapi', prefix='api'),
 
             'ImagesBase': config.IMAGES_BASE_URL,
 
             'Login': url_for_login(),
-            'Favorites': url_for('users.user_favorites'),
-            'FavoriteUserAdd': url_for('users.user_favorites_users_add'),
-            'FavoriteUserRemove': url_rule_to_js('users.user_favorites_user_remove'),
 
             'AttachmentManager': url_rule_to_js('attachments.management'),
             'ManagementAttachmentInfoColumn': url_rule_to_js('attachments.management_info_column'),
 
-            'RoomBooking': {
-                'room': {
-                    'check_available': url_rule_to_js('rooms_new.check_room_available'),
-                },
-                'calendar': url_join(url_for('rooms_new.roombooking'), 'calendar')
-            },
-            'RoomBookingBookRoom': url_rule_to_js('rooms.room_book'),
-            'RoomBookingBook': url_rule_to_js('rooms.book'),
-            'RoomBookingDetails': url_rule_to_js('rooms.roomBooking-roomDetails'),
-            'RoomBookingCloneBooking': url_rule_to_js('rooms.roomBooking-cloneBooking'),
-
-            'APIKeyCreate': url_for('api.key_create'),
-            'APIKeyTogglePersistent': url_for('api.key_toggle_persistent'),
             'FontSassBundle': current_app.manifest['fonts.css']._paths,
 
             'EventCreation': url_rule_to_js('events.create'),
             'PermissionsDialog': url_rule_to_js('event_management.permissions_dialog'),
-
-            'RegistrationForm': {
-                'section': {
-                    'add': url_rule_to_angular('event_registration.add_section'),
-                    'modify': url_rule_to_angular('event_registration.modify_section'),
-                    'toggle': url_rule_to_angular('event_registration.toggle_section'),
-                    'move': url_rule_to_angular('event_registration.move_section')
-                },
-                'field': {
-                    'add': url_rule_to_angular('event_registration.add_field'),
-                    'modify': url_rule_to_angular('event_registration.modify_field'),
-                    'toggle': url_rule_to_angular('event_registration.toggle_field'),
-                    'move': url_rule_to_angular('event_registration.move_field')
-                },
-                'text': {
-                    'add': url_rule_to_angular('event_registration.add_text'),
-                    'modify': url_rule_to_angular('event_registration.modify_text'),
-                    'toggle': url_rule_to_angular('event_registration.toggle_text'),
-                    'move': url_rule_to_angular('event_registration.move_text')
-                }
-            },
 
             'Timetable': {
                 'management': url_rule_to_js('timetable.management'),
@@ -201,6 +164,7 @@ def generate_global_file():
             },
 
             'Categories': {
+                'display': url_rule_to_js('categories.display'),
                 'info': url_rule_to_js('categories.info'),
                 'infoFrom': url_rule_to_js('categories.info_from'),
                 'search': url_rule_to_js('categories.search')
@@ -209,18 +173,16 @@ def generate_global_file():
 
         'Data': {
             'WeekDays': ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
-            'DefaultLocation': default_location,
-            'Locations': location_names
         },
 
         'Settings': {
             'ExtAuthenticators': ext_auths,
-            'RoomBookingModuleActive': config.ENABLE_ROOMBOOKING,
         },
 
         'FileRestrictions': {
             'MaxUploadFilesTotalSize': config.MAX_UPLOAD_FILES_TOTAL_SIZE,
-            'MaxUploadFileSize': config.MAX_UPLOAD_FILE_SIZE
+            'MaxUploadFileSize': config.MAX_UPLOAD_FILE_SIZE,
+            'MaxEmailAttachmentSize': config.MAX_EMAIL_ATTACHMENT_SIZE,
         }
     }
 

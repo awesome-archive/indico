@@ -1,51 +1,22 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import dateutil.parser
 import icalendar as ical
 from lxml import html
 from lxml.etree import ParserError
 from pytz import timezone, utc
-from werkzeug.urls import url_parse
 
 from indico.core.config import config
 from indico.util.date_time import now_utc
-from indico.util.string import to_unicode
 from indico.web.http_api.metadata.serializer import Serializer
-
-
-class vRecur(ical.vRecur):
-    """Fix vRecur so the frequency comes first"""
-    def ical(self):
-        # SequenceTypes
-        result = ['FREQ=%s' % self.types['FREQ'](self['FREQ']).ical()]
-        for key, vals in self.items():
-            if key == 'FREQ':
-                continue
-            typ = self.types[key]
-            if not type(vals) in ical.prop.SequenceTypes:
-                vals = [vals]
-            vals = ','.join([typ(val).ical() for val in vals])
-            result.append('%s=%s' % (key, vals))
-        return ';'.join(result)
-
-
-ical.cal.types_factory['recur'] = vRecur
 
 
 def _deserialize_date(date_dict):
@@ -56,24 +27,21 @@ def _deserialize_date(date_dict):
     return timezone(date_dict['tz']).localize(dt).astimezone(utc)
 
 
-def serialize_event(cal, fossil, now, id_prefix="indico-event"):
+def serialize_event(cal, fossil, now, id_prefix='indico-event'):
     event = ical.Event()
-    event.add('uid', '{}-{}@{}'.format(id_prefix, fossil['id'], url_parse(config.BASE_URL).host))
+    event.add('uid', '{}-{}@{}'.format(id_prefix, fossil['id'], urlsplit(config.BASE_URL).hostname))
     event.add('dtstamp', now)
     event.add('dtstart', _deserialize_date(fossil['startDate']))
     event.add('dtend', _deserialize_date(fossil['endDate']))
     event.add('url', fossil['url'])
-    event.add('summary', to_unicode(fossil['title']))
+    event.add('summary', fossil['title'])
     loc = fossil['location'] or ''
-    if loc:
-        loc = to_unicode(loc)
     if fossil['roomFullname']:
-        loc += ' ' + to_unicode(fossil['roomFullname'])
+        loc += ' ' + fossil['roomFullname']
     event.add('location', loc)
     description = ''
     if fossil.get('speakers'):
-        speakers = ('{} ({})'.format(speaker['fullName'].encode('utf-8'),
-                                     speaker['affiliation'].encode('utf-8')) for speaker in fossil['speakers'])
+        speakers = ['{} ({})'.format(speaker['fullName'], speaker['affiliation']) for speaker in fossil['speakers']]
         description += 'Speakers: {}\n'.format(', '.join(speakers))
 
     if fossil['description']:
@@ -81,12 +49,10 @@ def serialize_event(cal, fossil, now, id_prefix="indico-event"):
         if not desc_text:
             desc_text = '<p/>'
         try:
-            description += '{}\n\n{}'.format(to_unicode(html.fromstring(to_unicode(desc_text))
-                                                        .text_content()).encode('utf-8'),
-                                             fossil['url'].encode('utf-8'))
+            description += '{}\n\n{}'.format(html.fromstring(desc_text).text_content(), fossil['url'])
         except ParserError:
             # this happens e.g. if desc_text contains only a html comment
-            description += fossil['url'].encode('utf-8')
+            description += fossil['url']
     else:
         description += fossil['url']
     event.add('description', description)
@@ -99,12 +65,12 @@ def serialize_contribs(cal, fossil, now):
     else:
         for sfossil in fossil['contributions']:
             if sfossil['startDate']:
-                sfossil['id'] = "%s-%s" % (fossil['id'], sfossil['id'])
-                serialize_event(cal, sfossil, now, id_prefix="indico-contribution")
+                sfossil['id'] = '{}-{}'.format(fossil['id'], sfossil['id'])
+                serialize_event(cal, sfossil, now, id_prefix='indico-contribution')
 
 
 def serialize_contrib(cal, fossil, now):
-    serialize_event(cal, fossil, now, id_prefix="indico-contribution")
+    serialize_event(cal, fossil, now, id_prefix='indico-contribution')
 
 
 def serialize_sessions(cal, fossil, now):
@@ -113,17 +79,16 @@ def serialize_sessions(cal, fossil, now):
     else:
         for sfossil in fossil['sessions']:
             if sfossil['startDate']:
-                serialize_session(cal, sfossil, now, fid="%s-%s" % (fossil['id'], sfossil['id']))
+                serialize_session(cal, sfossil, now, fid='{}-{}'.format(fossil['id'], sfossil['id']))
 
 
 def serialize_session(cal, fossil, now, fid=None):
     if fid:
         fossil['id'] = fid
-    serialize_event(cal, fossil, now, id_prefix="indico-session")
+    serialize_event(cal, fossil, now, id_prefix='indico-session')
 
 
 class ICalSerializer(Serializer):
-
     schemaless = False
     _mime = 'text/calendar'
 
@@ -142,7 +107,7 @@ class ICalSerializer(Serializer):
 
     def _execute(self, fossils):
         results = fossils['results']
-        if type(results) != list:
+        if not isinstance(results, list):
             results = [results]
 
         cal = ical.Calendar()

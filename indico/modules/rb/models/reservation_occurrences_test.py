@@ -1,21 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import date, datetime, time
-from itertools import izip
 
 import pytest
 from dateutil.relativedelta import relativedelta
@@ -26,14 +16,11 @@ from indico.modules.rb.models.reservations import RepeatFrequency
 from indico.testing.util import extract_emails
 
 
-pytest_plugins = 'indico.modules.rb.testing.fixtures'
-
-
 @pytest.fixture
 def creation_params():
     return {'start': date.today() + relativedelta(hour=8),
             'end': date.today() + relativedelta(days=1, hour=17),
-            'repetition': (RepeatFrequency.DAY, 1)}
+            'repetition': (RepeatFrequency.DAY, 1, ['mon', 'tue', 'wed', 'thu', 'fri'])}
 
 
 @pytest.fixture(params=(
@@ -71,7 +58,7 @@ def overlapping_occurrences(create_occurrence):
 
 def test_date(dummy_occurrence):
     assert dummy_occurrence.date == date.today()
-    assert ReservationOccurrence.find_first(date=date.today()) == dummy_occurrence
+    assert ReservationOccurrence.query.filter_by(date=date.today()).first() == dummy_occurrence
 
 
 # ======================================================================================================================
@@ -80,10 +67,9 @@ def test_date(dummy_occurrence):
 
 
 def test_create_series_for_reservation(dummy_reservation):
-    occurrences = ReservationOccurrence.iter_create_occurrences(start=dummy_reservation.start_dt,
-                                                                end=dummy_reservation.end_dt,
-                                                                repetition=dummy_reservation.repetition)
-    for occ1, occ2 in izip(dummy_reservation.occurrences, occurrences):
+    occurrences = ReservationOccurrence.iter_create_occurrences(
+        start=dummy_reservation.start_dt, end=dummy_reservation.end_dt, repetition=dummy_reservation.repetition)
+    for occ1, occ2 in zip(dummy_reservation.occurrences, occurrences, strict=True):
         assert occ1.start_dt == occ2.start_dt
         assert occ1.end_dt == occ2.end_dt
         assert occ1.is_cancelled == dummy_reservation.is_cancelled
@@ -92,8 +78,8 @@ def test_create_series_for_reservation(dummy_reservation):
 
 
 def test_create_series(creation_params):
-    for occ1, occ2 in izip(list(ReservationOccurrence.iter_create_occurrences(**creation_params)),
-                           ReservationOccurrence.create_series(**creation_params)):
+    for occ1, occ2 in zip(list(ReservationOccurrence.iter_create_occurrences(**creation_params)),
+                          ReservationOccurrence.create_series(**creation_params), strict=True):
         assert occ1.start_dt == occ2.start_dt
         assert occ1.end_dt == occ2.end_dt
 
@@ -106,18 +92,36 @@ def test_iter_create_occurrences(creation_params):
         assert occ.end_dt.time() == time(17)
 
 
+@pytest.mark.parametrize(('start_dt', 'end_dt', 'recurrence_weekdays'), (
+    (date(2023, 10, 2), date(2023, 10, 7), ['mon', 'tue']),
+    (date(2023, 10, 2), date(2023, 10, 7), ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+    (date(2023, 10, 2), date(2023, 10, 20), ['mon', 'wed']),
+))
+def test_iter_create_occurrences_with_recurrence_weekdays(start_dt, end_dt, recurrence_weekdays):
+    params = {'start': start_dt + relativedelta(hour=8),
+              'end': end_dt + relativedelta(hour=17),
+              'repetition': (RepeatFrequency.WEEK, 1, recurrence_weekdays)}
+    occurrences = list(ReservationOccurrence.iter_start_time(**params))
+
+    # for the occurrecnes in the list, check if the weekday is in the recurrence_weekdays list
+    for occ in occurrences:
+        assert occ.weekday() in [date.weekday() for date in occurrences]
+        assert occ.weekday() in [date.weekday() for date in occurrences]
+
+
 def test_iter_start_time_invalid():
     invalid_frequency = -1
-    assert invalid_frequency not in RepeatFrequency
+    invalid_weekdays = ['foo', 'bar']
     with pytest.raises(IndicoError):
-        ReservationOccurrence.iter_start_time(start=date.today(), end=date.today(), repetition=(invalid_frequency, 0))
+        ReservationOccurrence.iter_start_time(start=date.today(), end=date.today(),
+                                              repetition=(invalid_frequency, 0, invalid_weekdays))
 
 
 @pytest.mark.parametrize('interval', (0, 1, 2))
 def test_iter_start_time_single(interval):
     days = list(ReservationOccurrence.iter_start_time(start=date.today() + relativedelta(hour=8),
                                                       end=date.today() + relativedelta(hour=17),
-                                                      repetition=(RepeatFrequency.NEVER, interval)))
+                                                      repetition=(RepeatFrequency.NEVER, interval, None)))
     assert len(days) == 1
 
 
@@ -131,7 +135,7 @@ def test_iter_start_time_daily(interval, days_elapsed, expected_length):
     assert days_elapsed >= 0
     params = {'start': date.today() + relativedelta(hour=8),
               'end': date.today() + relativedelta(days=days_elapsed, hour=17),
-              'repetition': (RepeatFrequency.DAY, interval)}
+              'repetition': (RepeatFrequency.DAY, interval, [])}
     if expected_length is None:
         with pytest.raises(IndicoError):
             ReservationOccurrence.iter_start_time(**params)
@@ -163,7 +167,7 @@ def test_iter_start_time_weekly(interval, days_elapsed, expected_length):
     assert days_elapsed >= 0
     params = {'start': date.today() + relativedelta(hour=8),
               'end': date.today() + relativedelta(days=days_elapsed, hour=17),
-              'repetition': (RepeatFrequency.WEEK, interval)}
+              'repetition': (RepeatFrequency.WEEK, interval, None)}
     if expected_length is None:
         with pytest.raises(IndicoError):
             ReservationOccurrence.iter_start_time(**params)
@@ -183,7 +187,7 @@ def test_iter_start_time_monthly(interval, days_elapsed, expected_length):
     assert days_elapsed >= 0
     params = {'start': date.today() + relativedelta(hour=8),
               'end': date.today() + relativedelta(days=days_elapsed, hour=17),
-              'repetition': (RepeatFrequency.MONTH, interval)}
+              'repetition': (RepeatFrequency.MONTH, interval, None)}
     if expected_length is None:
         with pytest.raises(IndicoError):
             ReservationOccurrence.iter_start_time(**params)
@@ -194,11 +198,41 @@ def test_iter_start_time_monthly(interval, days_elapsed, expected_length):
         assert all(day.weekday() == weekday for day in days)
 
 
+@pytest.mark.parametrize(('interval', 'days_elapsed', 'expected_length'), (
+    (1, 7, 3),  # expect 3 weekdays over 7 days: mon, tue (week 1) + mon (week 2)
+    (1, 14, 5),  # ...etc
+    (1, 19,  6),
+    (1, 28, 9),
+    (2, 19,  4),
+    (2, 28,  5),
+    (2, 42,  7),
+    (3, 19,  2),
+    (3, 28,  4),
+    (3, 42,  5),
+    (4, 19,  2),
+    (4, 28,  3),
+))
+def test_iter_start_time_weekly_recurring_mon_tue(interval, days_elapsed, expected_length):
+    assert days_elapsed >= 0
+    test_start_date = date(2023, 10, 2)  # begin always on the first monday of october
+    params = {'start': test_start_date + relativedelta(hour=8),
+              'end': test_start_date + relativedelta(days=days_elapsed, hour=17),
+              'repetition': (RepeatFrequency.WEEK, interval, ['mon', 'tue'])}
+    if expected_length is None:
+        with pytest.raises(IndicoError):
+            ReservationOccurrence.iter_start_time(**params)
+    else:
+        days = list(ReservationOccurrence.iter_start_time(**params))
+        assert len(days) == expected_length
+        for i, day in enumerate(days):
+            delta = relativedelta(weeks=(i//2)*interval, days=i % 2)
+            assert day.date() == test_start_date + delta
+
+
 def test_iter_start_time_monthly_5th_monday_is_always_last():
     start_dt = date(2014, 9, 29) + relativedelta(hour=8)  # 5th monday of september
     end_dt = start_dt + relativedelta(days=100, hour=17)
-    params = {'start': start_dt, 'end': end_dt, 'repetition': (RepeatFrequency.MONTH, 1)}
-
+    params = {'start': start_dt, 'end': end_dt, 'repetition': (RepeatFrequency.MONTH, 1, None)}
     days = list(ReservationOccurrence.iter_start_time(**params))
     assert len(days) == 4
     assert days[1].date() == date(2014, 10, 27)  # 4th monday of october
@@ -213,7 +247,7 @@ def test_filter_overlap(create_occurrence, overlapping_combination_from_2am_to_4
     occ2 = ReservationOccurrence(start_dt=date.today() + relativedelta(hour=start_hour),
                                  end_dt=date.today() + relativedelta(hour=end_hour))
     overlap_filter = ReservationOccurrence.filter_overlap([occ2])
-    assert (occ1 in ReservationOccurrence.find_all(overlap_filter)) == expected
+    assert (occ1 in ReservationOccurrence.query.filter(overlap_filter).all()) == expected
 
 
 def test_find_overlapping_with_different_room(overlapping_occurrences, create_room):
@@ -267,7 +301,7 @@ def test_cancel(smtp, create_reservation, dummy_user, silent, reason):
     else:
         assert occurrence.reservation.edit_logs.count() == 1
         assert occurrence.reservation.edit_logs[0].user_name == dummy_user.full_name
-        extract_emails(smtp, count=2, regex=True, subject=r'Booking cancelled on .+ \(SINGLE OCCURRENCE\)')
+        extract_emails(smtp, count=2, regex=True, subject=r'Booking cancelled .+ \(SINGLE OCCURRENCE\)')
         if reason:
             assert len(occurrence.reservation.edit_logs[0].info) == 2
         else:
@@ -276,17 +310,20 @@ def test_cancel(smtp, create_reservation, dummy_user, silent, reason):
 
 
 @pytest.mark.parametrize('silent', (True, False))
-def test_cancel_single_occurrence(smtp, dummy_occurrence, dummy_user, silent):
-    dummy_occurrence.cancel(user=dummy_user, reason='cancelled', silent=silent)
-    assert dummy_occurrence.is_cancelled
-    assert dummy_occurrence.rejection_reason == 'cancelled'
-    assert dummy_occurrence.reservation.is_cancelled
-    assert dummy_occurrence.reservation.rejection_reason == 'cancelled'
+def test_cancel_single_occurrence(smtp, create_occurrence, dummy_user, silent, freeze_time):
+    occ = create_occurrence(start_dt=datetime.combine(date.today(), time(11)),
+                            end_dt=datetime.combine(date.today(), time(12)))
+    freeze_time(datetime.combine(date.today(), time(11, 10)))
+    occ.cancel(user=dummy_user, reason='cancelled', silent=silent)
+    assert occ.is_cancelled
+    assert occ.rejection_reason == 'cancelled'
+    assert occ.reservation.is_cancelled
+    assert occ.reservation.rejection_reason == 'cancelled'
     if silent:
-        assert not dummy_occurrence.reservation.edit_logs.count()
+        assert not occ.reservation.edit_logs.count()
     else:
-        assert dummy_occurrence.reservation.edit_logs.count()
-        mails = extract_emails(smtp, count=2, regex=True, subject=r'Booking cancelled on')
+        assert occ.reservation.edit_logs.count()
+        mails = extract_emails(smtp, count=2, regex=True, subject=r'Booking cancelled')
         assert not any('SINGLE OCCURRENCE' in mail['subject'] for mail in mails)
     assert not smtp.outbox
 
@@ -309,7 +346,7 @@ def test_reject(smtp, create_reservation, dummy_user, silent):
         assert occurrence.reservation.edit_logs.count() == 1
         assert occurrence.reservation.edit_logs[0].user_name == dummy_user.full_name
         assert len(occurrence.reservation.edit_logs[0].info) == 2
-        extract_emails(smtp, count=2, regex=True, subject=r'Booking rejected on .+ \(SINGLE OCCURRENCE\)')
+        extract_emails(smtp, count=2, regex=True, subject=r'Booking rejected \(.+\) \(SINGLE OCCURRENCE\)')
     assert not smtp.outbox
 
 
@@ -324,7 +361,7 @@ def test_reject_single_occurrence(smtp, dummy_occurrence, dummy_user, silent):
         assert not dummy_occurrence.reservation.edit_logs.count()
     else:
         assert dummy_occurrence.reservation.edit_logs.count()
-        mails = extract_emails(smtp, count=2, regex=True, subject='Booking rejected on')
+        mails = extract_emails(smtp, count=2, regex=True, subject='Booking rejected')
         assert not any('SINGLE OCCURRENCE' in mail['subject'] for mail in mails)
     assert not smtp.outbox
 
@@ -393,6 +430,25 @@ def test_can_reject(create_reservation, dummy_user, state):
     assert occ.can_reject(dummy_user) == occ.is_valid
 
 
+def test_can_link(create_reservation, create_user, dummy_user):
+    reservation = create_reservation(start_dt=date.today() - relativedelta(days=1, hour=8),
+                                     end_dt=date.today() + relativedelta(days=1, hour=17),
+                                     repeat_frequency=RepeatFrequency.DAY)
+    occ = reservation.occurrences[-1]
+    occ.state = ReservationOccurrenceState.cancelled
+    assert not occ.can_link(dummy_user)
+
+    occ.state = ReservationOccurrenceState.valid
+    assert occ.can_link(dummy_user)
+
+    admin = create_user(123, rb_admin=True)
+    assert occ.can_link(admin)
+    assert not occ.can_link(admin, allow_admin=False)
+
+    other_user = create_user(124)
+    assert not occ.can_link(other_user)
+
+
 def test_can_cancel(create_reservation, dummy_user, freeze_time):
     reservation = create_reservation(start_dt=date.today() - relativedelta(days=1, hour=8),
                                      end_dt=date.today() + relativedelta(days=1, hour=17),
@@ -401,3 +457,20 @@ def test_can_cancel(create_reservation, dummy_user, freeze_time):
     assert not reservation.occurrences[0].can_cancel(dummy_user)
     assert not reservation.occurrences[1].can_cancel(dummy_user)
     assert reservation.occurrences[-1].can_cancel(dummy_user)
+
+
+def test_cannot_cancel_archived_or_ongoing_reservation(create_reservation, dummy_user, freeze_time):
+    reservation = create_reservation(start_dt=datetime.combine(date.today(), time(11)),
+                                     end_dt=datetime.combine(date.today(), time(17)),
+                                     repeat_frequency=RepeatFrequency.NEVER)
+    freeze_time(datetime.combine(date.today(), time(8)))
+    assert reservation.can_cancel(dummy_user)
+
+    freeze_time(datetime.combine(date.today(), time(13)))
+    assert not reservation.can_cancel(dummy_user)
+
+    freeze_time(datetime.combine(date.today(), time(17)))
+    assert not reservation.can_cancel(dummy_user)
+
+    freeze_time(datetime.combine(date.today(), time(17, 1)))
+    assert not reservation.can_cancel(dummy_user)

@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
@@ -35,13 +24,14 @@ def _print_files(files):
 def cleanup_cmd(temp=False, cache=False, min_age=1, dry_run=False, verbose=False):
     if cache:
         if verbose:
-            click.echo(click.style('cleaning cache ({})'.format(config.CACHE_DIR), fg='white', bold=True))
-        deleted = cleanup_dir(config.CACHE_DIR, timedelta(days=min_age), dry_run=dry_run)
+            click.echo(click.style(f'cleaning cache ({config.CACHE_DIR})', fg='white', bold=True))
+        deleted = cleanup_dir(config.CACHE_DIR, timedelta(days=min_age), dry_run=dry_run,
+                              exclude=lambda p: p == 'fontconfig')
         if verbose:
             _print_files(deleted)
     if temp:
         if verbose:
-            click.echo(click.style('cleaning temp ({})'.format(config.TEMP_DIR), fg='white', bold=True))
+            click.echo(click.style(f'cleaning temp ({config.TEMP_DIR})', fg='white', bold=True))
         deleted = cleanup_dir(config.TEMP_DIR, timedelta(days=min_age), dry_run=dry_run)
         if verbose:
             _print_files(deleted)

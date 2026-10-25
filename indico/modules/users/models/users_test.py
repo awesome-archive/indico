@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import itertools
 
@@ -20,6 +11,7 @@ import pytest
 from speaklater import is_lazy_string
 from sqlalchemy.exc import IntegrityError
 
+from indico.core import signals
 from indico.modules.users import User
 from indico.modules.users.models.users import UserTitle
 
@@ -61,7 +53,7 @@ def test_get_full_name(last_name_first, last_name_upper, abbrev_first_name, expe
     user.title = UserTitle.mr
     titled_name = user.get_full_name(last_name_first=last_name_first, last_name_upper=last_name_upper,
                                      abbrev_first_name=abbrev_first_name, show_title=True)
-    assert titled_name == 'Mr {}'.format(expected)
+    assert titled_name == f'Mr {expected}'
 
 
 @pytest.mark.parametrize(('first_name', 'last_name'), (
@@ -94,17 +86,29 @@ def test_emails(db):
 
 
 def test_make_email_primary(db):
-    user = User(first_name='Guinea', last_name='Pig', email='guinea@pig.com')
-    db.session.add(user)
-    db.session.flush()
-    with pytest.raises(ValueError):
+    signal_called = False
+
+    def _signal_fn(sender, old, new):
+        nonlocal signal_called
+        signal_called = True
+        assert sender is user
+        assert old == 'guinea@pig.com'
+        assert new == 'tasty@pig.com'
+
+    with signals.users.primary_email_changed.connected_to(_signal_fn):
+        user = User(first_name='Guinea', last_name='Pig', email='guinea@pig.com')
+        db.session.add(user)
+        db.session.flush()
+        with pytest.raises(ValueError):
+            user.make_email_primary('tasty@pig.com')
+        user.secondary_emails = {'tasty@pig.com', 'little@pig.com'}
+        db.session.flush()
+        assert not signal_called
         user.make_email_primary('tasty@pig.com')
-    user.secondary_emails = {'tasty@pig.com', 'little@pig.com'}
-    db.session.flush()
-    user.make_email_primary('tasty@pig.com')
-    db.session.expire(user)
-    assert user.email == 'tasty@pig.com'
-    assert user.secondary_emails == {'guinea@pig.com', 'little@pig.com'}
+        assert signal_called
+        db.session.expire(user)
+        assert user.email == 'tasty@pig.com'
+        assert user.secondary_emails == {'guinea@pig.com', 'little@pig.com'}
 
 
 def test_deletion(db):
@@ -141,7 +145,7 @@ def test_title(db):
     user.title = UserTitle.prof
     assert user.title == UserTitle.prof.title
     assert is_lazy_string(user.title)
-    assert User.find_one(title=UserTitle.prof) == user
+    assert User.query.filter_by(title=UserTitle.prof).one() == user
 
 
 @pytest.mark.parametrize(('first_name', 'last_name'), (
@@ -150,11 +154,19 @@ def test_title(db):
     ('',       '')
 ))
 def test_no_names(db, first_name, last_name):
+    db.session.add(User(first_name=first_name, last_name=last_name))
     with pytest.raises(IntegrityError):
-        db.session.add(User(first_name=first_name, last_name=last_name))
         db.session.flush()
 
 
 def test_no_names_pending(db):
     db.session.add(User(first_name='', last_name='', is_pending=True))
     db.session.flush()
+
+
+def test_identifiers(app, dummy_user):
+    id1, pid1 = dummy_user.identifier, dummy_user.persistent_identifier
+    app.secret_key += b'x'
+    id2, pid2 = dummy_user.identifier, dummy_user.persistent_identifier
+    assert id1 != id2
+    assert pid1 == pid2

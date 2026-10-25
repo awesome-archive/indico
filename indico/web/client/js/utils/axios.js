@@ -1,65 +1,52 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
-
-/* global showErrorDialog:false */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 import axios from 'axios';
-import isURLSameOrigin from 'axios/lib/helpers/isURLSameOrigin';
+import isURLSameOrigin from 'axios/unsafe/helpers/isURLSameOrigin';
 import qs from 'qs';
 
+import showReactErrorDialog from 'indico/react/errors';
 import {$T} from 'indico/utils/i18n';
 
-
 export const indicoAxios = axios.create({
-    paramsSerializer: (params) => qs.stringify(params, {arrayFormat: 'repeat'}),
-    xsrfCookieName: null,
-    xsrfHeaderName: null,
+  paramsSerializer: params => qs.stringify(params, {arrayFormat: 'repeat'}),
+  xsrfCookieName: null,
+  xsrfHeaderName: null,
 });
 
-indicoAxios.interceptors.request.use((config) => {
-    if (isURLSameOrigin(config.url)) {
-        config.headers.common['X-Requested-With'] = 'XMLHttpRequest';  // needed for `request.is_xhr`
-        config.headers.common['X-CSRF-Token'] = document.getElementById('csrf-token').getAttribute('content');
-    }
-    return config;
-});
+indicoAxios.isCancel = axios.isCancel;
 
+indicoAxios.interceptors.request.use(config => {
+  // only set the headers on local requests and not when we are inside a unit test since the
+  // axios mock does not have `config.headers`
+  if (isURLSameOrigin(config.url) && !process.env.JEST_WORKER_ID) {
+    config.headers['X-Requested-With'] = 'XMLHttpRequest'; // needed for `request.is_xhr`
+    config.headers['X-CSRF-Token'] = document.getElementById('csrf-token').getAttribute('content');
+  }
+  return config;
+});
 
 export function handleAxiosError(error, strict = false) {
-    if (error.response && error.response.data && error.response.data.error) {
-        error = error.response.data.error;
-    } else {
-        if (strict) {
-            throw error;
-        }
-        error = {
-            title: $T.gettext('Something went wrong'),
-            message: error.message,
-            report_url: null
-        };
+  if (axios.isCancel(error)) {
+    return;
+  }
+  if (error.response && error.response.data && error.response.data.error) {
+    error = error.response.data.error;
+  } else {
+    if (strict) {
+      throw error;
     }
-    if (window.showErrorDialog) {
-        showErrorDialog(error);
-    } else {
-        import(/* webpackMode: "weak" */ 'indico/react/errors').then(({default: showReactErrorDialog}) => {
-            showReactErrorDialog(error);
-        });
-    }
-    return error.message;
+    error = {
+      title: $T.gettext('Something went wrong'),
+      message: error.message,
+    };
+  }
+  showReactErrorDialog(error);
+  return error.message;
 }
 
 export default indicoAxios;

@@ -1,32 +1,27 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from flask import has_request_context, request
 
-from flask import request
-
-from indico.modules.users.api import fetch_authenticated_user
-from indico.modules.users.controllers import (RHAcceptRegistrationRequest, RHAdmins, RHPersonalData,
-                                              RHRegistrationRequestList, RHRejectRegistrationRequest, RHUserDashboard,
-                                              RHUserEmails, RHUserEmailsDelete, RHUserEmailsSetPrimary,
-                                              RHUserEmailsVerify, RHUserFavorites, RHUserFavoritesCategoryAPI,
-                                              RHUserFavoritesUserRemove, RHUserFavoritesUsersAdd, RHUserPreferences,
+from indico.modules.users.api import RHUserAPI
+from indico.modules.users.controllers import (RHAcceptRegistrationRequest, RHAdmins, RHAffiliationAPI,
+                                              RHAffiliationsAPI, RHAffiliationsDashboard, RHExportDashboardICS,
+                                              RHExportDashboardICSLegacy, RHPersonalData, RHPersonalDataUpdate,
+                                              RHProfilePictureDisplay, RHProfilePicturePage, RHProfilePicturePreview,
+                                              RHRegistrationRequestList, RHRejectRegistrationRequest,
+                                              RHSaveProfilePicture, RHSearchAffiliations, RHUserBlock, RHUserDashboard,
+                                              RHUserDataExport, RHUserDataExportAPI, RHUserDataExportDownload,
+                                              RHUserDelete, RHUserEmails, RHUserEmailsDelete, RHUserEmailsSetPrimary,
+                                              RHUserEmailsVerify, RHUserFavorites, RHUserFavoritesAPI,
+                                              RHUserFavoritesCategoryAPI, RHUserFavoritesEventAPI, RHUserPreferences,
+                                              RHUserPreferencesMarkdownAPI, RHUserPreferencesMastodonServer,
                                               RHUsersAdmin, RHUsersAdminCreate, RHUsersAdminMerge,
                                               RHUsersAdminMergeCheck, RHUsersAdminSettings, RHUserSearch,
-                                              RHUserSuggestionsRemove)
+                                              RHUserSearchInfo, RHUserSearchToken, RHUserSuggestionsRemove)
 from indico.web.flask.wrappers import IndicoBlueprint
 
 
@@ -48,30 +43,64 @@ _bp.add_url_rule('!/admin/users/registration-requests/<int:request_id>/accept', 
 _bp.add_url_rule('!/admin/users/registration-requests/<int:request_id>/reject', 'reject_registration_request',
                  RHRejectRegistrationRequest, methods=('POST',))
 
-
 # User profile
 with _bp.add_prefixed_rules('/<int:user_id>'):
+    # XXX: endpoint names here should start with `user_` so the `_add_user_id`
+    # function below does it job properly!
+    # also, when adding new code here, make sure to test acting on a different user
+    # to make sure everything works correctly, ie you are not changing/showing
+    # something for the wrong user (yourself)!
     _bp.add_url_rule('/dashboard/', 'user_dashboard', RHUserDashboard)
     _bp.add_url_rule('/suggestions/categories/<int:category_id>', 'user_suggestions_remove', RHUserSuggestionsRemove,
                      methods=('DELETE',))
     _bp.add_url_rule('/profile/', 'user_profile', RHPersonalData, methods=('GET', 'POST'))
+    _bp.add_url_rule('/profile/', 'user_profile_update', RHPersonalDataUpdate, methods=('PATCH',))
+    _bp.add_url_rule('/profile/picture', 'user_profile_picture_page', RHProfilePicturePage)
+    _bp.add_url_rule('/profile/picture', 'save_profile_picture', RHSaveProfilePicture, methods=('POST',))
+    _bp.add_url_rule('/profile/picture/preview/<any(standard,gravatar,identicon,custom):source>',
+                     'profile_picture_preview', RHProfilePicturePreview)
     _bp.add_url_rule('/preferences/', 'user_preferences', RHUserPreferences, methods=('GET', 'POST'))
+    _bp.add_url_rule('/api/preferences/markdown', 'user_preferences_markdown_api', RHUserPreferencesMarkdownAPI)
+    _bp.add_url_rule('/api/preferences/mastodon', 'user_preferences_mastodon_server',
+                     RHUserPreferencesMastodonServer, methods=('POST',))
     _bp.add_url_rule('/favorites/', 'user_favorites', RHUserFavorites)
-    _bp.add_url_rule('/favorites/users/', 'user_favorites_users_add', RHUserFavoritesUsersAdd, methods=('POST',))
-    _bp.add_url_rule('/favorites/users/<int:fav_user_id>', 'user_favorites_user_remove', RHUserFavoritesUserRemove,
-                     methods=('DELETE',))
-    _bp.add_url_rule('/favorites/categories/<int:category_id>', 'user_favorites_category_api',
-                     RHUserFavoritesCategoryAPI, methods=('PUT', 'DELETE'))
+    _bp.add_url_rule('/api/favorites/users', 'favorites_api', RHUserFavoritesAPI)
+    _bp.add_url_rule('/api/favorites/users/<identifier>', 'favorites_api', RHUserFavoritesAPI,
+                     methods=('PUT', 'DELETE'))
+    _bp.add_url_rule('/api/favorites/categories', 'user_favorites_category_api', RHUserFavoritesCategoryAPI)
+    _bp.add_url_rule('/api/favorites/categories/<int:category_id>', 'user_favorites_category_api',
+                     RHUserFavoritesCategoryAPI, methods=('GET', 'PUT', 'DELETE'))
+    _bp.add_url_rule('/api/favorites/events', 'user_favorites_event_api', RHUserFavoritesEventAPI)
+    _bp.add_url_rule('/api/favorites/events/<int:event_id>', 'user_favorites_event_api',
+                     RHUserFavoritesEventAPI, methods=('GET', 'PUT', 'DELETE'))
     _bp.add_url_rule('/emails/', 'user_emails', RHUserEmails, methods=('GET', 'POST'))
     _bp.add_url_rule('/emails/verify/<token>', 'user_emails_verify', RHUserEmailsVerify)
     _bp.add_url_rule('/emails/<email>', 'user_emails_delete', RHUserEmailsDelete, methods=('DELETE',))
     _bp.add_url_rule('/emails/make-primary', 'user_emails_set_primary', RHUserEmailsSetPrimary, methods=('POST',))
+    _bp.add_url_rule('/blocked', 'user_block', RHUserBlock, methods=('PUT', 'DELETE'))
+    _bp.add_url_rule('/delete', 'user_delete', RHUserDelete, methods=('DELETE',))
+    _bp.add_url_rule('/data-export', 'user_data_export', RHUserDataExport)
+    _bp.add_url_rule('/data-export.zip', 'user_data_export_download', RHUserDataExportDownload)
+    _bp.add_url_rule('/api/data-export', 'api_user_data_export', RHUserDataExportAPI, methods=('GET', 'POST'))
+
+_bp.add_url_rule('/dashboard.ics', 'export_dashboard_ics', RHExportDashboardICS)
+_bp.add_url_rule('/<int:user_id>/dashboard.ics', 'export_dashboard_ics_legacy', RHExportDashboardICSLegacy)
+_bp.add_url_rule('/<int:user_id>/picture-<slug>/<signature>', 'user_profile_picture_display', RHProfilePictureDisplay)
 
 # User search
+_bp.add_url_rule('/search/info', 'user_search_info', RHUserSearchInfo)
 _bp.add_url_rule('/search/', 'user_search', RHUserSearch)
+_bp.add_url_rule('/search/token', 'user_search_token', RHUserSearchToken)
+
+# Affiliations
+_bp.add_url_rule('!/admin/affiliations', 'affiliations_dashboard', RHAffiliationsDashboard)
+_bp.add_url_rule('!/api/admin/affiliations', 'api_admin_affiliations', RHAffiliationsAPI, methods=('GET', 'POST'))
+_bp.add_url_rule('!/api/admin/affiliations/<int:affiliation_id>', 'api_admin_affiliation', RHAffiliationAPI,
+                 methods=('GET', 'PATCH', 'DELETE'))
 
 # Users API
-_bp.add_url_rule('!/api/user/', 'authenticated_user', fetch_authenticated_user)
+_bp.add_url_rule('!/api/user/', 'authenticated_user', RHUserAPI)
+_bp.add_url_rule('!/api/affiliations/', 'api_affiliations', RHSearchAffiliations)
 
 
 @_bp.url_defaults
@@ -85,5 +114,5 @@ def _add_user_id(endpoint, values):
     Note that this needs to be replicated in other blueprints when they add
     stuff to the user pages using the `user_sidemenu` signal.
     """
-    if endpoint.startswith('users.user_') and 'user_id' not in values:
+    if endpoint.startswith('users.user_') and 'user_id' not in values and has_request_context():
         values['user_id'] = request.view_args.get('user_id')

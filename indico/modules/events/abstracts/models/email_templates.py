@@ -1,37 +1,28 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from sqlalchemy.dialects.postgresql import ARRAY, JSON
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from indico.core.db import db
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr
 
 
 def _get_next_position(context):
     """Get the next email template position for the event."""
     event_id = context.current_parameters['event_id']
-    res = db.session.query(db.func.max(AbstractEmailTemplate.position)).filter_by(event_id=event_id).one()
+    res = (db.session.query(db.func.max(AbstractEmailTemplate.position))
+           .filter(AbstractEmailTemplate.event_id == event_id)
+           .one())
     return (res[0] or 0) + 1
 
 
 class AbstractEmailTemplate(db.Model):
-    """Represents an email template for abstracts notifications."""
+    """An email template for abstracts notifications."""
 
     __tablename__ = 'email_templates'
     __table_args__ = {'schema': 'event_abstracts'}
@@ -104,7 +95,7 @@ class AbstractEmailTemplate(db.Model):
     )
     #: Conditions need to be met to send the email
     rules = db.Column(
-        JSON,
+        JSONB,
         nullable=False
     )
 
@@ -124,6 +115,5 @@ class AbstractEmailTemplate(db.Model):
     def locator(self):
         return dict(self.event.locator, email_tpl_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'event_id', _text=self.title)

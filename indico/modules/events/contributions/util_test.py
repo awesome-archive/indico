@@ -1,28 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime, timedelta
 from io import BytesIO
 
 import pytest
 
+from indico.core.db.sqlalchemy.principals import EmailPrincipal
 from indico.core.errors import UserValueError
-from indico.modules.events.contributions.util import import_contributions_from_csv
+from indico.modules.events.contributions.models.persons import ContributionPersonLink
+from indico.modules.events.contributions.util import (get_contributions_for_user,
+                                                      get_contributions_with_user_as_submitter,
+                                                      has_contributions_with_user_as_submitter,
+                                                      import_contributions_from_csv, user_has_contributions)
+from indico.modules.events.models.persons import EventPerson
 from indico.util.date_time import as_utc
 
 
@@ -37,8 +32,8 @@ def test_import_contributions(dummy_event, dummy_user):
     dummy_event.end_dt = as_utc(datetime(2017, 11, 27, 12, 0, 0))
 
     csv = b'\n'.join([b'2017-11-27T08:00,10,First contribution,,,,',
-                      b',,Second contribution,John,Doe,ACME Inc.,jdoe@example.com',
-                      b'2017-11-27T08:30,15,Third contribution,Guinea Albert,Pig,,1337@example.com'])
+                      b',,Second contribution,John,Doe,ACME Inc.,jdoe@example.test',
+                      b'2017-11-27T08:30,15,Third contribution,Guinea Albert,Pig,,1337@example.test'])
 
     contributions, changes = import_contributions_from_csv(dummy_event, BytesIO(csv))
     assert len(contributions) == 3
@@ -55,7 +50,7 @@ def test_import_contributions(dummy_event, dummy_user):
     assert len(speakers) == 1
     assert speakers[0].full_name == 'John Doe'
     assert speakers[0].affiliation == 'ACME Inc.'
-    assert speakers[0].email == 'jdoe@example.com'
+    assert speakers[0].email == 'jdoe@example.test'
 
     assert contributions[2].start_dt == as_utc(datetime(2017, 11, 27, 8, 30, 0))
     assert contributions[2].duration == timedelta(minutes=15)
@@ -65,13 +60,14 @@ def test_import_contributions(dummy_event, dummy_user):
     # name comes from PersonLink, not user
     assert speakers[0].full_name == 'Guinea Albert Pig'
     assert not speakers[0].affiliation
-    assert speakers[0].email == '1337@example.com'
+    assert speakers[0].email == '1337@example.test'
     assert speakers[0].person.user == dummy_user
 
     assert not changes
 
 
-def test_import_contributions_changes(db, dummy_event, dummy_user):
+@pytest.mark.usefixtures('db', 'dummy_user')
+def test_import_contributions_changes(dummy_event):
     original_start_dt = as_utc(datetime(2017, 11, 27, 8, 0, 0))
     original_end_dt = as_utc(datetime(2017, 11, 27, 12, 0, 0))
     dummy_event.start_dt = original_start_dt
@@ -79,10 +75,10 @@ def test_import_contributions_changes(db, dummy_event, dummy_user):
 
     # Change of end time
     csv = b'\n'.join([b'2017-11-27T08:00,10,First contribution,,,,',
-                      b'2017-11-27T08:10:00,10,Second contribution,John,Doe,ACME Inc.,jdoe@example.com',
-                      b'2017-11-27T11:30,60,Third contribution,Guinea Albert,Pig,,1337@example.com'])
+                      b'2017-11-27T08:10:00,10,Second contribution,John,Doe,ACME Inc.,jdoe@example.test',
+                      b'2017-11-27T11:30,60,Third contribution,Guinea Albert,Pig,,1337@example.test'])
 
-    contributions, changes = import_contributions_from_csv(dummy_event, BytesIO(csv))
+    changes = import_contributions_from_csv(dummy_event, BytesIO(csv))[1]
     new_end_dt = as_utc(datetime(2017, 11, 27, 12, 30, 0))
     assert dummy_event.end_dt == new_end_dt
     assert changes == {
@@ -96,10 +92,10 @@ def test_import_contributions_changes(db, dummy_event, dummy_user):
 
     # Change of start/end date
     csv = b'\n'.join([b'2017-11-26T08:00,10,First contribution,,,,',
-                      b'2017-11-27T08:10:00,10,Second contribution,John,Doe,ACME Inc.,jdoe@example.com',
-                      b'2017-11-28T11:30,60,Third contribution,Guinea Albert,Pig,,1337@example.com'])
+                      b'2017-11-27T08:10:00,10,Second contribution,John,Doe,ACME Inc.,jdoe@example.test',
+                      b'2017-11-28T11:30,60,Third contribution,Guinea Albert,Pig,,1337@example.test'])
 
-    contributions, changes = import_contributions_from_csv(dummy_event, BytesIO(csv))
+    changes = import_contributions_from_csv(dummy_event, BytesIO(csv))[1]
     new_start_dt = as_utc(datetime(2017, 11, 26, 8, 0, 0))
     new_end_dt = as_utc(datetime(2017, 11, 28, 12, 30, 0))
     assert dummy_event.start_dt == new_start_dt
@@ -107,24 +103,49 @@ def test_import_contributions_changes(db, dummy_event, dummy_user):
     assert len(changes) == 3
 
 
-def test_import_contributions_errors(db, dummy_event):
+@pytest.mark.usefixtures('db')
+def test_import_contributions_errors(dummy_event):
     original_start_dt = as_utc(datetime(2017, 11, 27, 8, 0, 0))
     original_end_dt = as_utc(datetime(2017, 11, 27, 12, 0, 0))
     dummy_event.start_dt = original_start_dt
     dummy_event.end_dt = original_end_dt
 
     e = _check_importer_exception(dummy_event, b',,Test,,,,,')
-    assert 'malformed' in e.message
-    assert 'Row 1' in e.message
+    assert 'malformed' in str(e)
+    assert 'Row 1' in str(e)
 
     e = _check_importer_exception(dummy_event, b',,,,,,')
-    assert 'title' in e.message
+    assert 'title' in str(e)
 
     e = _check_importer_exception(dummy_event, b'2010-23-02T00:00:00,,Test,,,,')
-    assert 'parse date' in e.message
+    assert 'parse date' in str(e)
 
     e = _check_importer_exception(dummy_event, b'2010-02-23T00:00:00,15min,Test,,,,')
-    assert 'parse duration' in e.message
+    assert 'parse duration' in str(e)
 
     e = _check_importer_exception(dummy_event, b'2010-02-23T00:00:00,15,Test,Test,Test,Test,foobar')
-    assert 'invalid email' in e.message
+    assert 'invalid email' in str(e)
+
+
+def test_user_contrib_queries(dummy_user, dummy_event, create_contribution):
+    # just a contribution w/o any ACL or persons
+    create_contribution(dummy_event, 'C1')
+    # non-user ACL entry
+    c2 = create_contribution(dummy_event, 'C2')
+    c2.update_principal(EmailPrincipal('foo@example.com'), add_permissions={'submit'})
+    # person link with no user
+    create_contribution(
+        dummy_event,
+        'C3',
+        person_links=[ContributionPersonLink(person=EventPerson(event=dummy_event, last_name='Foo'), is_speaker=True)],
+    )
+    # no user - should never match anything
+    assert not get_contributions_with_user_as_submitter(dummy_event, None)
+    assert not has_contributions_with_user_as_submitter(dummy_event, None)
+    assert not get_contributions_for_user(dummy_event, None)
+    assert not user_has_contributions(dummy_event, None)
+    # unrelated user - likewise
+    assert not get_contributions_with_user_as_submitter(dummy_event, dummy_user)
+    assert not has_contributions_with_user_as_submitter(dummy_event, dummy_user)
+    assert not get_contributions_for_user(dummy_event, dummy_user)
+    assert not user_has_contributions(dummy_event, dummy_user)

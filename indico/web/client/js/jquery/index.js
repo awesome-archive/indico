@@ -1,19 +1,11 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+/* global _, moment */
 
 import './compat/jquery-ui';
 
@@ -21,12 +13,27 @@ import 'jquery-colorbox';
 import 'jquery-colorbox/example1/colorbox.css';
 
 import 'jquery-form';
-import 'jstorage';
 
 // moment.js locales
-import 'moment/locale/en-gb';
-import 'moment/locale/fr';
+import 'moment/locale/cs';
+import 'moment/locale/de';
+import 'moment/locale/en-ca';
 import 'moment/locale/es';
+import 'moment/locale/fi';
+import 'moment/locale/fr';
+import 'moment/locale/hu';
+import 'moment/locale/it';
+import 'moment/locale/ja';
+import 'moment/locale/ko';
+import 'moment/locale/mn';
+import 'moment/locale/pl';
+import 'moment/locale/pt-br';
+import 'moment/locale/sv';
+import 'moment/locale/tr';
+import 'moment/locale/uk';
+import 'moment/locale/zh-cn';
+// Last imported locale is used as fallback
+import 'moment/locale/en-gb';
 
 import 'tablesorter';
 import Taggle from 'taggle';
@@ -59,20 +66,23 @@ import './utils/misc';
 import './utils/routing';
 import './utils/sortablelist';
 
-
 // jQuery-migrate should be muted when in production
 if (process.env.NODE_ENV !== 'development') {
-    $.migrateMute = true;
+  $.migrateMute = true;
 }
+$.migrateMute = true;
 // explicit tracebacks are not needed
 $.migrateTrace = false;
+// eslint-disable-next-line import/no-commonjs
 require('jquery-migrate');
 
 // These global definitions are needed so that
 // legacy code can access them globally
 Object.assign(window, {
-    _, moment, $T,
-    i18n: defaultI18n
+  _, // FYI: this is underscore, not lodash
+  moment,
+  $T,
+  i18n: defaultI18n,
 });
 
 window.Taggle = Taggle;

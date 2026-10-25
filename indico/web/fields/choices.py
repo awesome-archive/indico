@@ -1,25 +1,15 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import division, unicode_literals
-
-from wtforms.fields import SelectField
-from wtforms.fields.html5 import IntegerField
+from sqlalchemy.dialects.postgresql import ARRAY
+from wtforms.fields import IntegerField, SelectField
 from wtforms.validators import DataRequired, Length, NumberRange, Optional, ValidationError
 
+from indico.core.db import db
 from indico.util.i18n import _, ngettext
 from indico.web.fields.base import BaseField
 from indico.web.forms.fields import IndicoRadioField, IndicoSelectMultipleCheckboxField, MultiStringField
@@ -32,20 +22,20 @@ class _ChoiceFieldBase(BaseField):
         Return a copy of the field's configuration data without
         the IDs used to identify selected options.
         """
-        field_data_copy = super(_ChoiceFieldBase, self).copy_field_data()
+        field_data_copy = super().copy_field_data()
         for option in field_data_copy['options']:
             del option['id']
         return field_data_copy
 
 
-class SingleChoiceConfigForm(object):
+class SingleChoiceConfigForm:
     display_type = IndicoRadioField(_('Display type'), [DataRequired()],
                                     description=_('Widget that will be used to render the available options'),
                                     choices=[('radio', _('Radio buttons')),
                                              ('select', _('Drop-down list'))],
                                     default='radio')
     radio_display_type = IndicoRadioField(_('Alignment'),
-                                          [DataRequired(), HiddenUnless('display_type', 'radio')],
+                                          [HiddenUnless('display_type', 'radio'), DataRequired()],
                                           description=_('The arrangement of the options'),
                                           choices=[('vertical', _('Vertical')),
                                                    ('horizontal', _('Horizontal'))])
@@ -56,14 +46,14 @@ class SingleChoiceConfigForm(object):
 
 class _EmptyNoneSelectField(SelectField):
     def process_formdata(self, valuelist):
-        super(_EmptyNoneSelectField, self).process_formdata(valuelist)
+        super().process_formdata(valuelist)
         if not self.data:
             self.data = None
 
 
 class _EmptyNoneRadioField(IndicoRadioField):
     def process_formdata(self, valuelist):
-        super(_EmptyNoneRadioField, self).process_formdata(valuelist)
+        super().process_formdata(valuelist)
         if not self.data:
             self.data = None
 
@@ -79,13 +69,13 @@ class SingleChoiceField(_ChoiceFieldBase):
         choices = [(x['id'], x['option']) for x in self.object.field_data['options']]
         if self.object.field_data['display_type'] == 'select':
             field_class = _EmptyNoneSelectField
-            choices = [('', '')] + choices
+            choices = [('', ''), *choices]
         else:
             field_class = _EmptyNoneRadioField
             field_options['orientation'] = self.object.field_data['radio_display_type']
             if field_options['orientation'] == 'vertical' and not self.object.is_required:
                 field_options['default'] = ''
-                choices = [('', _('No selection'))] + choices
+                choices = [('', _('No selection')), *choices]
         return self._make_wtforms_field(field_class, choices=choices, **field_options)
 
     def is_value_empty(self, value):
@@ -97,13 +87,13 @@ class SingleChoiceField(_ChoiceFieldBase):
         return option_map.get(value) or ''
 
 
-class MultiSelectConfigForm(object):
+class MultiSelectConfigForm:
     options = MultiStringField(_('Options'), [DataRequired()], field=('option', _('option')), unique=True,
                                uuid_field='id', sortable=True, description=_('Specify the answers the user can select'))
-    min_choices = IntegerField(_("Minimum choices"), [HiddenUnless('is_required'), Optional(), NumberRange(min=0)],
-                               description=_("The minimum amount of options the user has to choose."))
-    max_choices = IntegerField(_("Maximum choices"), [HiddenUnless('is_required'), Optional(), NumberRange(min=1)],
-                               description=_("The maximum amount of options the user may choose."))
+    min_choices = IntegerField(_('Minimum choices'), [HiddenUnless('is_required'), Optional(), NumberRange(min=0)],
+                               description=_('The minimum amount of options the user has to choose.'))
+    max_choices = IntegerField(_('Maximum choices'), [Optional(), NumberRange(min=1)],
+                               description=_('The maximum amount of options the user may choose.'))
 
     def _validate_min_max_choices(self):
         if (self.min_choices.data is not None and self.max_choices.data is not None and
@@ -114,14 +104,14 @@ class MultiSelectConfigForm(object):
         if field.data is None:
             return
         if field.data >= len(self.options.data):
-            raise ValidationError(_("Minimum choices must be fewer than the total number of options."))
+            raise ValidationError(_('Minimum choices must be fewer than the total number of options.'))
 
     def validate_max_choices(self, field):
         if field.data is None:
             return
         self._validate_min_max_choices()
         if field.data > len(self.options.data):
-            raise ValidationError(_("Maximum choices must be fewer or equal than the total number of options."))
+            raise ValidationError(_('Maximum choices must be fewer or equal than the total number of options.'))
 
 
 class MultiSelectField(_ChoiceFieldBase):
@@ -157,5 +147,17 @@ class MultiSelectField(_ChoiceFieldBase):
                 'coerce': lambda x: x}
 
     def get_friendly_value(self, value):
+        if not value:
+            return []
         option_map = {option_dict['id']: option_dict['option'] for option_dict in self.object.field_data['options']}
         return [option_map[id_] for id_ in value if id_ in option_map]
+
+    def create_sql_filter(self, db_field, data_list):
+        data_list = set(data_list)
+        criteria = []
+        if None in data_list:
+            data_list.discard(None)
+            criteria.append(db_field == [])
+        if data_list:
+            criteria.append(db_field.has_any(db.func.cast(data_list, ARRAY(db.String))))
+        return db.or_(*criteria)

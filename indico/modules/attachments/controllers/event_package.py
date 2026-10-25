@@ -1,53 +1,57 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+import functools
 import os
-from collections import OrderedDict
-from datetime import timedelta
 
-from flask import flash, session
+from celery.exceptions import TimeoutError
+from flask import flash, jsonify, request, session
 from markupsafe import escape
 from sqlalchemy import Date, cast
+from werkzeug.exceptions import Forbidden, TooManyRequests
+from werkzeug.local import LocalProxy
 
+from indico.core.celery import AsyncResult
+from indico.core.config import config
 from indico.core.db import db
 from indico.core.db.sqlalchemy.links import LinkType
+from indico.core.errors import IndicoError
+from indico.core.limiter import make_rate_limiter
 from indico.modules.attachments.forms import AttachmentPackageForm
 from indico.modules.attachments.models.attachments import Attachment, AttachmentFile, AttachmentType
 from indico.modules.attachments.models.folders import AttachmentFolder
+from indico.modules.attachments.tasks import generate_materials_package
+from indico.modules.core.captcha import invalidate_captcha
 from indico.modules.events.contributions.models.contributions import Contribution
 from indico.modules.events.contributions.models.subcontributions import SubContribution
+from indico.modules.events.controllers.base import RHDisplayEventBase
 from indico.modules.events.sessions.models.sessions import Session
 from indico.modules.events.util import ZipGeneratorMixin
-from indico.util.date_time import format_date, format_time
+from indico.util.date_time import format_date, format_human_timedelta, format_time
 from indico.util.fs import secure_filename
 from indico.util.i18n import _
-from indico.util.string import natural_sort_key, to_unicode
+from indico.util.string import natural_sort_key
 from indico.web.forms.base import FormDefaults
+from indico.web.util import jsonify_data
+
+
+#: A rate limiter for material packages created by regular users (or guests)
+material_package_rate_limiter = LocalProxy(
+    functools.cache(lambda: make_rate_limiter('material-package', config.MATERIAL_PACKAGE_RATE_LIMIT))
+)
 
 
 def _get_start_dt(obj):
-    # TODO: adapt to new models (needs extra properties to use event TZ)
     if isinstance(obj, Contribution):
         return obj.timetable_entry.start_dt if obj.timetable_entry else None
     elif isinstance(obj, SubContribution):
         return obj.timetable_entry.start_dt if obj.timetable_entry else None
     elif isinstance(obj, Session):
-        return None
+        return obj.start_dt  # start_dt of the first block
     return obj.start_dt
 
 
@@ -60,7 +64,6 @@ def _get_obj_parent(obj):
 
 
 class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
-
     #: Whether unscheduled contributions should be included
     ALLOW_UNSCHEDULED = False
 
@@ -88,9 +91,10 @@ class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
         return [attachment for attachment in query if _get_start_dt(attachment.folder.object) is not None]
 
     def _build_base_query(self, added_since=None):
-        query = Attachment.find(Attachment.type == AttachmentType.file, ~AttachmentFolder.is_deleted,
-                                ~Attachment.is_deleted, AttachmentFolder.event == self.event,
-                                _join=AttachmentFolder)
+        query = (Attachment.query
+                 .filter(Attachment.type == AttachmentType.file, ~AttachmentFolder.is_deleted,
+                         ~Attachment.is_deleted, AttachmentFolder.event == self.event)
+                 .join(AttachmentFolder))
         if added_since is not None:
             query = query.join(Attachment.file).filter(cast(AttachmentFile.created_dt, Date) >= added_since)
         return query
@@ -117,7 +121,7 @@ class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
                 continue
             if (isinstance(linked_obj, SubContribution) and not linked_obj.contribution.is_deleted and
                     linked_obj.contribution_id in contribution_ids):
-                    objs.append(attachment)
+                objs.append(attachment)
             elif isinstance(linked_obj, Contribution) and linked_obj.id in contribution_ids:
                 objs.append(attachment)
 
@@ -131,9 +135,9 @@ class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
             start_dt = _get_start_dt(attachment.folder.object)
             if start_dt is None:
                 return None
-            return unicode(start_dt.date()) in dates
+            return str(start_dt.date()) in dates
 
-        return filter(_check_date, self._build_base_query())
+        return list(filter(_check_date, self._build_base_query()))
 
     def _iter_items(self, attachments):
         for attachment in attachments:
@@ -147,13 +151,13 @@ class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
             segments.append('Unscheduled')
         segments.extend(self._get_base_path(attachment))
         if not attachment.folder.is_default:
-            segments.append(secure_filename(attachment.folder.title, unicode(attachment.folder.id)))
+            segments.append(secure_filename(attachment.folder.title, str(attachment.folder.id)))
         segments.append(attachment.file.filename)
-        path = os.path.join(*self._adjust_path_length(filter(None, segments)))
+        path = os.path.join(*self._adjust_path_length([_f for _f in segments if _f]))
         while path in self.used_filenames:
             # prepend the id if there's a path collision
-            segments[-1] = '{}-{}'.format(attachment.id, segments[-1])
-            path = os.path.join(*self._adjust_path_length(filter(None, segments)))
+            segments[-1] = f'{attachment.id}-{segments[-1]}'
+            path = os.path.join(*self._adjust_path_length([_f for _f in segments if _f]))
         return path
 
     def _get_base_path(self, attachment):
@@ -164,15 +168,15 @@ class AttachmentPackageGeneratorMixin(ZipGeneratorMixin):
             start_date = _get_start_dt(obj)
             if start_date is not None:
                 if isinstance(obj, SubContribution):
-                    paths.append(secure_filename('{}_{}'.format(obj.position, obj.title), ''))
+                    paths.append(secure_filename(f'{obj.position}_{obj.title}', ''))
                 else:
                     time = format_time(start_date, format='HHmm', timezone=self.event.timezone)
-                    paths.append(secure_filename('{}_{}'.format(to_unicode(time), obj.title), ''))
-            else:
+                    paths.append(secure_filename(f'{time}_{obj.title}', ''))
+            else:  # noqa: PLR5501
                 if isinstance(obj, SubContribution):
-                    paths.append(secure_filename('{}_{}'.format(obj.position, obj.title), unicode(obj.id)))
+                    paths.append(secure_filename(f'{obj.position}_{obj.title}', str(obj.id)))
                 else:
-                    paths.append(secure_filename(obj.title, unicode(obj.id)))
+                    paths.append(secure_filename(obj.title, str(obj.id)))
             obj = _get_obj_parent(obj)
 
         linked_obj_start_date = _get_start_dt(linked_object)
@@ -186,25 +190,53 @@ class AttachmentPackageMixin(AttachmentPackageGeneratorMixin):
     wp = None
     management = False
 
+    def _check_access(self):
+        if not self.event.can_generate_attachment_package(session.user):
+            raise Forbidden
+
+    @property
+    def should_apply_rate_limit(self):
+        return not self.management and not self.event.can_manage(session.user)
+
+    @property
+    def should_show_captcha(self):
+        return self.should_apply_rate_limit and not session.user
+
     def _process(self):
         form = self._prepare_form()
         if form.validate_on_submit():
-            attachments = self._filter_attachments(form.data)
+            attachments = [attachment.id for attachment in self._filter_attachments(form.data)]
             if attachments:
-                return self._generate_zip_file(attachments)
+                if self.should_apply_rate_limit:
+                    # only increment the rate limit if the user is not a manager, so we don't annoy event managers
+                    # who use the button in the display view for some reason, instead of doing it via the management
+                    # area...
+                    if not material_package_rate_limiter.hit():
+                        delay = format_human_timedelta(material_package_rate_limiter.get_reset_delay())
+                        raise TooManyRequests(f"You're doing this too fast, please try again in {delay}")
+                    invalidate_captcha()
+                task = generate_materials_package.delay(attachments, self.event)
+                return jsonify(task_id=task.id, success=True)
             else:
                 flash(_('There are no materials matching your criteria.'), 'warning')
+                return jsonify_data(success=False)
+        elif form.is_submitted():
+            flash('; '.join(form.error_list), 'warning')
+            return jsonify_data(success=False)
 
         return self.wp.render_template('generate_package.html', self.event, form=form, management=self.management)
 
     def _prepare_form(self):
         form = AttachmentPackageForm(obj=FormDefaults(filter_type='all'))
+        if not self.should_show_captcha:
+            del form.captcha
         form.dates.choices = list(self._iter_event_days())
-        filter_types = OrderedDict()
-        filter_types['all'] = _('Everything')
-        filter_types['sessions'] = _('Specific sessions')
-        filter_types['contributions'] = _('Specific contributions')
-        filter_types['dates'] = _('Specific days')
+        filter_types = {
+            'all': _('Everything'),
+            'sessions': _('Specific sessions'),
+            'contributions': _('Specific contributions'),
+            'dates': _('Specific days'),
+        }
 
         form.sessions.choices = self._load_session_data()
         if not form.sessions.choices:
@@ -216,7 +248,7 @@ class AttachmentPackageMixin(AttachmentPackageGeneratorMixin):
             del filter_types['contributions']
             del form.contributions
 
-        form.filter_type.choices = filter_types.items()
+        form.filter_type.choices = list(filter_types.items())
         return form
 
     def _load_session_data(self):
@@ -232,10 +264,26 @@ class AttachmentPackageMixin(AttachmentPackageGeneratorMixin):
                     contrib=contrib.title
                 )
 
-        contribs = sorted([contrib for contrib in self.event.contributions if contrib.timetable_entry],
+        contribs = sorted((contrib for contrib in self.event.contributions if contrib.timetable_entry),
                           key=lambda c: natural_sort_key(c.title))
         return [(contrib.id, escape(_format_contrib(contrib))) for contrib in contribs]
 
     def _iter_event_days(self):
         for day in self.event.iter_days():
-            yield day.isoformat(), format_date(day, 'short').decode('utf-8')
+            yield day.isoformat(), format_date(day, 'short')
+
+
+class RHPackageEventAttachmentsStatus(RHDisplayEventBase):
+    def _process(self):
+        res = AsyncResult(request.view_args['task_id'])
+        try:
+            download_url = res.get(5, propagate=False)
+        except TimeoutError:
+            return jsonify(download_url=None)
+        try:
+            if res.successful():
+                return jsonify(download_url=download_url)
+            else:
+                raise IndicoError(_('Material package generation failed'))
+        finally:
+            res.forget()

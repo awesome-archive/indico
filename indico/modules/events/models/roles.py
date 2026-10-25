@@ -1,25 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.principals import PrincipalType
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr
 
 
 class EventRole(db.Model):
@@ -28,10 +17,6 @@ class EventRole(db.Model):
                       db.Index(None, 'event_id', 'code', unique=True),
                       {'schema': 'events'})
 
-    is_group = False
-    is_event_role = True
-    is_single_person = True
-    is_network = False
     principal_order = 2
     principal_type = PrincipalType.event_role
 
@@ -81,12 +66,13 @@ class EventRole(db.Model):
     # - in_contribution_acls (ContributionPrincipal.event_role)
     # - in_event_acls (EventPrincipal.event_role)
     # - in_event_settings_acls (EventSettingPrincipal.event_role)
+    # - in_menu_entry_acls (MenuEntryPrincipal.event_role)
     # - in_session_acls (SessionPrincipal.event_role)
+    # - in_track_acls (TrackPrincipal.event_role)
 
     def __contains__(self, user):
         return user is not None and self in user.event_roles
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'code', _text=self.name)
 
@@ -95,8 +81,29 @@ class EventRole(db.Model):
         return dict(self.event.locator, role_id=self.id)
 
     @property
+    def identifier(self):
+        return f'EventRole:{self.id}'
+
+    @property
+    def persistent_identifier(self):
+        """A persistent version of this object's identifier.
+
+        This is currently identical to the regular identifier, since it does not
+        contain any signatures or similar data that could change.
+        """
+        return self.identifier
+
+    @property
+    def obj(self):
+        return self.event
+
+    @property
     def css(self):
-        return 'color: #{0} !important; border-color: #{0} !important'.format(self.color)
+        return f'color: #{self.color} !important; border-color: #{self.color} !important'
+
+    @property
+    def style(self):
+        return {'color': '#' + self.color, 'borderColor': '#' + self.color}
 
 
 role_members_table = db.Table(

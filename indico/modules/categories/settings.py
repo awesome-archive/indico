@@ -1,32 +1,21 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from functools import wraps
 
 from indico.core.settings import SettingsProxyBase
 from indico.core.settings.util import get_all_settings, get_setting
-from indico.modules.categories import Category
 from indico.modules.categories.models.settings import CategorySetting
 
 
 def _category_or_id(f):
     @wraps(f)
     def wrapper(self, category, *args, **kwargs):
+        from indico.modules.categories import Category
         if isinstance(category, Category):
             category = category.id
         return f(self, int(category), *args, **kwargs)
@@ -39,8 +28,8 @@ class CategorySettingsProxy(SettingsProxyBase):
 
     @property
     def query(self):
-        """Return a query object filtering by the proxy's module."""
-        return CategorySetting.find(module=self.module)
+        """A query object filtering by the proxy's module."""
+        return CategorySetting.query.filter_by(module=self.module)
 
     @_category_or_id
     def get_all(self, category, no_defaults=False):
@@ -83,7 +72,7 @@ class CategorySettingsProxy(SettingsProxyBase):
         :param category: Category (or its ID)
         :param items: Dict containing the new settings
         """
-        items = {k: self._convert_from_python(k, v) for k, v in items.iteritems()}
+        items = {k: self._convert_from_python(k, v) for k, v in items.items()}
         CategorySetting.set_multi(self.module, items, category_id=category)
         self._flush_cache()
 
@@ -94,8 +83,7 @@ class CategorySettingsProxy(SettingsProxyBase):
         :param category: Category (or its ID)
         :param names: One or more names of settings to delete
         """
-        for name in names:
-            CategorySetting.delete(self.module, *name, category_id=category)
+        CategorySetting.delete(self.module, *names, category_id=category)
         self._flush_cache()
 
     @_category_or_id

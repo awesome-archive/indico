@@ -34,6 +34,24 @@ Authentication
 
     Default: ``True``
 
+.. data:: LOCAL_USERNAMES
+
+    This setting controls whether local Indico accounts have usernames
+    for logging in. If disabled, only the email address is used as the
+    "username", otherwise both can be used.
+
+    Default: ``True``
+
+.. data:: LOCAL_GROUPS
+
+    This setting controls whether local Indico groups are available.
+    If no centralized authentication infrastructure that supports groups
+    (e.g. LDAP) is used, local groups are the only way to define groups in
+    Indico, but if you do have central groups it may be useful to disable
+    local ones to have all groups in one central place.
+
+    Default: ``True``
+
 .. data:: LOCAL_REGISTRATION
 
     This setting controls whether people accessing Indico can create a
@@ -45,6 +63,21 @@ Authentication
 
     Default: ``True``
 
+.. data:: LOCAL_PASSWORD_MIN_LENGTH
+
+    This setting controls the minimum number of characters required for a
+    local account password.
+
+    Outside debug mode, this cannot be set to a value less than ``8``, which
+    is considered the bare minimum for a (somewhat) secure password.
+
+    The default value is ``8`` to avoid suddenly changing it for existing
+    installations which would require users to change their password at the
+    next login. Any new installation has a default of ``15``, which is the
+    recommendation from the NIST standard.
+
+    Default: ``8``
+
 .. data:: LOCAL_MODERATION
 
     This setting controls whether a new registration needs to be approved
@@ -54,6 +87,40 @@ Authentication
     and :data:`LOCAL_REGISTRATION` are enabled.
 
     Default: ``False``
+
+.. data:: FAILED_LOGIN_RATE_LIMIT
+
+    Applies a rate limit to failed login attempts due to an invalid username
+    or password. When specifying multiple rate limits separated with a semicolon,
+    they are checked in that specific order, which can allow for a short burst of
+    attempts (e.g. a legitimate user trying multiple passwords they commonly use)
+    and then slowing down more strongly (in case someone tries to brute-force more
+    than just a few passwords).
+
+    Rate limiting is applied by IP address and only failed logins count against the
+    rate limit. It also does not apply to login attempts using external login systems
+    (SSO) as failures there are rarely related to invalid credentials coming from the
+    user (these would be rejected on the SSO side, which should implement its own rate
+    limiting).
+
+    The default allows a burst of 10 attempts, and then only 5 attempts every 15
+    minutes for the next 24 hours.  Setting the rate limit to ``None`` disables it.
+
+    Default: ``'5 per 15 minutes; 10 per day'``
+
+.. data:: SIGNUP_RATE_LIMIT
+
+    Applies a rate limit to sending verification emails in signup attempts.
+    When specifying multiple rate limits separated with a semicolon, they are checked
+    in that specific order, which can allow for a short burst of attempts.
+
+    Rate limiting is applied by IP address and each verification email sent counts
+    against the rate limit.
+
+    The default allows a burst of 5 attempts, and then only 2 attempts every hour for
+    the next 24 hours.  Setting the rate limit to ``None`` disables it.
+
+    Default: ``'2 per hour; 5 per day'``
 
 .. data:: EXTERNAL_REGISTRATION_URL
 
@@ -90,37 +157,22 @@ Authentication
 
     Default: ``{}``
 
+.. data:: SIGNUP_CAPTCHA
+
+    If enabled, a CAPTCHA is required when creating an Indico account to prevent
+    spam bots from registering accounts automatically.  Signups through external
+    authentication systems (LDAP, SSO etc.) are not affected by this; they are
+    expected to have their own protection in place to prevent spam signups.
+
+    Default: ``True``
+
 
 Cache
 -----
 
-.. data:: CACHE_BACKEND
-
-    The backend used for caching. Valid backends are ``redis``,
-    ``files``, and ``memcached``.
-
-    To use the ``redis`` backend (recommended), you need to set
-    :data:`REDIS_CACHE_URL` to the URL of your Redis instance.
-
-    With the ``files`` backend, cache data is stored in :data:`CACHE_DIR`,
-    which always needs to be set, even when using a different cache
-    backend since Indico needs to cache some data on disk.
-
-    To use the ``memcached`` backend, you need to install the
-    ``python-memcached`` package from PyPI and set :data:`MEMCACHED_SERVERS`
-    to a list containing at least one memcached server.
-
-    .. note::
-
-        We only test Indico with the ``redis`` cache backend. While
-        the other backends should work, we make no guarantees as
-        they are not actively being used or tested.
-
-    Default: ``'files'``
-
 .. data:: REDIS_CACHE_URL
 
-    The URL of the redis server to use with the ``redis`` cache backend.
+    The URL of the redis server to use for caching.
 
     If the Redis server requires authentication, use a URL like this:
     ``redis://unused:password@127.0.0.1:6379/1``
@@ -130,13 +182,6 @@ Cache
     ``redis://127.0.0.1:6379/1``
 
     Default: ``None``
-
-.. data:: MEMCACHED_SERVERS
-
-    The list of memcached servers (each entry is an ``ip:port`` string)
-    to use with the ``memcached`` cache backend.
-
-    Default: ``[]``
 
 
 Celery
@@ -227,14 +272,15 @@ Customization
     may break after an Indico update.  Make sure to test all your
     modifications whenever you update Indico!
 
-    To include custom CSS and JavaScript, simply put ``*.scss`` and
-    ``*.js`` files into ``<CUSTOMIZATION_DIR>/scss`` / ``<CUSTOMIZATION_DIR>/js``.
+    To include custom CSS and JavaScript, simply put ``*.css`` and
+    ``*.js`` files into ``<CUSTOMIZATION_DIR>/css`` / ``<CUSTOMIZATION_DIR>/js``.
     If there are multiple files, they will be included in alphabetical
-    order, so prefixing them with a number (e.g. ``00-base.scss``, ``10-events.scss``)
+    order, so prefixing them with a number (e.g. ``00-base.css``, ``10-events.css``)
     is a good idea.
 
-    Static files may be added in ``<CUSTOMIZATION_DIR>/static``.  They can be
-    referenced in templates through the ``assets.custom`` endpoint.
+    Static files may be added in ``<CUSTOMIZATION_DIR>/files``.  They can be
+    referenced in templates through the ``assets.custom`` endpoint.  In CSS/JS,
+    the URL for them needs to be built manually (``/static/custom/files/...``).
 
     For template customizations, see the description of :data:`CUSTOMIZATION_DEBUG`
     as this setting is highly recommended to figure out where exactly to
@@ -249,7 +295,7 @@ Customization
         {% extends '~footer.html' %}
 
         {% block footer_logo %}
-            {%- set filename = 'cern_small_light.png' if dark else 'cern_small.png' -%}
+            {%- set filename = 'cern_small_light.png' if dark|default(false) else 'cern_small.png' -%}
             <a href="https://home.cern/" class="footer-logo">
                 <img src="{{ url_for('assets.custom', filename=filename) }}" alt="CERN">
             </a>
@@ -279,9 +325,33 @@ Customization
 
     Default: ``'https://learn.getindico.io'``
 
+.. data:: FAVICON_URL
+
+    The URL to a custom favicon.  If unset, the default monochrome Indico favicon is
+    used.
+
+    Default: ``None``
+
 .. data:: LOGO_URL
 
-    The URL to a custom logo.  If unset, the default Indico logo is used.
+    The URL to a custom logo.  If unset, the default monochrome Indico logo is
+    used.
+
+    Default: ``None``
+
+.. data:: LOGIN_LOGO_URL
+
+    The URL to a custom logo used on the login page.  If unset, the default
+    Indico logo is used.
+
+    Default: ``None``
+
+.. data:: WALLET_LOGO_URL
+
+    The URL to a custom logo used in Google Wallet and Apple Wallet tickets.
+    If unset, a compact version of the default Indico logo is used.
+    The URL must publicly accessible from the Internet and changes typically
+    do not affect existing tickets.
 
     Default: ``None``
 
@@ -289,13 +359,75 @@ Customization
 
     A dict with country name overrides.  This can be useful if the official
     ISO name of a country does not match what your Indico instance's target
-    audience expects for a country, e.g. due to political situations.
+    audience expects for a country, e.g. due to political situations. By setting
+    a country's name to ``None`` you can pretend it does not exist. Custom country
+    names can also be translated by using a dict mapping locale/language codes to
+    the translated country names.
 
     .. code-block:: python
 
-        CUSTOM_COUNTRIES = {'KP': 'North Korea'}
+        CUSTOM_COUNTRIES = {
+            'KP': 'North Korea',
+            'US': {
+                'en_GB': 'United States of America',  # Translation based on specific locale
+                'es': 'Estados Unidos'  # Translation based on language (regardless of specific locale)
+            },
+            'AQ': None,  # Remove Antarctica from the list
+        }
 
     Default: ``{}``
+
+.. data:: CUSTOM_LANGUAGES
+
+    A dict with language/territory name overrides.  This can be useful if the
+    official territory name that goes along with a language does not match what
+    your Indico instance's target audience expects for a country, e.g. due to
+    political situations.
+
+    For example, to replace "Chinese (Simplified)" with "Chinese (China)",
+    you would use:
+
+    .. code-block:: python
+
+        CUSTOM_LANGUAGES = {'zh_Hans_CN': ('Chinese', 'Simplified')}
+
+    Note that the language and territory name should be written in that
+    particular language to be consistent with the defaults. So in the example
+    above, you would write "Chinese" and "Simplified" in Simplified Chinese.
+
+    Setting the territory (second element in the tuple) to ``None`` will hide
+    it and only show the language name itself.  Setting the dict value to ``None``
+    will effectively hide the language altogether.
+
+    Default: ``{}``
+
+.. data:: ALLOWED_LANGUAGES
+
+    A set of allowed language names. This can be useful if only specific languages
+    should be available in your Indico instance, instead of all languages for which
+    Indico provides translations.
+
+    For example, if you want to display only English and Spanish you can use:
+
+    .. code-block:: python
+
+        ALLOWED_LANGUAGES = {'en_GB', 'es_ES'}
+
+    Default: ``None``
+
+.. data:: CHECKIN_APP_URL
+
+    The URL of the mobile checkin app. The app is purely client-side and only
+    communicates with your Indico instance, so even when using the default app
+    (which is hosted in CERN's datacenter in Switzerland) no data about your
+    events or participants is sent to CERN, the Indico dev team or anyone else.
+    If you wish to use a custom app nonetheless, you can find its
+    `source code on GitHub <https://github.com/indico/indico-checkin-pwa/>`_ and
+    deploy it wherever you want. Note that you need to add the URL of the app
+    to the *"Allowed authorization callback URLs"* of the OAuth app named
+    "Checkin App" in the Indico admin area.
+
+    Default: ``'https://checkin.getindico.io'``
 
 
 Database
@@ -313,21 +445,21 @@ Database
 .. data:: SQLALCHEMY_POOL_SIZE
 
     This setting configures SQLAlchemy's connection pool.
-    For details, check the `Flask-SQLAlchemy documentation`_.
+    For details, check the `SQLAlchemy connection pool documentation`_.
 
     Default: ``5``
 
 .. data:: SQLALCHEMY_POOL_RECYCLE
 
     This setting configures SQLAlchemy's connection pool.
-    For details, check the `Flask-SQLAlchemy documentation`_.
+    For details, check the `SQLAlchemy connection pool documentation`_.
 
     Default: ``120``
 
 .. data:: SQLALCHEMY_POOL_TIMEOUT
 
     This setting configures SQLAlchemy's connection pool.
-    For details, check the `Flask-SQLAlchemy documentation`_.
+    For details, check the `SQLAlchemy connection pool documentation`_.
 
     Default: ``10``
 
@@ -388,6 +520,14 @@ Development
 
     Default: ``'https://hub.getindico.io'``
 
+.. data:: SYSTEM_NOTICES_URL
+
+    The URL of a YAML file with system notices. This should only be changed during
+    development (to test custom notices) or set to ``None`` to opt-out from ever
+    fetching or displaying system notices.
+
+    Default: ``'https://getindico.io/notices.yml'``
+
 .. data:: DISABLE_CELERY_CHECK
 
     Disables the warning about Celery not running or being outdated. When set to
@@ -425,6 +565,33 @@ Directories
 Emails
 ------
 
+.. data:: EMAIL_BACKEND
+
+    Qualified import name for the email sending backend. It can be set to any email
+    backend compatible with Django Mail.
+
+    Default: ``'indico.vendor.django_mail.backends.smtp.EmailBackend'``
+
+.. data:: EMAIL_LOG_STORAGE
+
+    The name of the storage backend used to store email attachments when an email
+    is logged in the context of an event.
+
+    If not set, email attachments are not stored.
+
+    Default: ``None``
+
+.. data:: MAX_EMAIL_ATTACHMENT_SIZE
+
+    The maximum total size of attachments (in MB) that can be included when
+    sending emails from Indico's email dialogs (e.g. emailing event participants).
+
+    If set to ``None``, there is no size limit on email attachments.
+
+    Example: ``15`` for a 15 MB limit.
+
+    Default: ``10``
+
 .. data:: SMTP_SERVER
 
     The hostname and port of the SMTP server used for sending emails.
@@ -446,8 +613,37 @@ Emails
 .. data:: SMTP_USE_TLS
 
     If enabled, STARTTLS will be used to use an encrypted SMTP connection.
+    This setting is mutually exclusive with :data:`SMTP_USE_SSL` (SMTPS).
 
     Default: ``False``
+
+.. data:: SMTP_USE_SSL
+
+    If enabled, regular TLS (on connect) will be used for the encrypted SMTP
+    connection. This is also known as SMTPS and usually on port 465.
+    This setting is mutually exclusive with :data:`SMTP_USE_TLS` (STARTTLS).
+
+    .. warning::
+
+        Note that the email handler for error log emails is not compatible
+        with this setting, so when using it instead of STARTTLS you may want
+        to tweak your ``logging.yaml`` to not attempt to send emails.
+
+    Default: ``False``
+
+.. data:: SMTP_CERTFILE
+
+    If provided, this certificate file will be used for certificate-based
+    SMTP authentication.
+
+    Default: ``None``
+
+.. data:: SMTP_KEYFILE
+
+    If provided, this private key file will be used for certificate-based
+    SMTP authentication.
+
+    Default: ``None``
 
 .. data:: SMTP_TIMEOUT
 
@@ -455,6 +651,37 @@ Emails
     server is aborted.
 
     Default: ``30``
+
+.. data:: SMTP_ALLOWED_SENDERS
+
+    A list of allowed email senders for this Indico instance. Each entry must be an
+    email address, but using the ``*`` wildcard is allowed.
+    For any address not matching an entry in this list, the ``From`` address will be
+    rewritten to the :data:`SMTP_SENDER_FALLBACK` address, and the name (or email if
+    no name is available) of the original sender will be used in the human-friendly
+    part, e.g. ``John Doe (via Indico) <noreply@example.com>``, while their email
+    address will go into the ``Reply-to`` header.
+
+    For example, if your mail server only allowed sending emails from your domain
+    ``example.com``, you would set this setting to ``{'*@example.com'}``. If only
+    a specific sender address was allowed, you'd use e.g. ``{'indico@example.com'}``.
+
+    .. important::
+
+        You most likely want to configure this setting to ensure emails sent from your
+        Indico instance are not classified as junk, since email spoofing is nowadays
+        being more and more frowned upon by large email providers, as it is commonly
+        abused by spammers and threat actors.
+
+    Default: ``set()``
+
+.. data:: SMTP_SENDER_FALLBACK
+
+    The envelope sender address to be used for any senders that are not whitelisted
+    in :data:`SMTP_ALLOWED_SENDERS`. This setting is required if the sender whitelist
+    is used. Typically setting it to a no-reply address is a good choice.
+
+    Default: ``None``
 
 .. data:: NO_REPLY_EMAIL
 
@@ -477,6 +704,20 @@ Emails
     Default: ``None``
 
 
+Experimental Features
+----------------------
+
+.. data:: EXPERIMENTAL_EDITING_SERVICE
+
+    If enabled, event managers can connect the Editing module of their
+    events to an external microservice extending the normal Editing workflow.
+    As long as this is considered experimental, there are no guarantees
+    on backwards compatibility even in minor Indico version bumps. Please
+    check the `reference implementation`_ for details/changes.
+
+    Default: ``False``
+
+
 LaTeX
 -----
 
@@ -487,7 +728,30 @@ LaTeX
     If it is installed in a directory in your ``$PATH``, specifying its
     name without a path is sufficient.
 
-    Default: ``xelatex``
+    If the path is not configured, any functionality that requires LaTeX
+    on the server (such as generating the Book of Abstracts or exporting
+    contributions to PDF) will be disabled.
+
+    For security reasons we recommend setting this to the special string
+    ``'podman'`` and installing Podman on the system. That way, any LaTeX
+    rendering will be done in a container, and thus fully sandboxed from
+    the rest of Indico. When using this string, a default TeXLive image is
+    used.
+
+    You can also use the ``'podman:foo=123,bar=456'`` syntax to customize
+    the podman behavior using the following options:
+
+    - ``image`` -- a custom image, using any format that both ``podman pull``
+      and ``podman run`` understand
+    - ``connection`` -- a podman connection name when using the local podman
+      service (defaults to not using the service)
+    - ``timeout`` -- a timeout (in seconds) after which the LaTeX build container
+      is killed (defaults to no timeout)
+    - ``allow_pull`` -- when set to ``false``, a missing image is not pulled but
+      generating the PDF fails; when using this option, the image must be pulled
+      using ``indico maint pull-latex-image`` or directly using podman
+
+    Default: ``None``
 
 .. data:: STRICT_LATEX
 
@@ -502,6 +766,18 @@ LaTeX
     succeed without a non-zero status code.
 
     Default: ``False``
+
+.. data:: LATEX_RATE_LIMIT
+
+    Applies a rate limit to public endpoints that generate PDFs using LaTeX
+    when accessed by people who are not logged in (such as crawlers).
+
+    Rate limiting is applied by IP address.
+
+    The default allows 2 PDF generations every 3 seconds. Setting the rate limit
+    to ``None`` disables it.
+
+    Default: ``'2 per 3 seconds'``
 
 
 Logging
@@ -522,6 +798,14 @@ Logging
 
     Default: ``None``
 
+.. data:: SENTRY_ENVIRONMENT
+
+    If you use `Sentry`_ for logging warnings/errors, you can specify the
+    environment name here. This can be used to distinguish data from separate
+    Indico installations that are logged to the same Sentry project.
+
+    Default: ``'production'``
+
 .. data:: SENTRY_LOGGING_LEVEL
 
     The minimum level a log record needs to have to be sent to Sentry.
@@ -533,6 +817,26 @@ Logging
 Security
 --------
 
+.. data:: ALLOW_PUBLIC_USER_SEARCH
+
+    If disabled, users without management permissions cannot search for
+    existing Indico users. This affects places such as abstract submission,
+    material ACLs and the verbosity of the email status check (whether the
+    registration will be linked to an Indico account) while registering for
+    an event.
+
+    It is recommended to disable this setting in case you run a public instance
+    with strong privacy requirements that weigh heavier than the convenience
+    of being able to search Indico users.
+
+    Note that this setting is only effective if event creation is properly
+    restricted since otherwise any user can just create an event where they
+    then have management permissions and thus the ability to search for users.
+    This also means that unlisted events must be disabled or restricted to
+    trusted users.
+
+    Default: ``True``
+
 .. data:: SECRET_KEY
 
     The secret key used to sign tokens in URLs.  It must be kept secret
@@ -543,7 +847,7 @@ Security
 
     The initial key is generated by the setup wizard, but if you have to
     regenerate it, the best way of doing so is running this snippet on a
-    shell:  ``python -c 'import os; print repr(os.urandom(32))'``
+    shell:  ``python -c 'import os; print(repr(os.urandom(32)))'``
 
     Default: ``None``
 
@@ -554,6 +858,54 @@ Security
     browser is closed.
 
     Default: ``86400 * 31``
+
+.. data:: SESSION_MAX_LIFETIME
+
+    The duration (in seconds) after which a session always expires. If set to
+    ``None``, only the :data:`SESSION_LIFETIME` is used and the session can be
+    renewed indefinitely as long as there is activity before its expiry.
+    This setting is ignored if a custom Multipass provider specifies its own
+    maximum lifetime via the ``session_expiry`` entry in the ``multipass_data``.
+
+    Default: ``None``
+
+.. data:: CSP_ENABLED
+
+    Specifies whether a ``Content-Security-Policy`` header should be sent. This
+    can also be set to ``'report-only'`` to use ``Content-Security-Policy-Report-Only``
+    instead (only useful when a :data:`CSP_REPORT_URI` is set or when using your
+    browser's dev tools console to look for errors).
+
+    Default: ``False`` (may change in a future release)
+
+.. data:: CSP_REPORT_URI
+
+    Specifies the URL to which CSP violations should be reported. When using
+    `Sentry`_, you can use the "Report URI" which you can find in your project
+    settings under "Security Headers".
+
+    Default: ``None``
+
+.. data:: CSP_SCRIPT_SOURCES
+
+    By default only ``script-src`` values needed for Indico to work are included.
+    If you embed external scripts from other hosts, you may need to include them
+    here or they will not work (use your browser's dev tools to check for log
+    messages related to CSP violations). Note that you MUST NOT add any ``nonce``
+    values there, as this would make the whole policy useless (knowing the nonce
+    in advance means you can set it on any maliciously injected script). The
+    values specified here are not automatically wrapped in single quotes, so if
+    you want to include e.g. a hash, you need to manually quote it.
+
+    Default: ``set()``
+
+.. data:: CSP_DIRECTIVES
+
+    Specify custom top-level CSP directives. This can include any CSP directive besides
+    ``script-src`` which is already handled by Indico itself (use :data:`CSP_SCRIPT_SOURCES`
+    if you need to add custom values there) and ``base-uri`` which is always set to ``'self'``.
+
+    Default: ``set()``
 
 
 Storage
@@ -594,12 +946,41 @@ Storage
 .. data:: STATIC_SITE_STORAGE
 
     The name of the storage backend used to store "offline copies" of
-    events.  Files are written to this backend when generating an offline
-    copy and deleted after a certain amount of time.
+    events and material packages.  Files are written to this backend when generating
+    an offline copy and deleted after a certain amount of time.  When someone requests
+    a material package for an event, it is also written to this backend, and deleted
+    about a day later.
 
     If not set, the :data:`ATTACHMENT_STORAGE` backend is used.
 
     Default: ``None``
+
+.. data:: MAX_DATA_EXPORT_SIZE
+
+    The maximum file size (in MB) for files added to the user data export archive.
+    Note that this limit does not apply to the YAML metadata files which are
+    always generated and typically do not exceed a few megabytes. However,
+    any additional files such as attachments, papers, etc., that the user might
+    have and that do not fit within the limit are not included in the exported
+    archive. The default size is 10 GB.
+
+    Default: ``10 * 1024``
+
+.. data:: MATERIAL_PACKAGE_RATE_LIMIT
+
+    Applies a rate limit to public endpoints that build material packages.
+
+    Rate limiting is applied by IP address.
+
+    The default allows 3 packages per 30 minutes, and an additional 3 once per day
+    in case someone builds separate packages e.g. for sessions. Setting the rate limit
+    to ``None`` disables it.
+
+    Depending on how limited your storage space is, especially in relation to the amount
+    of materials (slides etc.) in your events, you may want to go for an even stricter
+    rate limit.
+
+    Default: ``'3 per 30 minutes, 3 per day'``
 
 
 System
@@ -666,6 +1047,9 @@ System
         location /.xsf/indico/ {
           internal;
           alias /opt/indico/;
+          add_header Content-Security-Policy $upstream_http_content_security_policy;
+          add_header Content-Security-Policy-Report-Only $upstream_http_content_security_policy_report_only;
+          add_header Reporting-Endpoints $upstream_http_reporting_endpoints;
         }
 
     The :ref:`production installation instructions <install-prod>` already
@@ -718,15 +1102,108 @@ System
 
     Default: ``False``
 
+.. data:: ENABLE_GOOGLE_WALLET
+
+    Whether to enable the Google Wallet integration for event tickets.
+
+    Default: ``False``
+
+.. data:: ENABLE_APPLE_WALLET
+
+    Whether to enable the Apple Wallet integration for event tickets.
+
+    Default: ``False``
+
+.. data:: DISABLE_GRAVATAR
+
+    Completely disables the Gravatar integration. When enabled, users will no
+    longer see Gravatar or Identicon options on the profile-picture page and
+    Indico will not try to fetch updates from gravatar.com.
+
+    Default: ``False``
+
+.. data:: CHECK_ACTION_PERMISSIONS
+
+    When enabled, certain action buttons in the UI (such as "Create event")
+    will be displayed to logged-in users only if they have the necessary
+    permissions to perform that action.
+
+    When disabled, buttons are always shown, even to non-logged in users (who will be redirected
+    to login when clicking).
+
+    .. note::
+
+        For performance reasons the access check for the "Create event" button only
+        takes into account permissions granted directly to the user, via a local group or via
+        a category role. When using externally-managed groups (e.g. LDAP), then this setting
+        should not be enabled as people may not see the button even though they have creation
+        privileges. When using a custom plugin that grants creation or management access to
+        categories bypassing Indico's usual permission system, this setting should also not be
+        used.
+
+    Default: ``False``
+
+.. data:: ALLOW_ADMIN_USER_DELETION
+
+    Whether to allow administrators to permanently delete users from the
+    Indico UI.
+
+    If enabled, any Indico administrator can permanently delete a user from Indico,
+    along with all their associated user data. If it is not possible to delete the user
+    (e.g. because they are listed as a speaker at an event), the user will be anonymized
+    instead.
+
+    Default: ``False``
+
 .. data:: PLUGINS
 
-    The list of :doc:`Indico plugins <plugins>` to enable.
+    The list of :ref:`Indico plugins <installation-plugins>` to enable.
 
     A list of all installed plugins can be displayed by the
-    ``indico setup list_plugins`` command; see the guide linked above
+    ``indico setup list-plugins`` command; see the guide linked above
     for details on how to enable plugins.
 
     Default: ``set()``
+
+    .. rubric:: Plugin Configuration
+
+    In addition to the regular database-backed plugin settings configured via the
+    admin UI, plugins may declare file-backed config keys that live in
+    ``indico.conf`` alongside core settings. This is useful for values that should
+    not be editable at runtime (e.g. credentials managed by infrastructure tooling).
+
+    A plugin declares its file-backed config keys via the ``plugin_config_defaults``
+    class attribute on its :class:`~indico.core.plugins.IndicoPlugin` subclass.
+    Keys are written **unprefixed** in the plugin and exposed in ``indico.conf`` with
+    the ``PLUGIN_<NAME>_`` prefix, where ``<NAME>`` is the plugin's entry-point name
+    uppercased. For example, plugin ``zoom`` declaring ``API_KEY`` becomes
+    ``PLUGIN_FOO_API_KEY``::
+
+        class FooPlugin(IndicoPlugin):
+            plugin_config_defaults = {
+                'API_KEY': None,
+                'API_SECRET': None,
+                'TIMEOUT': 30,
+            }
+
+    In ``indico.conf``::
+
+        PLUGINS = {'zoom'}
+        PLUGIN_FOO_API_KEY = 'xxxxxxxx'
+        PLUGIN_FOO_API_SECRET = 'yyyyyyyy'
+
+    Plugin code reads these via the ``plugin_config`` proxy on the plugin class
+    which strips the prefix::
+
+        FooPlugin.plugin_config.API_KEY  # reads PLUGIN_FOO_API_KEY
+
+    These keys participate in the same machinery as core settings: defaults are
+    applied when omitted, unknown ``PLUGIN_*`` keys produce an "Ignoring unknown
+    config key" warning, and ``INDICO_CONF_OVERRIDE`` can override them. The
+    ``PLUGIN_*`` namespace is reserved for plugins; core config keys never use it.
+
+    If two plugins declare the same prefixed key, starting Indico raises a
+    :exc:`RuntimeError`.
 
 .. data:: CATEGORY_CLEANUP
 
@@ -754,31 +1231,11 @@ System
 
     Default: ``socket.getfqdn()``
 
-.. data:: FLOWER_URL
 
-    The URL of the `Flower`_ instance monitoring your Celery workers.
-    If set, a link to it will be displayed in the admin area.
-
-    To use flower, install it using ``pip install flower``, then start
-    it using ``indico celery flower``. By default it will listen on the
-    same host as specified in :data:`BASE_URL` (plain HTTP) on port 5555.
-    Authentication is done using OAuth so only Indico administrators
-    can access flower.  You need to configure the allowed auth callback
-    URLs in the admin area; otherwise authentication will fail with an
-    OAuth error.
-
-    .. note::
-
-        The information displayed by Flower is usually not very useful.
-        Unless you are very curious it is usually not worth using it.
-
-    Default: ``None``
-
-
-.. _Flask-SQLAlchemy documentation: https://flask-sqlalchemy.readthedocs.io/en/stable/config/#configuration-keys
+.. _SQLAlchemy connection pool documentation: https://docs.sqlalchemy.org/en/14/core/pooling.html
 .. _Sentry: https://sentry.io
 .. _Celery documentation on brokers: https://celery.readthedocs.io/en/stable/getting-started/brokers/index.html
 .. _Celery documentation on periodic tasks: https://celery.readthedocs.io/en/stable/userguide/periodic-tasks.html#available-fields
-.. _Flower: https://flower.readthedocs.io/en/latest/
 .. _TeXLive: https://www.tug.org/texlive/
 .. _Flask-Multipass: https://flask-multipass.readthedocs.io
+.. _reference implementation: https://github.com/indico/openreferee

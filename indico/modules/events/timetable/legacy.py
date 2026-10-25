@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from collections import defaultdict
 from hashlib import md5
@@ -30,12 +19,13 @@ from indico.util.date_time import iterdays
 from indico.web.flask.util import url_for
 
 
-class TimetableSerializer(object):
-    def __init__(self, event, management=False, user=None):
+class TimetableSerializer:
+    def __init__(self, event, management=False, user=None, api=False):
         self.management = management
         self.user = user if user is not None or not has_request_context() else session.user
         self.event = event
         self.can_manage_event = self.event.can_manage(self.user)
+        self.api = api
 
     def serialize_timetable(self, days=None, hide_weekends=False, strip_empty_days=False):
         tzinfo = self.event.tzinfo if self.management else self.event.display_tzinfo
@@ -63,7 +53,7 @@ class TimetableSerializer(object):
             data = self.serialize_timetable_entry(entry, load_children=False)
             key = self._get_entry_key(entry)
             if entry.parent:
-                parent_code = 's{}'.format(entry.parent_id)
+                parent_code = f's{entry.parent_id}'
                 timetable[date_str][parent_code]['entries'][key] = data
             else:
                 if (entry.type == TimetableEntryType.SESSION_BLOCK and
@@ -120,7 +110,7 @@ class TimetableSerializer(object):
         elif entry.type == TimetableEntryType.BREAK:
             return self.serialize_break_entry(entry)
         else:
-            raise TypeError("Unknown timetable entry type.")
+            raise TypeError('Unknown timetable entry type.')
 
     def serialize_session_block_entry(self, entry, load_children=True):
         block = entry.session_block
@@ -167,13 +157,14 @@ class TimetableSerializer(object):
                      'contributionId': contribution.id,
                      'attachments': self._get_attachment_data(contribution),
                      'description': contribution.description,
-                     'duration': contribution.duration.seconds / 60,
+                     'duration': contribution.duration_display.seconds / 60,
                      'pdf': url_for('contributions.export_pdf', entry.contribution),
-                     'presenters': map(self._get_person_data,
-                                       sorted([p for p in contribution.person_links if p.is_speaker],
-                                              key=lambda x: (x.author_type != AuthorType.primary,
-                                                             x.author_type != AuthorType.secondary,
-                                                             x.display_order_key))),
+                     'presenters': list(map(self._get_person_data,
+                                            sorted((p for p in contribution.person_links if p.is_speaker),
+                                                   key=lambda x: (x.author_type != AuthorType.primary,
+                                                                  x.author_type != AuthorType.secondary,
+                                                                  x.display_order_key)))),
+                     'code': contribution.code,
                      'sessionCode': block.session.code if block else None,
                      'sessionId': block.session_id if block else None,
                      'sessionSlotId': block.id if block else None,
@@ -181,8 +172,14 @@ class TimetableSerializer(object):
                      'title': contribution.title,
                      'url': url_for('contributions.display_contribution', contribution),
                      'friendlyId': contribution.friendly_id,
-                     'references': map(SerializerBase.serialize_reference, contribution.references),
+                     'references': list(map(SerializerBase.serialize_reference, contribution.references)),
                      'board_number': contribution.board_number})
+        if self.api:
+            data['authors'] = list(map(self._get_person_data,
+                                       sorted((p for p in contribution.person_links if not p.is_speaker),
+                                              key=lambda x: (x.author_type != AuthorType.primary,
+                                                             x.author_type != AuthorType.secondary,
+                                                             x.display_order_key))))
         return data
 
     def serialize_break_entry(self, entry, management=False):
@@ -217,12 +214,12 @@ class TimetableSerializer(object):
                     '_type': 'AttachmentFolder',
                     '_fossil': 'folder',
                     'title': folder.title,
-                    'attachments': map(serialize_attachment, folder.attachments)}
+                    'attachments': list(map(serialize_attachment, folder.attachments))}
 
         data = {'files': [], 'folders': []}
         items = obj.attached_items
-        data['files'] = map(serialize_attachment, items.get('files', []))
-        data['folders'] = map(serialize_folder, items.get('folders', []))
+        data['files'] = list(map(serialize_attachment, items.get('files', [])))
+        data['folders'] = list(map(serialize_folder, items.get('folders', [])))
         if not data['files'] and not data['folders']:
             data['files'] = None
         return data
@@ -236,8 +233,14 @@ class TimetableSerializer(object):
             tzinfo = entry.event.tzinfo
         else:
             tzinfo = entry.event.display_tzinfo
-        return {'startDate': self._get_entry_date_dt(entry.start_dt, tzinfo),
-                'endDate': self._get_entry_date_dt(entry.end_dt, tzinfo)}
+        if entry.type == TimetableEntryType.CONTRIBUTION:
+            start_dt = entry.contribution.start_dt_display
+            end_dt = entry.contribution.end_dt_display
+        else:
+            start_dt = entry.start_dt
+            end_dt = entry.end_dt
+        return {'startDate': self._get_entry_date_dt(start_dt, tzinfo),
+                'endDate': self._get_entry_date_dt(end_dt, tzinfo)}
 
     def _get_entry_data(self, entry):
         from indico.modules.events.timetable.operations import can_swap_entry
@@ -256,13 +259,13 @@ class TimetableSerializer(object):
 
     def _get_entry_key(self, entry):
         if entry.type == TimetableEntryType.SESSION_BLOCK:
-            return 's{}'.format(entry.id)
+            return f's{entry.id}'
         elif entry.type == TimetableEntryType.CONTRIBUTION:
-            return 'c{}'.format(entry.id)
+            return f'c{entry.id}'
         elif entry.type == TimetableEntryType.BREAK:
-            return 'b{}'.format(entry.id)
+            return f'b{entry.id}'
         else:
-            raise ValueError()
+            raise ValueError
 
     def _get_entry_date_dt(self, dt, tzinfo):
         return {'date': dt.astimezone(tzinfo).strftime('%Y-%m-%d'),
@@ -284,9 +287,9 @@ class TimetableSerializer(object):
         data = {'firstName': person_link.first_name,
                 'familyName': person_link.last_name,
                 'affiliation': person_link.affiliation,
-                'emailHash': md5(person.email.encode('utf-8')).hexdigest() if person.email else None,
+                'emailHash': md5(person.email.encode()).hexdigest() if person.email else None,
                 'name': person_link.get_full_name(last_name_first=False, last_name_upper=False,
-                                                  abbrev_first_name=False, show_title=True),
+                                                  abbrev_first_name=False, show_title=person.event.show_titles),
                 'displayOrderKey': person_link.display_order_key}
         if self.can_manage_event:
             data['email'] = person.email
@@ -313,15 +316,17 @@ def serialize_entry_update(entry, session_=None):
     serializer = TimetableSerializer(entry.event, management=True)
     day = entry.start_dt.astimezone(entry.event.tzinfo)
     day_update = serialize_day_update(entry.event, day, block=entry.parent, session_=session_)
-    return dict({'id': serializer._get_entry_key(entry),
-                 'entry': serializer.serialize_timetable_entry(entry),
-                 'autoOps': None},
-                **day_update)
+    return {
+        'id': serializer._get_entry_key(entry),
+        'entry': serializer.serialize_timetable_entry(entry),
+        'autoOps': None,
+        **day_update
+    }
 
 
 def serialize_event_info(event):
     return {'_type': 'Conference',
-            'id': unicode(event.id),
+            'id': str(event.id),
             'title': event.title,
             'startDate': event.start_dt_local,
             'endDate': event.end_dt_local,
@@ -330,8 +335,8 @@ def serialize_event_info(event):
 
 
 def serialize_session(sess):
-    """Return data for a single session"""
-    data = {
+    """Return data for a single session."""
+    return {
         '_type': 'Session',
         'address': sess.address,
         'color': '#' + sess.colors.background,
@@ -345,4 +350,3 @@ def serialize_session(sess):
         'title': sess.title,
         'url': url_for('sessions.display_session', sess)
     }
-    return data

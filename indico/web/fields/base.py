@@ -1,39 +1,29 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from copy import deepcopy
 
 from wtforms.fields import BooleanField, StringField, TextAreaField
 from wtforms.validators import DataRequired, Optional
 
+from indico.core.db import db
 from indico.util.i18n import _
 from indico.web.forms.base import IndicoForm
 from indico.web.forms.widgets import SwitchWidget
 
 
 class FieldConfigForm(IndicoForm):
-    title = StringField(_('Title'), [DataRequired()], description=_("The title of the field"))
-    description = TextAreaField(_('Description'), description=_("The description of the field"))
+    title = StringField(_('Title'), [DataRequired()], description=_('The title of the field'))
+    description = TextAreaField(_('Description'), description=_('The description of the field'))
     is_required = BooleanField(_('Required'), widget=SwitchWidget(),
-                               description=_("Whether the user has to fill out the field"))
+                               description=_('Whether the user has to fill out the field'))
 
 
-class BaseField(object):
+class BaseField:
     """Base class for a custom field.
 
     To create a new field, subclass this class and register
@@ -71,29 +61,29 @@ class BaseField(object):
 
     @property
     def validators(self):
-        """Return a list of validators for this field"""
+        """A list of validators for this field."""
         return None
 
     @property
     def wtf_field_kwargs(self):
-        """Return a dict of kwargs for this field's wtforms field"""
+        """A dict of kwargs for this field's wtforms field."""
         return {}
 
     def create_wtf_field(self):
-        """Return a WTForms field for this field"""
+        """Return a WTForms field for this field."""
         return self._make_wtforms_field(self.wtf_field_class, self.validators, **self.wtf_field_kwargs)
 
     @classmethod
     def create_config_form(cls, *args, **kwargs):
-        """Create the WTForm to configure this field"""
+        """Create the WTForm to configure this field."""
         bases = (cls.config_form_base, cls.config_form) if cls.config_form is not None else (cls.config_form_base,)
-        form_cls = type(b'_FieldConfigForm', bases, {})
+        form_cls = type('_FieldConfigForm', bases, {})
         form = form_cls(*args, **kwargs)
         form._common_fields = cls.common_settings
         return form
 
     def copy_field_data(self):
-        """Return a copy of the field's configuration data"""
+        """Return a copy of the field's configuration data."""
         return deepcopy(self.object.field_data)
 
     def is_value_empty(self, value):
@@ -114,11 +104,11 @@ class BaseField(object):
             setattr(self.object, field, data[field])
         self.object.field_type = self.name
         self.object.field_data = {name: value
-                                  for name, value in data.iteritems()
+                                  for name, value in data.items()
                                   if name not in self.common_settings and name != 'csrf_token'}
 
     def get_friendly_value(self, value):
-        """Return the human-friendly version of the field's value
+        """Return the human-friendly version of the field's value.
 
         :param value: The database object containing the value of
                       the field
@@ -141,3 +131,20 @@ class BaseField(object):
         elif self.not_required_validator:
             validators.append(self.not_required_validator())
         return field_cls(self.object.title, validators, description=self.object.description, **kwargs)
+
+    def create_sql_filter(self, db_field, data_list: set[str | None]):
+        """
+        Create an SQL criterion to check whether the field's value is
+        in `data_list`.  The function is expected to return an
+        operation on the provided `db_field` which must be a JSONB
+        column.
+        """
+        data_list = set(data_list)
+        criteria = []
+        if None in data_list:
+            data_list.discard(None)
+            criteria.append(db_field.op('#>>')('{}').is_(None))
+            criteria.append(db_field.op('#>>')('{}') == '')  # noqa: PLC1901
+        if data_list:
+            criteria.append(db_field.op('#>>')('{}').in_(data_list))
+        return db.or_(*criteria)

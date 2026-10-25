@@ -1,5 +1,5 @@
 {% extends 'users/base.html' %}
-{% from 'forms/_form.html' import form_header, form_rows, form_footer  %}
+{% from 'forms/_form.html' import form_header, form_rows, form_footer %}
 
 {% block user_content %}
     <div class="i-box-group vert">
@@ -18,22 +18,42 @@
                 <ul class="group-list with-buttons content-after">
                     <li>
                         <span><strong>{{ user.email }}</strong></span>
-                        <span class="i-label">{% trans %}Primary{% endtrans %}</span>
+                        <span class="ui label">{% trans 'E-mail' %}Primary{% endtrans %}</span>
                     </li>
                     {% for email in user.secondary_emails|sort %}
-                        <li class="js-email-row">
+                        <li class="flexrow f-a-center js-email-row">
                             <span>{{ email }}</span>
-                            <a class="toggle icon-remove right js-delete-email" href="#" data-href="{{ url_for('.user_emails_delete', email=email) }}" style="margin-left: 10px;"></a>
-                            <button type="button" class="i-button right" data-href="{{ url_for('.user_emails_set_primary') }}" data-method='POST' data-params="{{ {'email': email} | tojson | forceescape }}">
-                                {%- trans %}Set as primary{% endtrans -%}
-                            </button>
+                            <span class="right">
+                                <button type="button"
+                                        class="ui primary small button"
+                                        data-href="{{ url_for('.user_emails_set_primary') }}"
+                                        data-method="POST"
+                                        data-params="{{ {'email': email} | tojson | forceescape }}">
+                                    {%- trans %}Set as primary{% endtrans -%}
+                                </button>
+                                <button class="ui icon small button js-delete-email"
+                                        data-href="{{ url_for('.user_emails_delete', email=email) }}">
+                                    <i class="trash alternate icon"></i>
+                                </button>
+                            </span>
                         </li>
                     {% endfor %}
                 </ul>
+                {% if 'skip_validation' in form %}
+                    {% call message_box('warning') %}
+                        {% trans %}
+                            You are editing another user as an admin. When adding a secondary email address, a
+                            verification email will be sent to the new email address and the user needs to be logged
+                            in to use the confirmation link in this email. In case they can no longer log in, you need
+                            to use the "Skip email validation" checkbox below to immediately add the address.
+                            When doing so, make sure that the address is correct and belongs to the user.
+                        {% endtrans %}
+                    {% endcall %}
+                {% endif %}
                 {{ form_header(form, orientation='vertical', classes='no-block-padding') }}
-                {{ form_rows(form) }}
+                {{ form_rows(form, orientation='vertical') }}
                 {% call form_footer(form) %}
-                    <input class="i-button big highlight" type="submit" value="{% trans %}Add{% endtrans %}" data-disabled-until-change>
+                    <input class="ui primary button" type="submit" value="{% trans %}Add{% endtrans %}" data-disabled-until-change>
                 {% endcall %}
             </div>
         </div>

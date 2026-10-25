@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from collections import defaultdict
 
@@ -41,7 +30,7 @@ def build_material_legacy_api_data(linked_object):
         for folder in query:
             cache[folder.object].append(folder)
 
-    return filter(None, map(_build_folder_legacy_api_data, cache.get(linked_object, [])))
+    return [_f for _f in map(_build_folder_legacy_api_data, cache.get(linked_object, [])) if _f]
 
 
 def _build_folder_legacy_api_data(folder):
@@ -92,7 +81,7 @@ def build_folders_api_data(linked_object):
     folders = get_attached_folders(linked_object, preload_event=True)
     if not folders:
         return []
-    return filter(None, map(_build_folder_api_data, folders))
+    return [_f for _f in map(_build_folder_api_data, folders) if _f]
 
 
 def _build_folder_api_data(folder):
@@ -129,6 +118,7 @@ def _build_attachment_api_data(attachment):
         data['filename'] = attachment.file.filename
         data['content_type'] = attachment.file.content_type
         data['size'] = attachment.file.size
+        data['checksum'] = attachment.file.md5
 
     elif attachment.type == AttachmentType.link:
         data['link_url'] = attachment.link_url

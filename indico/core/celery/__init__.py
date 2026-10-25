@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
@@ -36,11 +25,12 @@ from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
 
 
-__all__ = ('celery',)
+__all__ = ('celery', 'AsyncResult')
 
 
 #: The Celery instance for all Indico tasks
 celery = IndicoCelery('indico')
+AsyncResult = celery.AsyncResult
 
 
 celery_settings = SettingsProxy('celery', {
@@ -51,16 +41,16 @@ celery_settings = SettingsProxy('celery', {
 })
 
 
-@signals.app_created.connect
+@signals.core.app_created.connect
 def _load_default_modules(app, **kwargs):
     celery.loader.import_default_modules()  # load all tasks
 
 
 @import_modules.connect
 def _import_modules(*args, **kwargs):
-    import indico.core.emails
-    import indico.util.tasks
-    signals.import_tasks.send()
+    import indico.core.emails  # noqa: F401,RUF100
+    import indico.util.tasks  # noqa: F401
+    signals.core.import_tasks.send()
 
 
 @beat_init.connect
@@ -71,7 +61,7 @@ def _send_initial_heartbeat(*args, **kwargs):
 @signals.menu.items.connect_via('admin-sidemenu')
 def _extend_admin_menu(sender, **kwargs):
     if session.user.is_admin:
-        return SideMenuItem('celery', _("Tasks"), url_for('celery.index'), 20, icon='time')
+        return SideMenuItem('celery', _('Tasks'), url_for('celery.index'), 20, icon='time')
 
 
 @template_hook('global-announcement', priority=-100, markup=False)
@@ -83,10 +73,10 @@ def _inject_announcement_header(**kwargs):
     down = not last_ping or (now_utc() - last_ping) > timedelta(hours=1)
     mismatch = last_ping_version and last_ping_version != indico.__version__
     if down:
-        text = _("The Celery task scheduler does not seem to be running. This means that email sending and periodic "
-                 "tasks such as event reminders do not work.")
+        text = _('The Celery task scheduler does not seem to be running. This means that email sending and periodic '
+                 'tasks such as event reminders do not work.')
     elif mismatch:
-        text = _("The Celery task scheduler is running a different Indico version.")
+        text = _('The Celery task scheduler is running a different Indico version.')
     else:
         return
     return 'error', text, True

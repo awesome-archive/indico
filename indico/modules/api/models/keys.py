@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from uuid import uuid4
 
@@ -23,11 +12,11 @@ from sqlalchemy.dialects.postgresql import INET, UUID
 from indico.core.db import db
 from indico.core.db.sqlalchemy import UTCDateTime
 from indico.util.date_time import now_utc
-from indico.util.string import return_ascii
 
 
 class APIKey(db.Model):
-    """API keys for users"""
+    """API keys for users."""
+
     __tablename__ = 'api_keys'
     __table_args__ = (db.Index(None, 'user_id', unique=True, postgresql_where=db.text('is_active')),
                       {'schema': 'users'})
@@ -42,13 +31,13 @@ class APIKey(db.Model):
         UUID,
         nullable=False,
         unique=True,
-        default=lambda: unicode(uuid4())
+        default=lambda: str(uuid4())
     )
     #: secret key used for signed requests
     secret = db.Column(
         UUID,
         nullable=False,
-        default=lambda: unicode(uuid4())
+        default=lambda: str(uuid4())
     )
     #: ID of the user associated with the key
     user_id = db.Column(
@@ -114,12 +103,11 @@ class APIKey(db.Model):
         lazy=False
     )
 
-    @return_ascii
     def __repr__(self):
         return '<APIKey({}, {}, {})>'.format(self.token, self.user_id, self.last_used_dt or 'never')
 
     def register_used(self, ip, uri, authenticated):
-        """Updates the last used information"""
+        """Update the last used information."""
         self.last_used_dt = now_utc()
         self.last_used_ip = ip
         self.last_used_uri = uri

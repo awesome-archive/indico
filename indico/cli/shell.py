@@ -1,44 +1,39 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import datetime
 import itertools
+import json
 import os
 import re
 import sys
+from collections import Counter
+from contextlib import ExitStack
 from functools import partial
 from operator import attrgetter, itemgetter
+from pathlib import Path
 
 import click
 import sqlalchemy.orm
-from contextlib2 import ExitStack
 from flask import current_app
+from sqlalchemy.orm.attributes import flag_modified
 
 import indico
 from indico.core import signals
 from indico.core.celery import celery
 from indico.core.config import config
 from indico.core.db import db
+from indico.core.db.sqlalchemy.util.models import get_all_models
 from indico.core.plugins import plugin_engine
 from indico.modules.events import Event
+from indico.modules.users import User
+from indico.modules.users.util import get_user_by_email
 from indico.util.console import cformat
 from indico.util.date_time import now_utc, server_to_utc
-from indico.util.fossilize import clearCache
 from indico.web.flask.stats import request_stats_request_started
 
 
@@ -47,38 +42,46 @@ def _add_to_context(namespace, info, element, name=None, doc=None, color='green'
         name = element.__name__
     namespace[name] = element
     if doc:
-        info.append(cformat('+ %%{%s}{}%%{white!} ({})' % color).format(name, doc))
+        info.append(cformat('+ %%{%s}{}%%{white!} ({})' % color).format(name, doc))  # noqa: UP031
     else:
-        info.append(cformat('+ %%{%s}{}' % color).format(name))
+        info.append(cformat('+ %%{%s}{}' % color).format(name))  # noqa: UP031
 
 
 def _add_to_context_multi(namespace, info, elements, names=None, doc=None, color='green'):
+    if not elements:
+        return
     if not names:
         names = [x.__name__ for x in elements]
-    for name, element in zip(names, elements):
+    for name, element in zip(names, elements, strict=True):
         namespace[name] = element
     if doc:
-        info.append(cformat('+ %%{white!}{}:%%{reset} %%{%s}{}' % color).format(doc, ', '.join(names)))
+        info.append(cformat('+ %%{white!}{}:%%{reset} %%{%s}{}' % color).format(doc, ', '.join(names)))  # noqa: UP031
     else:
-        info.append(cformat('+ %%{%s}{}' % color).format(', '.join(names)))
+        info.append(cformat('+ %%{%s}{}' % color).format(', '.join(names)))  # noqa: UP031
 
 
 def _add_to_context_smart(namespace, info, objects, get_name=attrgetter('__name__'), color='cyan'):
     def _get_module(obj):
         segments = tuple(obj.__module__.split('.'))
         if segments[0].startswith('indico_'):  # plugin
-            return 'plugin:{}'.format(segments[0])
+            return f'plugin:{segments[0]}'
         elif segments[:2] == ('indico', 'modules'):
-            return 'module:{}'.format(segments[2])
+            return f'module:{segments[2]}'
         elif segments[:2] == ('indico', 'core'):
-            return 'core:{}'.format(segments[2])
+            return f'core:{segments[2]}'
         else:
             return '.'.join(segments[:-1] if len(segments) > 1 else segments)
 
     items = [(_get_module(obj), get_name(obj), obj) for obj in objects]
-    for module, items in itertools.groupby(sorted(items, key=itemgetter(0, 1)), key=itemgetter(0)):
-        names, elements = zip(*((x[1], x[2]) for x in items))
+    for module, mod_items in itertools.groupby(sorted(items, key=itemgetter(0, 1)), key=itemgetter(0)):
+        names, elements = list(zip(*((x[1], x[2]) for x in mod_items), strict=True))
         _add_to_context_multi(namespace, info, elements, names, doc=module, color=color)
+
+
+def _get_user_by_email_or_id(email_or_id: int | str) -> User | None:
+    if isinstance(email_or_id, int):
+        return User.get(email_or_id)
+    return get_user_by_email(email_or_id)
 
 
 def _make_shell_context():
@@ -89,27 +92,29 @@ def _make_shell_context():
     add_to_context_smart = partial(_add_to_context_smart, context, info)
     # Common stdlib modules
     info.append(cformat('*** %{magenta!}stdlib%{reset} ***'))
-    DATETIME_ATTRS = ('date', 'time', 'datetime', 'timedelta')
-    ORM_ATTRS = ('joinedload', 'defaultload', 'contains_eager', 'lazyload', 'noload', 'subqueryload', 'undefer',
+    datetime_attrs = ('date', 'time', 'datetime', 'timedelta')
+    orm_attrs = ('joinedload', 'defaultload', 'contains_eager', 'lazyload', 'noload', 'subqueryload', 'undefer',
                  'undefer_group', 'load_only')
-    add_to_context_multi([getattr(datetime, attr) for attr in DATETIME_ATTRS] +
-                         [getattr(sqlalchemy.orm, attr) for attr in ORM_ATTRS] +
-                         [itertools, re, sys, os],
+    add_to_context_multi([getattr(datetime, attr) for attr in datetime_attrs] +
+                         [getattr(sqlalchemy.orm, attr) for attr in orm_attrs] +
+                         [flag_modified, Path, Counter] +
+                         [itertools, re, sys, os, json],
                          color='yellow')
     # Models
     info.append(cformat('*** %{magenta!}Models%{reset} ***'))
-    models = [cls for name, cls in sorted(db.Model._decl_class_registry.items(), key=itemgetter(0))
-              if hasattr(cls, '__table__')]
+    models = [cls for cls in sorted(get_all_models(), key=attrgetter('__name__')) if hasattr(cls, '__table__')]
     add_to_context_smart(models)
     # Tasks
     info.append(cformat('*** %{magenta!}Tasks%{reset} ***'))
-    tasks = [task for task in sorted(celery.tasks.values()) if not task.name.startswith('celery.')]
+    tasks = [task for task in sorted(celery.tasks.values(), key=attrgetter('name'))
+             if not task.name.startswith('celery.')]
     add_to_context_smart(tasks, get_name=lambda x: x.name.replace('.', '_'), color='blue!')
     # Plugins
-    info.append(cformat('*** %{magenta!}Plugins%{reset} ***'))
     plugins = [type(plugin) for plugin in sorted(plugin_engine.get_active_plugins().values(),
                                                  key=attrgetter('name'))]
-    add_to_context_multi(plugins, color='yellow!')
+    if plugins:
+        info.append(cformat('*** %{magenta!}Plugins%{reset} ***'))
+        add_to_context_multi(plugins, color='yellow!')
     # Utils
     info.append(cformat('*** %{magenta!}Misc%{reset} ***'))
     add_to_context(celery, 'celery', doc='celery app', color='blue!')
@@ -120,6 +125,7 @@ def _make_shell_context():
     add_to_context(lambda *a, **kw: server_to_utc(datetime.datetime(*a, **kw)), 'dt',
                    doc='like datetime() but converted from localtime to utc')
     add_to_context(Event.get, 'E', doc='get event by id')
+    add_to_context(_get_user_by_email_or_id, 'U', doc='get user by email or id')
     # Stuff from plugins
     signals.plugin.shell_context.send(add_to_context=add_to_context, add_to_context_multi=add_to_context_multi)
     return context, info
@@ -137,10 +143,9 @@ def shell_cmd(verbose, with_req_context):
     context, info = _make_shell_context()
     banner = cformat('%{yellow!}Indico v{} is ready for your commands').format(indico.__version__)
     if verbose:
-        banner = '\n'.join(info + ['', banner])
+        banner = '\n'.join([*info, '', banner])
     ctx = current_app.make_shell_context()
     ctx.update(context)
-    clearCache()
     stack = ExitStack()
     if with_req_context:
         stack.enter_context(current_app.test_request_context(base_url=config.BASE_URL))

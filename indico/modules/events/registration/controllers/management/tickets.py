@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from io import BytesIO
 
@@ -23,11 +12,12 @@ from flask import json, render_template
 
 from indico.core.config import config
 from indico.core.db import db
+from indico.core.oauth.models.applications import OAuthApplication, SystemAppType
 from indico.modules.designer import PageOrientation, PageSize
 from indico.modules.events.registration.controllers.management import RHManageRegFormBase
 from indico.modules.events.registration.forms import TicketsForm
-from indico.modules.oauth.models.applications import OAuthApplication, SystemAppType
-from indico.web.flask.util import send_file, url_for
+from indico.modules.events.registration.util import get_custom_ticket_qr_code_handlers
+from indico.web.flask.util import send_file
 from indico.web.util import jsonify_data, jsonify_template
 
 
@@ -49,7 +39,7 @@ class RHRegistrationFormTickets(RHManageRegFormBase):
     """Display and modify ticket settings."""
 
     def _process(self):
-        form = TicketsForm(obj=self.regform, event=self.event)
+        form = TicketsForm(obj=self.regform, regform=self.regform, event=self.event)
         if form.validate_on_submit():
             form.populate_obj(self.regform)
             db.session.flush()
@@ -61,26 +51,32 @@ class RHRegistrationFormTickets(RHManageRegFormBase):
 class RHTicketConfigQRCodeImage(RHManageRegFormBase):
     """Display configuration QRCode."""
 
+    PERMISSION = ('registration', 'registration_checkin')
+
     def _process(self):
         # QRCode (Version 6 with error correction L can contain up to 106 bytes)
         qr = qrcode.QRCode(
-            version=6,
+            version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=4,
             border=1
         )
 
-        checkin_app = OAuthApplication.find_one(system_app_type=SystemAppType.checkin)
+        checkin_app = OAuthApplication.query.filter_by(system_app_type=SystemAppType.checkin).one()
         qr_data = {
-            "event_id": self.event.id,
-            "title": self.event.title,
-            "date": self.event.start_dt.isoformat(),
-            "version": 1,
-            "server": {
-                "base_url": config.BASE_URL,
-                "consumer_key": checkin_app.client_id,
-                "auth_url": url_for('oauth.oauth_authorize', _external=True),
-                "token_url": url_for('oauth.oauth_token', _external=True)
+            'event_id': self.event.id,
+            'title': self.event.title,
+            'regform_id': self.regform.id,
+            'regform_title': self.regform.title,
+            'date': self.event.start_dt.isoformat(),
+            'version': 2,
+            'server': {
+                'base_url': config.BASE_URL,
+                'client_id': checkin_app.client_id,
+                'scope': 'registrants',
+            },
+            'custom_code_handlers': {
+                x.name: x.regex for x in get_custom_ticket_qr_code_handlers().values()
             }
         }
         json_qr_data = json.dumps(qr_data)
@@ -96,5 +92,7 @@ class RHTicketConfigQRCodeImage(RHManageRegFormBase):
 
 
 class RHTicketConfigQRCode(RHManageRegFormBase):
+    PERMISSION = ('registration', 'registration_checkin')
+
     def _process(self):
         return render_template('events/registration/management/regform_qr_code.html', regform=self.regform)

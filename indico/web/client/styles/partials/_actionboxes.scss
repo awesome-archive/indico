@@ -1,148 +1,193 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
-
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 // ============================================================================
 // Base definitions
 // ============================================================================
 
-%action-box {
-    box-sizing: border-box;
-    @extend %default-border-radius;
-    margin-bottom: 1rem;
-    padding: 10px;
-    width: 100%;
+@use 'base/layout' as *;
+@use 'base/palette' as *;
+@use 'base/borders' as *;
+@use 'base/animation' as *;
 
-    > .section {
-        @include clearfix();
-        @extend .flexrow;
-        align-items: center;
+@mixin action-box {
+  @include default-border-radius();
+  margin-bottom: 1rem;
+  padding: 10px;
+  width: 100%;
 
-        > .toolbar {
-            margin: 0;
-            padding: 0 0 0 0.5em;
-            flex-shrink: 0;
-            margin-left: auto;
+  > .section {
+    @include clearfix();
+    @extend .flexrow;
 
-            &.right {
-                padding-left: 0.5em;
-            }
+    align-items: center;
+    overflow: visible;
 
-            a:not(.i-button) {
-                line-height: 2.2em;
-            }
-
-            > .group {
-                margin-bottom: 0;
-            }
-        }
-
-        &:not(:first-child) {
-            margin-top: 5px;
-            padding-top: 5px;
-            border-top: 1px solid $gray;
-        }
+    &.align-top {
+      align-items: flex-start;
     }
 
-    > .section > .text {
-        flex-grow: 1;
+    > .toolbar {
+      margin: 0;
+      padding: 0 0 0 0.5em;
+      flex-shrink: 0;
+      margin-left: auto;
 
-        > .label {
-            font-weight: bold;
-        }
+      &.right {
+        padding-left: 0.5em;
+      }
+
+      a:not(.i-button),
+      a:not(.ui.button) {
+        line-height: 2.2em;
+      }
+
+      > .group {
+        margin-bottom: 0;
+      }
     }
 
-    > .section > .icon {
-        font-size: 2rem;
-        padding-right: 0.5rem;
-        flex-shrink: 0;
-        align-self: flex-start;
+    &:not(:first-child) {
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px solid $gray;
     }
+  }
 
-    &.for-form {
-        width: 400px;
+  > .section > .text {
+    flex-grow: 1;
+
+    > .label {
+      font-weight: bold;
     }
+  }
+
+  > .section > .icon {
+    font-size: 2rem;
+    padding-right: 0.5rem;
+    flex-shrink: 0;
+    align-self: center;
+
+    &.align-top {
+      align-self: flex-start;
+      margin-top: 0.15em;
+    }
+  }
+
+  .section > .sui-icon-wrapper {
+    padding-right: 0.5rem;
+
+    i.icon {
+      font-size: 1.825em; // this makes the wrapper width ~35px, same as normal icons
+      margin-right: 0; // reset semantic icon margin
+    }
+  }
 }
-
 
 @mixin action-box-colors($color, $emphasis-color, $background-color, $border-color) {
-    @include border-all($border-color);
-    background: $background-color;
-    color: $color;
+  @include border-all($border-color);
+  background: $background-color;
+  color: $color;
 
-    .section:not(.highlight):not(.warning):not(.danger):not(.disabled):not(.accept):not(.plain) {
-        > .icon {
-            color: $emphasis-color;
-        }
-
-        .text .label {
-            color: $emphasis-color;
-        }
+  .section:not(.highlight):not(.warning):not(.danger):not(.disabled):not(.accept):not(.plain) {
+    > .icon {
+      color: $emphasis-color;
     }
-}
 
+    .text .label {
+      color: $emphasis-color;
+    }
+
+    > .sui-icon-wrapper {
+      color: $emphasis-color;
+    }
+  }
+}
 
 // ============================================================================
 // Element and flavors
 // ============================================================================
 
 .action-box {
-    @extend %action-box;
-    @include action-box-colors($color: $dark-gray, $emphasis-color: $light-black,
-                               $background-color: $light-gray, $border-color: $dark-gray);
+  @include action-box();
+  @include action-box-colors(
+    $color: $dark-gray,
+    $emphasis-color: $light-black,
+    $background-color: $light-gray,
+    $border-color: $dark-gray
+  );
 
-    &.highlight {
-        @include action-box-colors($color: $light-black, $emphasis-color: $blue,
-                                   $background-color: $light-blue, $border-color: $blue);
-    }
+  &.highlight {
+    @include action-box-colors(
+      $color: $light-black,
+      $emphasis-color: $blue,
+      $background-color: $light-blue,
+      $border-color: $blue
+    );
+  }
 
-    &.warning {
-        @include action-box-colors($color: $dark-gray, $emphasis-color: $yellow,
-                                   $background-color: $light-yellow, $border-color: $yellow);
-    }
+  &.warning {
+    @include action-box-colors(
+      $color: $dark-gray,
+      $emphasis-color: $yellow,
+      $background-color: $light-yellow,
+      $border-color: $yellow
+    );
+  }
 
-    &.danger {
-        @include action-box-colors($color: $light-black, $emphasis-color: $red,
-                                   $background-color: $light-red, $border-color: $red);
-    }
+  &.danger {
+    @include action-box-colors(
+      $color: $light-black,
+      $emphasis-color: $red,
+      $background-color: $light-red,
+      $border-color: $red
+    );
+  }
 
-    &.disabled {
-        @include action-box-colors($color: $light-black, $emphasis-color: $black,
-                                   $background-color: $pastel-gray, $border-color: $black);
-    }
+  &.disabled {
+    @include action-box-colors(
+      $color: $light-black,
+      $emphasis-color: $black,
+      $background-color: $pastel-gray,
+      $border-color: $black
+    );
+  }
 
-    &.accept {
-        @include action-box-colors($color: $light-black, $emphasis-color: $green,
-                                   $background-color: $light-green, $border-color: $green);
-    }
+  &.accept {
+    @include action-box-colors(
+      $color: $light-black,
+      $emphasis-color: $green,
+      $background-color: $light-green,
+      $border-color: $green
+    );
+  }
 
-    &.plain {
-        border: none;
-        background-color: transparent;
-    }
+  &.plain {
+    border: none;
+    background-color: transparent;
+  }
 
-    ul:not(.dropdown) {
-        margin: 0;
-        padding-left: 1.5em;
-        max-height: 100px;
-        overflow: auto;
-    }
+  &.draft-mode {
+    max-width: 800px;
+  }
 
-    .date {
-        font-weight: bold;
-    }
+  ul:not(.i-dropdown):not(.ck) {
+    margin: 0;
+    padding-left: 1.5em;
+    max-height: 100px;
+    overflow: auto;
+  }
+
+  .date {
+    font-weight: bold;
+  }
+
+  &.mid-form {
+    margin-top: 5px;
+    margin-bottom: 6px;
+  }
 }

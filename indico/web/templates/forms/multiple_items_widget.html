@@ -3,7 +3,7 @@
 
 {% block html %}
     {% set value_json = field._value() | tojson %}
-    <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ value_json | forceescape }}">
+    <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ value_json | forceescape }}" {{ input_args | html_params }}>
     <div id="{{ field.id }}-widget" class="multiple-items-widget">
         <table class="i-table-widget">
             <thead data-tooltip-anchor>
@@ -21,9 +21,11 @@
             </thead>
             <tbody></tbody>
         </table>
-        <button type="button" id="{{ field.id }}-add-button" class="js-add-row i-button icon-plus">
-            {%- trans %}Add{% endtrans -%}
-        </button>
+        {% block action_buttons %}
+            <button type="button" id="{{ field.id }}-add-button" class="js-add-row i-button icon-plus">
+                {%- trans %}Add{% endtrans -%}
+            </button>
+        {% endblock %}
     </div>
 {% endblock %}
 

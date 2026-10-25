@@ -1,24 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytz
+from flask import session
 from sqlalchemy import DDL, orm
-from sqlalchemy.dialects.postgresql import ARRAY, JSON, array
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, array
 from sqlalchemy.event import listens_for
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -32,20 +22,21 @@ from indico.core.db.sqlalchemy import PyIntEnum
 from indico.core.db.sqlalchemy.attachments import AttachedItemsMixin
 from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
 from indico.core.db.sqlalchemy.protection import ProtectionManagersMixin, ProtectionMode
-from indico.core.db.sqlalchemy.searchable_titles import SearchableTitleMixin
+from indico.core.db.sqlalchemy.searchable import SearchableTitleMixin
 from indico.core.db.sqlalchemy.util.models import auto_table_args
+from indico.modules.logs.models.entries import CategoryLogEntry, CategoryLogRealm, LogKind
 from indico.util.date_time import get_display_tz
 from indico.util.decorators import strict_classproperty
-from indico.util.i18n import _
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import _, pgettext
 from indico.util.locators import locator_property
-from indico.util.string import MarkdownText, format_repr, return_ascii, text_to_repr
-from indico.util.struct.enum import RichIntEnum
+from indico.util.string import MarkdownText, format_repr, text_to_repr
 from indico.web.flask.util import url_for
 
 
 def _get_next_position(context):
     parent_id = context.current_parameters['parent_id']
-    res = db.session.query(db.func.max(Category.position)).filter_by(parent_id=parent_id).one()
+    res = db.session.query(db.func.max(Category.position)).filter(Category.parent_id == parent_id).one()
     return (res[0] or 0) + 1
 
 
@@ -58,15 +49,40 @@ def _get_default_event_themes():
 
 
 class EventMessageMode(RichIntEnum):
-    __titles__ = [_('None'), _('Info'), _('Warning'), _('Danger')]
+    __titles__ = [pgettext('Message type', 'None'), pgettext('Message type', 'Info'),
+                  pgettext('Message type', 'Warning'), pgettext('Message type', 'Danger')]
     disabled = 0
     info = 1
     warning = 2
     danger = 3
 
 
+class EventCreationMode(RichIntEnum):
+    __titles__ = [None, _('Restricted to authorized users'), _('Moderated unless authorized'), _('Unrestricted')]
+    restricted = 1
+    moderated = 2
+    open = 3
+
+
+class InheritableConfigMode(RichIntEnum):
+    __titles__ = [
+        _('Disabled: Ignore any inherited configuration'),
+        _('Enabled: Use configuration from this category'),
+        _('Inheriting: Use value from parent category (Enabled)'),
+    ]
+    disabled = 0
+    enabled = 1
+    inheriting = 2
+
+    @classmethod
+    def get_form_field_titles(cls, parent_configured):
+        if parent_configured:
+            return cls.__titles__
+        return [*cls.__titles__[:2], _('Inheriting: Use value from parent category (Disabled)')]
+
+
 class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, AttachedItemsMixin, db.Model):
-    """An Indico category"""
+    """An Indico category."""
 
     __tablename__ = 'categories'
     disallowed_protection_modes = frozenset()
@@ -74,6 +90,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
     possible_render_modes = {RenderMode.markdown}
     default_render_mode = RenderMode.markdown
     allow_no_access_contact = True
+    allow_relationship_preloading = True
     ATTACHMENT_FOLDER_ID_COLUMN = 'category_id'
 
     @strict_classproperty
@@ -81,11 +98,22 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
     def __auto_table_args(cls):
         return (db.CheckConstraint("(icon IS NULL) = (icon_metadata::text = 'null')", 'valid_icon'),
                 db.CheckConstraint("(logo IS NULL) = (logo_metadata::text = 'null')", 'valid_logo'),
-                db.CheckConstraint("(parent_id IS NULL) = (id = 0)", 'valid_parent'),
-                db.CheckConstraint("(id != 0) OR NOT is_deleted", 'root_not_deleted'),
-                db.CheckConstraint("(id != 0) OR (protection_mode != {})".format(ProtectionMode.inheriting),
+                db.CheckConstraint('(parent_id IS NULL) = (id = 0)', 'valid_parent'),
+                db.CheckConstraint('(id != 0) OR NOT is_deleted', 'root_not_deleted'),
+                db.CheckConstraint(f'(id != 0) OR (protection_mode != {ProtectionMode.inheriting})',
                                    'root_not_inheriting'),
+                db.CheckConstraint(f'(id != 0) OR (google_wallet_mode != {InheritableConfigMode.inheriting})',
+                                   'root_not_inheriting_gw_mode'),
+                db.CheckConstraint(f'(id != 0) OR (apple_wallet_mode != {InheritableConfigMode.inheriting})',
+                                   'root_not_inheriting_ap_mode'),
                 db.CheckConstraint('visibility IS NULL OR visibility > 0', 'valid_visibility'),
+                db.CheckConstraint(f'(google_wallet_mode != {InheritableConfigMode.enabled}) OR '
+                                   "(google_wallet_settings != '{}'::jsonb)",
+                                   'gw_configured_if_enabled'),
+                db.CheckConstraint(f'(apple_wallet_mode != {InheritableConfigMode.enabled}) OR '
+                                   "(apple_wallet_settings != '{}'::jsonb)",
+                                   'ap_configured_if_enabled'),
+
                 {'schema': 'categories'})
 
     @declared_attr
@@ -118,7 +146,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         default=None
     )
     icon_metadata = db.Column(
-        JSON,
+        JSONB,
         nullable=False,
         default=lambda: None
     )
@@ -127,7 +155,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         nullable=True
     ))
     logo_metadata = db.Column(
-        JSON,
+        JSONB,
         nullable=False,
         default=lambda: None
     )
@@ -141,14 +169,14 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         default=lambda: config.DEFAULT_TIMEZONE
     )
     default_event_themes = db.Column(
-        JSON,
+        JSONB,
         nullable=False,
         default=_get_default_event_themes
     )
-    event_creation_restricted = db.Column(
-        db.Boolean,
+    event_creation_mode = db.Column(
+        PyIntEnum(EventCreationMode),
         nullable=False,
-        default=True
+        default=EventCreationMode.restricted
     )
     event_creation_notification_emails = db.Column(
         ARRAY(db.String),
@@ -176,7 +204,42 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         nullable=False,
         default=False
     )
+    show_future_months = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0
+    )
+    google_wallet_mode = db.Column(
+        PyIntEnum(InheritableConfigMode),
+        nullable=False,
+        default=InheritableConfigMode.inheriting,
+    )
+    google_wallet_settings = db.Column(
+        JSONB,
+        nullable=False,
+        default={}
+    )
+    apple_wallet_mode = db.Column(
+        PyIntEnum(InheritableConfigMode),
+        nullable=False,
+        default=InheritableConfigMode.inheriting,
+    )
+    apple_wallet_settings = db.Column(
+        JSONB,
+        nullable=False,
+        default={}
+    )
+    is_flat_view_enabled = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False
+    )
     default_ticket_template_id = db.Column(
+        db.ForeignKey('indico.designer_templates.id'),
+        nullable=True,
+        index=True
+    )
+    default_badge_template_id = db.Column(
         db.ForeignKey('indico.designer_templates.id'),
         nullable=True,
         index=True
@@ -205,6 +268,12 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         foreign_keys=default_ticket_template_id,
         backref='default_ticket_template_of'
     )
+    default_badge_template = db.relationship(
+        'DesignerTemplate',
+        lazy=True,
+        foreign_keys=default_badge_template_id,
+        backref='default_badge_template_of'
+    )
 
     # column properties:
     # - deep_events_count
@@ -212,10 +281,14 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
     # relationship backrefs:
     # - attachment_folders (AttachmentFolder.category)
     # - designer_templates (DesignerTemplate.category)
+    # - event_move_requests (EventMoveRequest.category)
     # - events (Event.category)
     # - favorite_of (User.favorite_categories)
     # - legacy_mapping (LegacyCategoryMapping.category)
+    # - log_entries (CategoryLogEntry.category)
     # - parent (Category.children)
+    # - receipt_templates (ReceiptTemplate.category)
+    # - roles (CategoryRole.category)
     # - settings (CategorySetting.category)
     # - suggestions (SuggestedCategory.category)
 
@@ -231,7 +304,6 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
     def event_message(cls):
         return cls._event_message
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', is_deleted=False, _text=text_to_repr(self.title, max_length=75))
 
@@ -245,7 +317,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @classmethod
     def get_root(cls):
-        """Get the root category"""
+        """Get the root category."""
         return cls.query.filter(cls.is_root).one()
 
     @property
@@ -253,8 +325,8 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         return url_for('categories.display', self)
 
     @property
-    def has_only_events(self):
-        return self.has_events and not self.children
+    def external_url(self):
+        return url_for('categories.display', self, _external=True)
 
     @hybrid_property
     def is_root(self):
@@ -286,18 +358,51 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def display_tzinfo(self):
-        """The tzinfo of the category or the one specified by the user"""
-        return get_display_tz(self, as_timezone=True)
+        """The tzinfo of the category or the one specified by the user."""
+        return get_display_tz(self)
+
+    def log(self, realm, kind, module, summary, user=None, type_='simple', data=None, meta=None):
+        """Create a new log entry for the category.
+
+        :param realm: A value from :class:`.CategoryLogRealm` indicating
+                      the realm of the action.
+        :param kind: A value from :class:`.LogKind` indicating
+                     the kind of the action that was performed.
+        :param module: A human-friendly string describing the module
+                       related to the action.
+        :param summary: A one-line summary describing the logged action.
+        :param user: The user who performed the action.
+        :param type_: The type of the log entry. This is used for custom
+                      rendering of the log message/data
+        :param data: JSON-serializable data specific to the log type.
+        :param meta: JSON-serializable data that won't be displayed.
+        :return: The newly created `CategoryLogEntry`
+
+        In most cases the ``simple`` log type is fine. For this type,
+        any items from data will be shown in the detailed view of the
+        log entry.  You may either use a dict (which will be sorted)
+        alphabetically or a list of ``key, value`` pairs which will
+        be displayed in the given order.
+        """
+        entry = CategoryLogEntry(user=user, realm=realm, kind=kind, module=module, type=type_, summary=summary,
+                                 data=(data or {}), meta=(meta or {}))
+        self.log_entries.append(entry)
+        return entry
+
+    def can_propose_events(self, user):
+        """Check whether the user can propose move requests to the category."""
+        return user and ((self.event_creation_mode == EventCreationMode.moderated and self.can_access(user)) or
+                         self.can_manage(user, permission='event_move_request'))
 
     def can_create_events(self, user):
         """Check whether the user can create events in the category."""
         # if creation is not restricted anyone who can access the category
         # can also create events in it, otherwise only people with the
         # creation role can
-        return user and ((not self.event_creation_restricted and self.can_access(user)) or
+        return user and ((self.event_creation_mode == EventCreationMode.open and self.can_access(user)) or
                          self.can_manage(user, permission='create'))
 
-    def move(self, target):
+    def move(self, target: 'Category'):
         """Move the category into another category."""
         assert not self.is_root
         old_parent = self.parent
@@ -305,6 +410,16 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         self.parent = target
         db.session.flush()
         signals.category.moved.send(self, old_parent=old_parent)
+        user = session.user if session else None
+        sep = ' \N{RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK} '
+        self.log(CategoryLogRealm.category, LogKind.change, 'Category', 'Category moved', user,
+                 data={'From': sep.join(old_parent.chain_titles),
+                       'To': sep.join(target.chain_titles)})
+        old_parent.log(CategoryLogRealm.category, LogKind.negative, 'Content', f'Subcategory moved out: "{self.title}"',
+                       user, data={'To': sep.join(target.chain_titles)})
+        target.log(CategoryLogRealm.category, LogKind.positive, 'Content',
+                   f'Subcategory moved in: "{self.title}"', user,
+                   data={'From': sep.join(old_parent.chain_titles)})
 
     @classmethod
     def get_tree_cte(cls, col='id'):
@@ -333,6 +448,24 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         rec_query = (select([cat_alias.id,
                              cte_query.c.path.op('||')(path_column),
                              cte_query.c.is_deleted | cat_alias.is_deleted])
+                     .where(cat_alias.parent_id == cte_query.c.id))
+        return cte_query.union_all(rec_query)
+
+    @classmethod
+    def get_subtree_ids_cte(cls, ids):
+        """Create a CTE for a category subtree.
+
+        This CTE contains a single ``id`` column that contains all the specified
+        IDs and those of all their subcategories.
+
+        This is likely to be much more performant than `get_tree_cte` when the
+        query is used with LIMIT, especially in large databases.
+        """
+        cat_alias = db.aliased(cls)
+        cte_query = (select([cat_alias.id])
+                     .where(cat_alias.id.in_(ids))
+                     .cte(recursive=True))
+        rec_query = (select([cat_alias.id])
                      .where(cat_alias.parent_id == cte_query.c.id))
         return cte_query.union_all(rec_query)
 
@@ -367,15 +500,43 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
                      .cte(recursive=True))
         rec_query = (select([cat_alias.id,
                              db.case({'null': cte_query.c.source_id}, else_=cat_alias.id,
-                                     value=db.func.json_typeof(cat_alias.icon_metadata)),
+                                     value=db.func.jsonb_typeof(cat_alias.icon_metadata)),
                              db.case({'null': cte_query.c.icon_metadata}, else_=cat_alias.icon_metadata,
-                                     value=db.func.json_typeof(cat_alias.icon_metadata))])
+                                     value=db.func.jsonb_typeof(cat_alias.icon_metadata))])
+                     .where(cat_alias.parent_id == cte_query.c.id))
+        return cte_query.union_all(rec_query)
+
+    @classmethod
+    def get_google_wallet_config_cte(cls):
+        cat_alias: Category = db.aliased(cls)
+        cte_query = (select([cat_alias.id, cat_alias.google_wallet_mode, cat_alias.google_wallet_settings])
+                     .where(cat_alias.parent_id.is_(None))
+                     .cte(recursive=True))
+        rec_query = (select([cat_alias.id,
+                             db.case({InheritableConfigMode.inheriting.value: cte_query.c.google_wallet_mode},
+                                     else_=cat_alias.google_wallet_mode, value=cat_alias.google_wallet_mode),
+                             db.case({InheritableConfigMode.inheriting.value: cte_query.c.google_wallet_settings},
+                                     else_=cat_alias.google_wallet_settings, value=cat_alias.google_wallet_mode)])
+                     .where(cat_alias.parent_id == cte_query.c.id))
+        return cte_query.union_all(rec_query)
+
+    @classmethod
+    def get_apple_wallet_config_cte(cls):
+        cat_alias: Category = db.aliased(cls)
+        cte_query = (select([cat_alias.id, cat_alias.apple_wallet_mode, cat_alias.apple_wallet_settings])
+                     .where(cat_alias.parent_id.is_(None))
+                     .cte(recursive=True))
+        rec_query = (select([cat_alias.id,
+                             db.case({InheritableConfigMode.inheriting.value: cte_query.c.apple_wallet_mode},
+                                     else_=cat_alias.apple_wallet_mode, value=cat_alias.apple_wallet_mode),
+                             db.case({InheritableConfigMode.inheriting.value: cte_query.c.apple_wallet_settings},
+                                     else_=cat_alias.apple_wallet_settings, value=cat_alias.apple_wallet_mode)])
                      .where(cat_alias.parent_id == cte_query.c.id))
         return cte_query.union_all(rec_query)
 
     @property
     def deep_children_query(self):
-        """Get a query object for all subcategories.
+        """A query object for all subcategories.
 
         This includes subcategories at any level of nesting.
         """
@@ -398,7 +559,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def chain_query(self):
-        """Get a query object for the category chain.
+        """A query object for the category chain.
 
         The query retrieves the root category first and then all the
         intermediate categories up to (and including) this category.
@@ -407,7 +568,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def parent_chain_query(self):
-        """Get a query object for the category's parent chain.
+        """A query object for the category's parent chain.
 
         The query retrieves the root category first and then all the
         intermediate categories up to (excluding) this category.
@@ -428,7 +589,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
         assert n_categs >= 0
         if n_categs > len(chain):
             if fail_on_overflow:
-                raise IndexError("Root category has no parent!")
+                raise IndexError('Root category has no parent!')
             else:
                 return None
         return chain[::-1][n_categs - 1]
@@ -438,7 +599,7 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def visibility_horizon_query(self):
-        """Get a query object that returns the highest category this one is visible from."""
+        """A query object that returns the highest category this one is visible from."""
         cte_query = (select([Category.id, Category.parent_id,
                              db.case([(Category.visibility.is_(None), None)],
                                      else_=(Category.visibility - 1)).label('n'),
@@ -456,7 +617,10 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def own_visibility_horizon(self):
-        """Get the highest category this one would like to be visible from (configured visibility)."""
+        """
+        The highest category this one would like to be visible
+        from (configured visibility).
+        """
         if self.visibility is None:
             return Category.get_root()
         else:
@@ -464,21 +628,24 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def real_visibility_horizon(self):
-        """Get the highest category this one is actually visible from (as limited by categories above)."""
+        """
+        The highest category this one is actually visible
+        from (as limited by categories above).
+        """
         horizon_id, final_visibility = self.visibility_horizon_query.one()
         if final_visibility is not None and final_visibility < 0:
             return None  # Category is invisible
         return Category.get(horizon_id)
 
-    @property
-    def visible_categories_cte(self):
+    @staticmethod
+    def get_visible_categories_cte(category_id):
         """
         Get a sqlalchemy select for the visible categories within
-        this category, including the category itself.
+        the given category, including the category itself.
         """
         cte_query = (select([Category.id, literal(0).label('level')])
-                     .where((Category.id == self.id) & (Category.visibility.is_(None) | (Category.visibility > 0)))
-                     .cte('visibility_chain', recursive=True))
+                     .where((Category.id == category_id) & (Category.visibility.is_(None) | (Category.visibility > 0)))
+                     .cte(recursive=True))
         parent_query = (select([Category.id, cte_query.c.level + 1])
                         .where(db.and_(Category.parent_id == cte_query.c.id,
                                        db.or_(Category.visibility.is_(None),
@@ -487,27 +654,30 @@ class Category(SearchableTitleMixin, DescriptionMixin, ProtectionManagersMixin, 
 
     @property
     def visible_categories_query(self):
-        """
-        Get a query object for the visible categories within
-        this category, including the category itself.
-        """
-        cte_query = self.visible_categories_cte
+        """A query object for the visible categories within this category, including the category itself."""
+        cte_query = Category.get_visible_categories_cte(self.id)
         return Category.query.join(cte_query, Category.id == cte_query.c.id)
+
+    def get_hidden_events(self, user=None):
+        """Get all hidden events within the given category and user."""
+        from indico.modules.events import Event
+        hidden_events = Event.query.with_parent(self).filter_by(visibility=0).all()
+        return [event for event in hidden_events if not event.can_display(user)]
 
     @property
     def icon_url(self):
-        """Get the HTTP URL of the icon."""
+        """The HTTP URL of the icon."""
         return url_for('categories.display_icon', self, slug=self.icon_metadata['hash'])
 
     @property
     def effective_icon_url(self):
-        """Get the HTTP URL of the icon (possibly inherited)."""
+        """The HTTP URL of the icon (possibly inherited)."""
         data = self.effective_icon_data
         return url_for('categories.display_icon', category_id=data['source_id'], slug=data['metadata']['hash'])
 
     @property
     def logo_url(self):
-        """Get the HTTP URL of the logo."""
+        """The HTTP URL of the logo."""
         return url_for('categories.display_logo', self, slug=self.logo_metadata['hash'])
 
 
@@ -531,8 +701,26 @@ def _mappers_configured():
     # (public/protected) of the category, even if it's inheriting it from its
     # parent category
     cte = Category.get_protection_cte()
-    query = select([cte.c.protection_mode]).where(cte.c.id == Category.id).correlate_except(cte)
+    query = select([cte.c.protection_mode]).where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery()
     Category.effective_protection_mode = column_property(query, deferred=True, expire_on_flush=False)
+
+    # Category.effective_google_wallet_config -- the effective google wallet config
+    # of the category, even if it's inheriting it from its parent category
+    cte = Category.get_google_wallet_config_cte()
+    query = (select([db.case({InheritableConfigMode.disabled: None},
+                             else_=cte.c.google_wallet_settings,
+                             value=cte.c.google_wallet_mode)])
+             .where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery())
+    Category.effective_google_wallet_config = column_property(query, deferred=True, expire_on_flush=False)
+
+    # Category.effective_apple_wallet_config -- the effective apple pass config
+    # of the category, even if it's inheriting it from its parent category
+    cte = Category.get_apple_wallet_config_cte()
+    query = (select([db.case({InheritableConfigMode.disabled: None},
+                             else_=cte.c.apple_wallet_settings,
+                             value=cte.c.apple_wallet_mode)])
+             .where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery())
+    Category.effective_apple_wallet_config = column_property(query, deferred=True, expire_on_flush=False)
 
     # Category.effective_icon_data -- the effective icon data of the category,
     # either set on the category itself or inherited from it
@@ -540,14 +728,16 @@ def _mappers_configured():
     query = (select([db.func.json_build_object('source_id', cte.c.source_id,
                                                'metadata', cte.c.icon_metadata)])
              .where(cte.c.id == Category.id)
-             .correlate_except(cte))
+             .correlate_except(cte)
+             .scalar_subquery())
     Category.effective_icon_data = column_property(query, deferred=True)
 
     # Category.event_count -- the number of events in the category itself,
     # excluding deleted events
     query = (select([db.func.count(Event.id)])
              .where((Event.category_id == Category.id) & ~Event.is_deleted)
-             .correlate_except(Event))
+             .correlate_except(Event)
+             .scalar_subquery())
     Category.event_count = column_property(query, deferred=True)
 
     # Category.has_events -- whether the category itself contains any
@@ -557,17 +747,32 @@ def _mappers_configured():
              .correlate_except(Event))
     Category.has_events = column_property(query, deferred=True)
 
+    # Category.has_children -- whether the category contains any
+    # non-deleted subcategories
+    cat_alias = db.aliased(Category)
+    query = (exists([1])
+             .where((cat_alias.parent_id == Category.id) & ~cat_alias.is_deleted)
+             .correlate_except(cat_alias))
+    Category.has_children = column_property(query, deferred=True)
+
     # Category.chain_titles -- a list of the titles in the parent chain,
     # starting with the root category down to the current category.
     cte = Category.get_tree_cte('title')
-    query = select([cte.c.path]).where(cte.c.id == Category.id).correlate_except(cte)
+    query = select([cte.c.path]).where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery()
     Category.chain_titles = column_property(query, deferred=True)
+
+    # Category.chain_ids -- a list of the ids in the parent chain,
+    # starting with the root category down to the current category.
+    # This is equivalent to the `category_chain` in the Event model.
+    cte = Category.get_tree_cte()
+    query = select([cte.c.path]).where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery()
+    Category.chain_ids = column_property(query, deferred=True)
 
     # Category.chain -- a list of the ids and titles in the parent
     # chain, starting with the root category down to the current
     # category.  Each chain entry is a dict containing 'id' and `title`.
     cte = Category.get_tree_cte(lambda cat: db.func.json_build_object('id', cat.id, 'title', cat.title))
-    query = select([cte.c.path]).where(cte.c.id == Category.id).correlate_except(cte)
+    query = select([cte.c.path]).where(cte.c.id == Category.id).correlate_except(cte).scalar_subquery()
     Category.chain = column_property(query, deferred=True)
 
     # Category.deep_events_count -- the number of events in the category
@@ -577,7 +782,7 @@ def _mappers_configured():
                    cte.c.path.contains(array([Category.id])),
                    ~cte.c.is_deleted,
                    ~Event.is_deleted)
-    query = select([db.func.count()]).where(crit).correlate_except(Event)
+    query = select([db.func.count()]).where(crit).correlate_except(Event).scalar_subquery()
     Category.deep_events_count = column_property(query, deferred=True)
 
     # Category.deep_children_count -- the number of subcategories in the
@@ -585,31 +790,31 @@ def _mappers_configured():
     cte = Category.get_tree_cte()
     crit = db.and_(cte.c.path.contains(array([Category.id])),
                    cte.c.id != Category.id, ~cte.c.is_deleted)
-    query = select([db.func.count()]).where(crit).correlate_except(cte)
+    query = select([db.func.count()]).where(crit).correlate_except(cte).scalar_subquery()
     Category.deep_children_count = column_property(query, deferred=True)
 
 
 @listens_for(Category.__table__, 'after_create')
 def _add_deletion_consistency_trigger(target, conn, **kw):
-    sql = """
+    sql = f'''
         CREATE CONSTRAINT TRIGGER consistent_deleted
         AFTER INSERT OR UPDATE OF parent_id, is_deleted
-        ON {table}
+        ON {target.fullname}
         DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW
         EXECUTE PROCEDURE categories.check_consistency_deleted();
-    """.format(table=target.fullname)
+    '''
     DDL(sql).execute(conn)
 
 
 @listens_for(Category.__table__, 'after_create')
 def _add_cycle_check_trigger(target, conn, **kw):
-    sql = """
+    sql = f'''
         CREATE CONSTRAINT TRIGGER no_cycles
         AFTER INSERT OR UPDATE OF parent_id
-        ON {table}
+        ON {target.fullname}
         NOT DEFERRABLE
         FOR EACH ROW
         EXECUTE PROCEDURE categories.check_cycles();
-    """.format(table=target.fullname)
+    '''
     DDL(sql).execute(conn)

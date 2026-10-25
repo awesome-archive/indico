@@ -1,35 +1,24 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.core.db.sqlalchemy.util.queries import limit_groups
 from indico.modules.events.requests import get_request_definitions
 from indico.util.date_time import now_utc
-from indico.util.i18n import _
-from indico.util.string import return_ascii
-from indico.util.struct.enum import RichIntEnum
+from indico.util.enum import RichIntEnum
+from indico.util.i18n import pgettext
 
 
 class RequestState(RichIntEnum):
-    __titles__ = [_('Pending'), _('Accepted'), _('Rejected'), _('Withdrawn')]
+    __titles__ = [pgettext('Event request', 'Pending'), pgettext('Event request', 'Accepted'),
+                  pgettext('Event request', 'Rejected'), pgettext('Event request', 'Withdrawn')]
     pending = 0
     accepted = 1
     rejected = 2
@@ -37,7 +26,8 @@ class RequestState(RichIntEnum):
 
 
 class Request(db.Model):
-    """Event-related requests, e.g. for a webcast"""
+    """Event-related requests, e.g. for a webcast."""
+
     __tablename__ = 'requests'
     __table_args__ = {'schema': 'events'}
 
@@ -66,7 +56,7 @@ class Request(db.Model):
     )
     #: plugin-specific data of the request
     data = db.Column(
-        JSON,
+        JSONB,
         nullable=False
     )
     #: ID of the user creating the request
@@ -142,21 +132,20 @@ class Request(db.Model):
 
     @property
     def can_be_modified(self):
-        """Determines if the request can be modified or if a new one must be sent"""
+        """Determine if the request can be modified or if a new one must be sent."""
         return self.state in {RequestState.pending, RequestState.accepted}
 
     @property
     def locator(self):
-        return {'confId': self.event_id, 'type': self.type}
+        return {'event_id': self.event_id, 'type': self.type}
 
-    @return_ascii
     def __repr__(self):
         state = self.state.name if self.state is not None else None
-        return '<Request({}, {}, {}, {})>'.format(self.id, self.event_id, self.type, state)
+        return f'<Request({self.id}, {self.event_id}, {self.type}, {state})>'
 
     @classmethod
     def find_latest_for_event(cls, event, type_=None):
-        """Returns the latest requests for a given event.
+        """Return the latest requests for a given event.
 
         :param event: the event to find the requests for
         :param type_: the request type to retrieve, or `None` to get all

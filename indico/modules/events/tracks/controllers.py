@@ -1,35 +1,25 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from io import BytesIO
-from operator import itemgetter
+from operator import attrgetter, itemgetter
 
 from flask import flash, request
-from sqlalchemy.orm import subqueryload
 
 from indico.core.db.sqlalchemy.descriptions import RENDER_MODE_WRAPPER_MAP
-from indico.legacy.pdfinterface.conference import ProgrammeToPDF
 from indico.modules.events.controllers.base import RHDisplayEventBase
 from indico.modules.events.management.controllers import RHManageEventBase
-from indico.modules.events.tracks.forms import ProgramForm, TrackForm
+from indico.modules.events.tracks.forms import ProgramForm, TrackForm, TrackGroupForm
+from indico.modules.events.tracks.models.groups import TrackGroup
 from indico.modules.events.tracks.models.tracks import Track
-from indico.modules.events.tracks.operations import create_track, delete_track, update_program, update_track
+from indico.modules.events.tracks.operations import (create_track, create_track_group, delete_track, delete_track_group,
+                                                     update_program, update_track, update_track_group)
+from indico.modules.events.tracks.schemas import ProgramSchema
 from indico.modules.events.tracks.settings import track_settings
+from indico.modules.events.tracks.util import generate_program_pdf
 from indico.modules.events.tracks.views import WPDisplayTracks, WPManageTracks
 from indico.util.i18n import _
 from indico.util.string import handle_legacy_description
@@ -40,16 +30,17 @@ from indico.web.util import jsonify_data, jsonify_form
 
 
 def _render_track_list(event):
-    tpl = get_template_module('events/tracks/_track_list.html', event=event)
-    return tpl.render_track_list(event)
+    list_items = event.get_sorted_tracks()
+    tpl = get_template_module('events/tracks/_track_list.html', event=event, list_items=list_items)
+    return tpl.render_list(event, list_items)
 
 
 class RHManageTracksBase(RHManageEventBase):
-    """Base class for all track management RHs"""
+    """Base class for all track management RHs."""
 
 
 class RHManageTrackBase(RHManageTracksBase):
-    """Base class for track management RHs related to a specific track"""
+    """Base class for track management RHs related to a specific track."""
 
     normalize_url_spec = {
         'locators': {
@@ -59,13 +50,26 @@ class RHManageTrackBase(RHManageTracksBase):
 
     def _process_args(self):
         RHManageTracksBase._process_args(self)
-        self.track = Track.get_one(request.view_args['track_id'])
+        self.track = Track.get_or_404(request.view_args['track_id'])
+
+
+class RHManageTrackGroupBase(RHManageEventBase):
+    normalize_url_spec = {
+        'locators': {
+            lambda self: self.track_group
+        }
+    }
+
+    def _process_args(self):
+        RHManageEventBase._process_args(self)
+        self.track_group = TrackGroup.get_or_404(request.view_args['track_group_id'])
 
 
 class RHManageTracks(RHManageTracksBase):
     def _process(self):
         tracks = self.event.tracks
-        return WPManageTracks.render_template('management.html', self.event, tracks=tracks)
+        list_items = self.event.get_sorted_tracks()
+        return WPManageTracks.render_template('management.html', self.event, list_items=list_items, tracks=tracks)
 
 
 class RHEditProgram(RHManageTracksBase):
@@ -74,7 +78,7 @@ class RHEditProgram(RHManageTracksBase):
         form = ProgramForm(obj=FormDefaults(**settings))
         if form.validate_on_submit():
             update_program(self.event, form.data)
-            flash(_("The program has been updated."))
+            flash(_('The program has been updated.'))
             return jsonify_data()
         elif not form.is_submitted():
             handle_legacy_description(form.program, settings, get_render_mode=itemgetter('program_render_mode'),
@@ -107,9 +111,17 @@ class RHSortTracks(RHManageTracksBase):
     def _process(self):
         sort_order = request.json['sort_order']
         tracks = {t.id: t for t in self.event.tracks}
-        for position, track_id in enumerate(sort_order, 1):
-            if track_id in tracks:
-                tracks[track_id].position = position
+        track_groups = {tg.id: tg for tg in self.event.track_groups}
+        for position, item in enumerate(sort_order, 1):
+            if item['type'] == 'track':
+                tracks[item['id']].position = position
+                parent_id = item['parent']
+                track_group = (TrackGroup.query.with_parent(self.event)
+                               .filter(TrackGroup.id == parent_id).first())
+                tracks[item['id']].track_group = track_group
+            elif item['type'] == 'group':
+                track_groups[item['id']].position = position
+        return jsonify_data(html=_render_track_list(self.event))
 
 
 class RHDeleteTrack(RHManageTrackBase):
@@ -120,19 +132,51 @@ class RHDeleteTrack(RHManageTrackBase):
 
 
 class RHDisplayTracks(RHDisplayEventBase):
+    view_class = WPDisplayTracks
+
     def _process(self):
         program = track_settings.get(self.event, 'program')
         render_mode = track_settings.get(self.event, 'program_render_mode')
         program = RENDER_MODE_WRAPPER_MAP[render_mode](program)
         tracks = (Track.query.with_parent(self.event)
-                  .options(subqueryload('conveners'),
-                           subqueryload('abstract_reviewers'))
-                  .order_by(Track.position)
+                  .filter(~Track.track_group.has())
                   .all())
-        return WPDisplayTracks.render_template('display.html', self.event, program=program, tracks=tracks)
+        track_groups = self.event.track_groups
+        items = sorted(tracks + track_groups, key=attrgetter('position'))
+        return self.view_class.render_template('display.html', self.event, program=program, items=items)
 
 
 class RHTracksPDF(RHDisplayEventBase):
     def _process(self):
-        pdf = ProgrammeToPDF(self.event)
-        return send_file('program.pdf', BytesIO(pdf.getPDFBin()), 'application/pdf')
+        pdf = generate_program_pdf(self.event)
+        return send_file('program.pdf', pdf, 'application/pdf')
+
+
+class RHTracksJSON(RHDisplayEventBase):
+    def _process(self):
+        return ProgramSchema().jsonify(self.event)
+
+
+class RHCreateTrackGroup(RHManageEventBase):
+    def _process(self):
+        form = TrackGroupForm()
+        if form.validate_on_submit():
+            create_track_group(self.event, form.data)
+            return jsonify_data(html=_render_track_list(self.event))
+        return jsonify_form(form)
+
+
+class RHEditTrackGroup(RHManageTrackGroupBase):
+    def _process(self):
+        form = TrackGroupForm(obj=self.track_group)
+        if form.validate_on_submit():
+            update_track_group(self.track_group, form.data)
+            return jsonify_data(html=_render_track_list(self.event))
+        return jsonify_form(form)
+
+
+class RHDeleteTrackGroup(RHManageTrackGroupBase):
+    def _process(self):
+        delete_track_group(self.track_group)
+        flash(_('Track Group "{}" has been deleted.').format(self.track_group.title), 'success')
+        return jsonify_data(html=_render_track_list(self.event))

@@ -1,52 +1,44 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2019 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-import React from 'react';
 import PropTypes from 'prop-types';
+import React from 'react';
 import ReactMarkdown from 'react-markdown';
 
 // eslint-disable-next-line react/prop-types
 const ExternalLink = ({href, children}) => (
-    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  <a href={href} target="_blank" rel="noopener noreferrer">
+    {children}
+  </a>
 );
-
 
 /**
  * This component wraps ReactMarkdown and provides some convenience props.
  */
-const Markdown = ({targetBlank, ...props}) => {
-    if (targetBlank) {
-        // XXX: not using linkTarget since that doesn't set noopener
-        props.renderers = {link: ExternalLink, linkReference: ExternalLink, ...props.renderers};
-    }
-    return <ReactMarkdown {...props} />;
+const Markdown = ({targetBlank, remarkPlugins, ...props}) => {
+  if (targetBlank) {
+    // XXX: not using linkTarget since that doesn't set noopener
+    props.components = {a: ExternalLink, ...props.components};
+  }
+  return <ReactMarkdown {...props} remarkPlugins={remarkPlugins} />;
 };
 
 Markdown.propTypes = {
-    source: PropTypes.string.isRequired,
-    renderers: PropTypes.object,
-    targetBlank: PropTypes.bool,
-    // see https://github.com/rexxars/react-markdown#options for more props
+  children: PropTypes.string.isRequired,
+  components: PropTypes.object,
+  targetBlank: PropTypes.bool,
+  remarkPlugins: ReactMarkdown.propTypes.remarkPlugins,
+  // see https://github.com/rexxars/react-markdown#options for more props
 };
 
 Markdown.defaultProps = {
-    targetBlank: false,
-    renderers: {},
+  targetBlank: false,
+  components: {},
+  remarkPlugins: [],
 };
-
 
 export default Markdown;

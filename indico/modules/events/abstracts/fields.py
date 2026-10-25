@@ -1,65 +1,34 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from collections import defaultdict
+from operator import attrgetter
 
 from flask import request, session
 from sqlalchemy.orm import joinedload
-from wtforms.ext.sqlalchemy.fields import QuerySelectField
+from wtforms import ValidationError
+from wtforms_sqlalchemy.fields import QuerySelectField
 
-from indico.core.db import db
 from indico.core.db.sqlalchemy.util.session import no_autoflush
-from indico.modules.events.abstracts.models.abstracts import Abstract
+from indico.core.permissions import get_permissions_info
+from indico.modules.categories.util import serialize_category_role
+from indico.modules.events.abstracts.models.abstracts import Abstract, AbstractState
 from indico.modules.events.abstracts.models.persons import AbstractPersonLink
 from indico.modules.events.abstracts.notifications import ContributionTypeCondition, StateCondition, TrackCondition
+from indico.modules.events.abstracts.placeholders import AbstractInvitationURLPlaceholder
 from indico.modules.events.contributions.models.persons import AuthorType
 from indico.modules.events.fields import PersonLinkListFieldBase
+from indico.modules.events.roles.util import serialize_event_role
 from indico.modules.events.tracks.models.tracks import Track
-from indico.modules.events.util import serialize_person_link
-from indico.modules.users.models.users import User
 from indico.util.decorators import classproperty
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.forms.fields import JSONField
-from indico.web.forms.widgets import JinjaWidget, SelectizeWidget
-
-
-def _serialize_user(user):
-    return {
-        'id': user.id,
-        'name': user.name
-    }
-
-
-def _get_users_in_roles(data):
-    user_ids = {user_id
-                for user_roles in data.viewvalues()
-                for users in user_roles.viewvalues()
-                for user_id in users}
-    if not user_ids:
-        return []
-    return db.session.query(User.id, User).filter(User.id.in_(user_ids)).all()
-
-
-def _get_users(ids):
-    if not ids:
-        return set()
-    return set(User.find(User.id.in_(ids), ~User.is_deleted))
+from indico.web.forms.fields.principals import SearchTokenMixin
+from indico.web.forms.widgets import DropdownWidget, JinjaWidget
 
 
 class EmailRuleListField(JSONField):
@@ -80,91 +49,124 @@ class EmailRuleListField(JSONField):
             c.name: {
                 'title': c.description,
                 'labelText': c.label_text,
-                'options': list(c.get_available_values(event=self.event).viewitems()),
+                'options': list(c.get_available_values(event=self.event).items()),
                 'compatibleWith': c.compatible_with,
                 'required': c.required
             } for c in self.accepted_condition_types
         }
 
     def pre_validate(self, form):
-        super(EmailRuleListField, self).pre_validate(form)
+        super().pre_validate(form)
         if not all(self.data):
-            raise ValueError(_('Rules may not be empty'))
-        if any('*' in crit for rule in self.data for crit in rule.itervalues()):
+            raise ValidationError(_('Rules may not be empty'))
+        if any('*' in crit for rule in self.data for crit in rule.values()):
             # '*' (any) rules should never be included in the JSON, and having
             # such an entry would result in the rule never passing.
-            raise ValueError('Unexpected "*" criterion')
+            raise ValidationError('Unexpected "*" criterion')
+        invited_rule_present = any(
+            AbstractState.invited.value in value
+            for rule in self.data
+            for value in rule.values()
+        )
+        # disallow mixing invited rules with other rules
+        if invited_rule_present and len(self.data) > 1:
+            raise ValidationError(_('You cannot combine the "Invited" rule with other rules'))
+        # disallow changing the rule from/to "invited" since the email template would no longer be suitable
+        if form.email_tpl:
+            has_invitation_link_placeholder = AbstractInvitationURLPlaceholder.is_in(form.email_tpl.body, abstract=None)
+            if invited_rule_present != has_invitation_link_placeholder:
+                raise ValidationError(_('Existing notification templates cannot be changed from/to "Invited"; please '
+                                        'create a new one'))
 
     def _value(self):
-        return super(EmailRuleListField, self)._value() if self.data else '[]'
+        return super()._value() if self.data else '[]'
 
 
 class AbstractPersonLinkListField(PersonLinkListFieldBase):
-    """A field to configure a list of abstract persons"""
+    """A field to configure a list of abstract persons."""
 
     person_link_cls = AbstractPersonLink
     linked_object_attr = 'abstract'
     default_sort_alpha = False
     create_untrusted_persons = True
-    widget = JinjaWidget('events/contributions/forms/contribution_person_link_widget.html', allow_empty_email=True)
+    widget = JinjaWidget('forms/person_link_widget.html', allow_empty_email=True)
+
+    @property
+    def roles(self):
+        roles = [
+            {'name': 'primary', 'label': _('Author'), 'plural': _('Authors'), 'section': True, 'default': True},
+            {'name': 'secondary', 'label': _('Co-author'), 'plural': _('Co-authors'), 'section': True},
+        ]
+        if self.allow_speakers:
+            roles.append({'name': 'speaker', 'label': _('Speaker'), 'icon': 'microphone'})
+        return roles
 
     def __init__(self, *args, **kwargs):
-        self.author_types = AuthorType.serialize()
-        self.allow_authors = True
-        self.allow_submitters = False
-        self.show_empty_coauthors = kwargs.pop('show_empty_coauthors', True)
-        self.default_author_type = kwargs.pop('default_author_type', AuthorType.none)
-        self.default_is_submitter = False
-        self.default_is_speaker = False
-        self.require_primary_author = True
+        self.allow_speakers = kwargs.pop('allow_speakers', True)
+        self.require_primary_author = kwargs.pop('require_primary_author', True)
+        self.require_speaker = kwargs.pop('require_speaker', False)
         self.sort_by_last_name = True
-        super(AbstractPersonLinkListField, self).__init__(*args, **kwargs)
+        self.invited_abstract_uuid = None
+        self.empty_message = _('There are no authors')
+        super().__init__(*args, **kwargs)
 
-    def _convert_data(self, data):
-        return list({self._get_person_link(x) for x in data})
+    @property
+    def validate_email_url(self):
+        if not self.object or not self.search_token:
+            return None
+        kwargs = {}
+        if self.invited_abstract_uuid:
+            kwargs = {'invited_abstract_uuid': self.invited_abstract_uuid}
+        return url_for('events.check_email', self.object, **kwargs)
 
     @no_autoflush
     def _get_person_link(self, data):
-        extra_data = {'author_type': data.pop('authorType', self.default_author_type),
-                      'is_speaker': data.pop('isSpeaker', self.default_is_speaker)}
-        return super(AbstractPersonLinkListField, self)._get_person_link(data, extra_data)
+        person_link = super()._get_person_link(data)
+        roles = data.get('roles', [])
+        person_link.is_speaker = 'speaker' in roles
+        person_link.author_type = next((AuthorType.get(a) for a in roles if AuthorType.get(a)), AuthorType.none)
+        return person_link
 
-    def _serialize_person_link(self, principal, extra_data=None):
-        extra_data = extra_data or {}
-        data = dict(extra_data, **serialize_person_link(principal))
-        data['isSpeaker'] = principal.is_speaker
-        data['authorType'] = principal.author_type.value
+    def _serialize_person_link(self, principal):
+        from indico.modules.events.persons.schemas import PersonLinkSchema
+        data = PersonLinkSchema().dump(principal)
+        data['roles'] = []
+        if principal.is_speaker:
+            data['roles'].append('speaker')
+        data['roles'].append(principal.author_type.name)
         return data
 
     def pre_validate(self, form):
-        super(AbstractPersonLinkListField, self).pre_validate(form)
+        super().pre_validate(form)
         for person_link in self.data:
-            if not self.allow_authors and person_link.author_type != AuthorType.none:
-                if not self.object_data or person_link not in self.object_data:
-                    person_link.author_type = AuthorType.none
             if person_link.author_type == AuthorType.none and not person_link.is_speaker:
-                raise ValueError(_("{} has no role").format(person_link.full_name))
+                raise ValidationError(_('{} has no role').format(person_link.full_name))
+        if (self.require_primary_author and
+                not any(person_link.author_type == AuthorType.primary for person_link in self.data)):
+            raise ValidationError(_('You must add at least one author'))
+        if self.require_speaker and not any(person_link.is_speaker for person_link in self.data):
+            raise ValidationError(_('You must add at least one speaker'))
 
 
 class AbstractField(QuerySelectField):
-    """A selectize-based field to select an abstract from an event."""
+    """A field with dynamic fetching to select an abstract from an event."""
 
-    widget = SelectizeWidget(allow_by_id=True, search_field='title', label_field='full_title', preload=True,
-                             search_method='POST', inline_js=True)
+    widget = DropdownWidget(allow_by_id=True, search_field='title', label_field='full_title', preload=True,
+                            search_method='POST', inline_js=True)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault('allow_blank', True)
         kwargs.setdefault('render_kw', {}).setdefault('placeholder', _('Enter abstract title or #id'))
         kwargs['query_factory'] = self._get_query
-        kwargs['get_label'] = lambda a: '#{}: {}'.format(a.friendly_id, a.title)
+        kwargs['get_label'] = lambda a: f'#{a.friendly_id}: {a.title}'
         self.ajax_endpoint = kwargs.pop('ajax_endpoint')
         self.excluded_abstract_ids = set()
-        super(AbstractField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     @classmethod
     def _serialize_abstract(cls, abstract):
         return {'id': abstract.id, 'friendly_id': abstract.friendly_id, 'title': abstract.title,
-                'full_title': '#{}: {}'.format(abstract.friendly_id, abstract.title)}
+                'full_title': f'#{abstract.friendly_id}: {abstract.title}'}
 
     def _get_query(self):
         query = Abstract.query.with_parent(self.event).options(joinedload('submitter').lazyload('*'))
@@ -175,16 +177,18 @@ class AbstractField(QuerySelectField):
 
     def _get_object_list(self):
         return [(key, abstract)
-                for key, abstract in super(AbstractField, self)._get_object_list()
+                for key, abstract in super()._get_object_list()
                 if abstract.can_access(session.user)]
 
-    def _value(self):
-        return self._serialize_abstract(self.data) if self.data else None
+    def _value(self, for_react=False):
+        if not self.data:
+            return None
+        return [self._serialize_abstract(self.data)] if for_react else self.data.id
 
     def pre_validate(self, form):
-        super(AbstractField, self).pre_validate(form)
+        super().pre_validate(form)
         if self.data is not None and self.data.id in self.excluded_abstract_ids:
-            raise ValueError(_('This abstract cannot be selected.'))
+            raise ValidationError(_('This abstract cannot be selected.'))
 
     @property
     def event(self):
@@ -202,51 +206,26 @@ class AbstractField(QuerySelectField):
         return {'excluded_abstract_id': list(self.excluded_abstract_ids)}
 
 
-class TrackRoleField(JSONField):
-    """A field that stores a list of e-mail template rules."""
+class TrackRoleField(SearchTokenMixin, JSONField):
+    """A field to assign track roles to principals."""
 
     CAN_POPULATE = True
     widget = JinjaWidget('events/abstracts/forms/track_role_widget.html')
 
     @property
-    def users(self):
-        return {user_id: _serialize_user(user) for user_id, user in _get_users_in_roles(self.data)}
+    def permissions_info(self):
+        permissions, tree, default = get_permissions_info(Track)
+        return {'permissions': permissions, 'tree': tree['_full_access']['children'], 'default': default}
 
     @property
-    def role_data(self):
-        conveners = set()
-        reviewers = set()
+    def event_roles(self):
+        return [serialize_event_role(role, legacy=False) for role in sorted(self.event.roles, key=attrgetter('code'))]
 
-        # Handle global reviewers/conveners
-        role_data = self.data.pop('*')
-        global_conveners = _get_users(role_data['convener'])
-        global_reviewers = _get_users(role_data['reviewer'])
-        conveners |= global_conveners
-        reviewers |= global_reviewers
-
-        track_dict = {track.id: track for track in Track.query.with_parent(self.event).filter(Track.id.in_(self.data))}
-        user_dict = dict(_get_users_in_roles(self.data))
-
-        track_roles = {}
-        # Update track-specific reviewers/conveners
-        for track_id, roles in self.data.viewitems():
-            track = track_dict[int(track_id)]
-            track_roles[track] = defaultdict(set)
-            for role_id, user_ids in roles.viewitems():
-                users = {user_dict[user_id] for user_id in user_ids}
-                track_roles[track][role_id] = users
-                if role_id == 'convener':
-                    conveners |= users
-                elif role_id == 'reviewer':
-                    reviewers |= users
-
-        return {
-            'track_roles': track_roles,
-            'global_conveners': global_conveners,
-            'global_reviewers': global_reviewers,
-            'all_conveners': conveners,
-            'all_reviewers': reviewers
-        }
+    @property
+    def category_roles(self):
+        from indico.modules.categories.models.roles import CategoryRole
+        category_roles = CategoryRole.get_category_roles(self.event.category)
+        return [serialize_category_role(role) for role in category_roles]
 
     def _value(self):
-        return super(TrackRoleField, self)._value() if self.data else '[]'
+        return super()._value() if self.data else '[]'

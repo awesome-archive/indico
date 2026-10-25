@@ -1,22 +1,26 @@
 {%- if plugins %}
     <p>
         {% if attach == '1' %}
-            {% trans %}The following video services are available. Click on one to attach a new room:{% endtrans %}
+            {% trans %}
+                The following video services are available. Click on one to attach an existing videoconference:
+            {% endtrans %}
         {% else %}
-            {% trans %}The following video services are available. Click on one to create a new room:{% endtrans %}
+            {% trans %}
+                The following video services are available. Click on one to create a new videoconference:
+            {% endtrans %}
         {% endif %}
     </p>
-    <div class="i-badges-list-left i-badges-list-hover">
-        {%- for plugin in plugins %}
+    <div class="i-badges-list-space-evenly">
+        {%- for plugin in plugins|sort(attribute='title') %}
             {% set action=_("Attach") if attach == '1' else _("Create") %}
             <a href="#" class="js-vc-plugin i-badge i-badge-gray"
                data-href="{{ url_for(vc_room_action, event, service=plugin.service_name) }}"
-               data-title="{% trans plugin_name=plugin.friendly_name %} {{ action }} {{ plugin_name }} room{% endtrans %}"
+               data-title="{% trans plugin_name=plugin.friendly_name %} {{ action }} {{ plugin_name }} videoconference{% endtrans %}"
                data-ajax-dialog
                data-reload-after>
                 <div class="i-badge-content">
                     <span class="i-badge-img">
-                        <img src="{{ plugin.logo_url }}">
+                        <img src="{{ plugin.icon_url }}">
                     </span>
                     <span class="i-badge-title">{{ plugin.title }}</span>
                 </div>

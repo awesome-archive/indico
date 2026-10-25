@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import fnmatch
 import re
@@ -23,28 +14,30 @@ from operator import attrgetter
 import pytz
 from flask import request
 from sqlalchemy import Date, cast
-from sqlalchemy.orm import joinedload, subqueryload, undefer
+from sqlalchemy.orm import joinedload, selectinload, subqueryload, undefer
 from werkzeug.exceptions import ServiceUnavailable
 
-from indico.core.config import config
+from indico.core import signals
 from indico.core.db import db
 from indico.core.db.sqlalchemy.principals import PrincipalType
 from indico.core.db.sqlalchemy.protection import ProtectionMode
 from indico.modules.attachments.api.util import build_folders_api_data, build_material_legacy_api_data
-from indico.modules.categories import Category, LegacyCategoryMapping
+from indico.modules.categories import Category
+from indico.modules.categories.models.legacy_mapping import LegacyCategoryMapping
 from indico.modules.categories.serialize import serialize_categories_ical
 from indico.modules.events import Event
+from indico.modules.events.contributions import contribution_settings
+from indico.modules.events.contributions.models.contributions import Contribution
 from indico.modules.events.models.persons import PersonLinkBase
 from indico.modules.events.notes.util import build_note_api_data, build_note_legacy_api_data
+from indico.modules.events.sessions.models.blocks import SessionBlock
 from indico.modules.events.sessions.models.sessions import Session
 from indico.modules.events.timetable.legacy import TimetableSerializer
 from indico.modules.events.timetable.models.entries import TimetableEntry
 from indico.util.date_time import iterdays
-from indico.util.fossilize import fossilize
-from indico.util.fossilize.conversion import Conversion
-from indico.util.string import to_unicode
+from indico.util.i18n import orig_string
+from indico.util.signals import values_from_signal
 from indico.web.flask.util import send_file, url_for
-from indico.web.http_api.fossils import IPeriodFossil
 from indico.web.http_api.hooks.base import HTTPAPIHook, IteratedDataFetcher
 from indico.web.http_api.responses import HTTPAPIError
 from indico.web.http_api.util import get_query_parameter
@@ -53,12 +46,6 @@ from indico.web.http_api.util import get_query_parameter
 utc = pytz.timezone('UTC')
 MAX_DATETIME = utc.localize(datetime(2099, 12, 31, 23, 59, 0))
 MIN_DATETIME = utc.localize(datetime(2000, 1, 1))
-
-
-class Period(object):
-    def __init__(self, startDT, endDT):
-        self.startDT = startDT
-        self.endDT = endDT
 
 
 def find_event_day_bounds(obj, day):
@@ -78,13 +65,17 @@ class EventTimeTableHook(HTTPAPIHook):
     VALID_FORMATS = ('json', 'jsonp', 'xml')
 
     def _getParams(self):
-        super(EventTimeTableHook, self)._getParams()
+        super()._getParams()
         self._idList = self._pathParams['idlist'].split('-')
 
+    def _serialize_timetable(self, event, user):
+        if not contribution_settings.get(event, 'published') and not event.can_manage(user):
+            return {}
+        return TimetableSerializer(event, management=False, user=user, api=True).serialize_timetable()
+
     def export_timetable(self, user):
-        events = Event.find_all(Event.id.in_(map(int, self._idList)), ~Event.is_deleted)
-        return {event.id: TimetableSerializer(event, management=False, user=user).serialize_timetable()
-                for event in events}
+        events = Event.query.filter(Event.id.in_(map(int, self._idList)), ~Event.is_deleted).all()
+        return {event.id: self._serialize_timetable(event, user) for event in events}
 
 
 @HTTPAPIHook.register
@@ -94,7 +85,7 @@ class EventSearchHook(HTTPAPIHook):
     DEFAULT_DETAIL = 'events'
 
     def _getParams(self):
-        super(EventSearchHook, self)._getParams()
+        super()._getParams()
         search = self._pathParams['search_term']
         self._query = search
 
@@ -116,7 +107,7 @@ class CategoryEventHook(HTTPAPIHook):
     }
 
     def _getParams(self):
-        super(CategoryEventHook, self)._getParams()
+        super()._getParams()
         self._idList = self._pathParams['idlist'].split('-')
         self._wantFavorites = False
         if 'favorites' in self._idList:
@@ -134,14 +125,14 @@ class CategoryEventHook(HTTPAPIHook):
         id_list = set(self._idList)
         if self._wantFavorites and user:
             id_list.update(str(c.id) for c in user.favorite_categories)
-        legacy_id_map = {m.legacy_category_id: m.category_id
-                         for m in LegacyCategoryMapping.find(LegacyCategoryMapping.legacy_category_id.in_(id_list))}
+        legacy_query = LegacyCategoryMapping.query.filter(LegacyCategoryMapping.legacy_category_id.in_(id_list))
+        legacy_id_map = {m.legacy_category_id: m.category_id for m in legacy_query}
         id_list = {str(legacy_id_map.get(id_, id_)) for id_ in id_list}
         return expInt.category(id_list, self._format)
 
     def export_categ_extra(self, user, resultList):
         expInt = CategoryEventFetcher(user, self)
-        ids = set((event['categoryId'] for event in resultList))
+        ids = {event['categoryId'] for event in resultList}
         return expInt.category_extra(ids)
 
     def export_event(self, user):
@@ -149,8 +140,8 @@ class CategoryEventHook(HTTPAPIHook):
         return expInt.event(self._idList)
 
 
-class SerializerBase(object):
-    """Common methods for different serializers"""
+class SerializerBase:
+    """Common methods for different serializers."""
 
     def _serialize_access_list(self, obj):
         data = {'users': [], 'groups': []}
@@ -171,8 +162,7 @@ class SerializerBase(object):
             }
 
     def _serialize_person(self, person, person_type, can_manage=False):
-        """Serialize an event associated person"""
-
+        """Serialize an event associated person."""
         if person:
             data = {
                 '_type': person_type,
@@ -180,9 +170,9 @@ class SerializerBase(object):
                 'first_name': person.first_name,
                 'last_name': person.last_name,
                 'fullName': person.get_full_name(last_name_upper=False, abbrev_first_name=False),
-                'id': unicode(person.id),
+                'id': str(person.id),
                 'affiliation': person.affiliation,
-                'emailHash': md5(person.email.encode('utf-8')).hexdigest() if person.email else None
+                'emailHash': md5(person.email.encode()).hexdigest() if person.email else None
             }
             if isinstance(person, PersonLinkBase):
                 data['db_id'] = person.id
@@ -191,7 +181,7 @@ class SerializerBase(object):
                 data['email'] = person.email or None
             if person_type == 'ConferenceChair':
                 data['fullName'] = person.get_full_name(last_name_upper=False, abbrev_first_name=False,
-                                                        show_title=True)
+                                                        show_title=person.event.show_titles)
             return data
 
     def _serialize_persons(self, persons, person_type, can_manage=False):
@@ -205,7 +195,7 @@ class SerializerBase(object):
             'name': convener.get_full_name(last_name_upper=False, abbrev_first_name=False),
             'last_name': convener.last_name,
             'first_name': convener.first_name,
-            'title': convener.title,
+            'title': orig_string(convener.title),
             '_type': 'SlotChair',
             'affiliation': convener.affiliation,
             '_fossil': 'conferenceParticipation',
@@ -213,12 +203,12 @@ class SerializerBase(object):
             'id': convener.person_id,
             'db_id': convener.id,
             'person_id': convener.person_id,
-            'emailHash': md5(convener.person.email.encode('utf-8')).hexdigest() if convener.person.email else None
+            'emailHash': md5(convener.person.email.encode()).hexdigest() if convener.person.email else None
         }
         if can_manage:
-            data['address'] = convener.address,
-            data['phone'] = convener.phone,
-            data['email'] = convener.person.email,
+            data['address'] = convener.address
+            data['phone'] = convener.phone
+            data['email'] = convener.person.email
         return data
 
     def _serialize_session(self, session_, can_manage=False):
@@ -229,8 +219,8 @@ class SerializerBase(object):
             '_type': 'Session',
             'sessionConveners': [self._serialize_convener(c, can_manage) for c in session_.conveners],
             'title': session_.title,
-            'color': '#{}'.format(session_.colors.background),
-            'textColor': '#{}'.format(session_.colors.text),
+            'color': f'#{session_.colors.background}',
+            'textColor': f'#{session_.colors.text}',
             'description': session_.description,
             'material': build_material_legacy_api_data(session_),
             'isPoster': session_.is_poster,
@@ -242,10 +232,11 @@ class SerializerBase(object):
             '_fossil': 'sessionMinimal',
             'numSlots': len(session_.blocks),
             'id': (session_.legacy_mapping.legacy_session_id
-                   if session_.legacy_mapping else unicode(session_.friendly_id)),
+                   if session_.legacy_mapping else str(session_.friendly_id)),
             'db_id': session_.id,
             'friendly_id': session_.friendly_id,
-            'room': session_.get_room_name(full=False)
+            'room': session_.get_room_name(full=False),
+            'code': session_.code,
         }
 
     fossils_mapping = {
@@ -275,7 +266,7 @@ class SerializerBase(object):
     def _build_event_api_data_base(self, event):
         return {
             '_type': 'Conference',
-            'id': unicode(event.id),
+            'id': str(event.id),
             'title': event.title,
             'description': event.description,
             'startDate': self._serialize_date(event.start_dt),
@@ -285,7 +276,7 @@ class SerializerBase(object):
             'location': event.venue_name,
             'address': event.address,
             'type': event.type_.legacy_name,
-            'references': map(self.serialize_reference, event.references)
+            'references': [self.serialize_reference(x) for x in event.references]
         }
 
     def _build_session_event_api_data(self, event):
@@ -294,7 +285,6 @@ class SerializerBase(object):
             '_fossil': 'conference',
             'adjustedStartDate': self._serialize_date(event.start_dt_local),
             'adjustedEndDate': self._serialize_date(event.end_dt_local),
-            'bookedRooms': Conversion.reservationsList(event.reservations),
             'supportInfo': {
                 '_fossil': 'supportInfo',
                 'caption': event.contact_title,
@@ -316,7 +306,8 @@ class SerializerBase(object):
             'description': '',  # Session blocks don't have a description
             'title': block.full_title,
             'url': url_for('sessions.display_session', block.session, _external=True),
-            'contributions': map(self._serialize_contribution, block.contributions),
+            'contributions': [self._serialize_contribution(c) for c in block.event.contributions
+                              if c.session_block == block and c.can_access(self.user)],
             'note': build_note_api_data(block.note),
             'session': serialized_session,
             'room': block.get_room_name(full=False),
@@ -326,7 +317,8 @@ class SerializerBase(object):
             'inheritRoom': block.own_room is None,
             'slotTitle': block.title,
             'address': block.address,
-            'conveners': [self._serialize_convener(c, can_manage) for c in block.person_links]
+            'conveners': [self._serialize_convener(c, can_manage) for c in block.person_links],
+            'code': block.code,
         }
         if session_access_list:
             block_data['allowed'] = session_access_list
@@ -343,7 +335,7 @@ class SerializerBase(object):
 
     @staticmethod
     def serialize_reference(reference):
-        """Return the data for a reference"""
+        """Return the data for a reference."""
         return {
             'type': reference.reference_type.name,
             'value': reference.value,
@@ -357,7 +349,7 @@ class SerializerBase(object):
             '_type': 'Contribution',
             '_fossil': self.fossils_mapping['contribution'].get(self._detail_level),
             'id': (contrib.legacy_mapping.legacy_contribution_id
-                   if contrib.legacy_mapping else unicode(contrib.friendly_id)),
+                   if contrib.legacy_mapping else str(contrib.friendly_id)),
             'db_id': contrib.id,
             'friendly_id': contrib.friendly_id,
             'title': contrib.title,
@@ -382,22 +374,24 @@ class SerializerBase(object):
             'keywords': contrib.keywords,
             'track': contrib.track.title if contrib.track else None,
             'session': contrib.session.title if contrib.session else None,
-            'references': map(self.serialize_reference, contrib.references),
-            'board_number': contrib.board_number
+            'references': [self.serialize_reference(x) for x in contrib.references],
+            'board_number': contrib.board_number,
+            'code': contrib.code,
         }
         if include_subcontribs:
-            data['subContributions'] = map(self._serialize_subcontribution, contrib.subcontributions)
+            data['subContributions'] = [self._serialize_subcontribution(sc)
+                                        for sc in contrib.subcontributions]
         if can_manage:
             data['allowed'] = self._serialize_access_list(contrib)
         return data
 
     def _serialize_subcontribution(self, subcontrib):
         can_manage = self.user is not None and subcontrib.contribution.can_manage(self.user)
-        data = {
+        return {
             '_type': 'SubContribution',
             '_fossil': 'subContributionMetadata',
             'id': (subcontrib.legacy_mapping.legacy_subcontribution_id
-                   if subcontrib.legacy_mapping else unicode(subcontrib.friendly_id)),
+                   if subcontrib.legacy_mapping else str(subcontrib.friendly_id)),
             'db_id': subcontrib.id,
             'friendly_id': subcontrib.friendly_id,
             'title': subcontrib.title,
@@ -407,14 +401,14 @@ class SerializerBase(object):
             'folders': build_folders_api_data(subcontrib),
             'speakers': self._serialize_persons(subcontrib.speakers, person_type='SubContribParticipation',
                                                 can_manage=can_manage),
-            'references': map(self.serialize_reference, subcontrib.references)
+            'references': [self.serialize_reference(x) for x in subcontrib.references],
+            'code': subcontrib.code,
         }
-        return data
 
 
 class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
     def __init__(self, user, hook):
-        super(CategoryEventFetcher, self).__init__(user, hook)
+        super().__init__(user, hook)
         self._eventType = hook._eventType
         self._occurrences = hook._occurrences
         self._location = hook._location
@@ -422,39 +416,62 @@ class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
         self.user = user
         self._detail_level = get_query_parameter(request.args.to_dict(), ['d', 'detail'], 'events')
         if self._detail_level not in ('events', 'contributions', 'subcontributions', 'sessions'):
-            raise HTTPAPIError('Invalid detail level: {}'.format(self._detail_level), 400)
+            raise HTTPAPIError(f'Invalid detail level: {self._detail_level}', 400)
 
-    def _calculate_occurrences(self, event, from_dt, to_dt, tz):
+    def _calculate_occurrences(self, event, from_dt, to_dt):
         start_dt = max(from_dt, event.start_dt) if from_dt else event.start_dt
         end_dt = min(to_dt, event.end_dt) if to_dt else event.end_dt
         for day in iterdays(start_dt, end_dt):
             first_start, last_end = find_event_day_bounds(event, day.date())
             if first_start is not None:
-                yield Period(first_start, last_end)
+                yield {'start_dt': first_start, 'end_dt': last_end}
+
+    def _serialize_event_occurrences(self, event, from_dt, to_dt):
+        return [
+            {'startDT': period['start_dt'].astimezone(self._tz),
+             'endDT': period['end_dt'].astimezone(self._tz),
+             '_type': 'Period',
+             '_fossil': 'period'}
+            for period in self._calculate_occurrences(event, from_dt, to_dt)
+        ]
 
     def _get_query_options(self, detail_level):
-        acl_user_strategy = joinedload('acl_entries').joinedload('user')
+        acl_user_strategy = selectinload('acl_entries').joinedload('user')
         # remote group membership checks will trigger a load on _all_emails
         # but not all events use this so there's no need to eager-load them
         # acl_user_strategy.noload('_primary_email')
-        # acl_user_strategy.noload('_affiliation')
         creator_strategy = joinedload('creator')
         contributions_strategy = subqueryload('contributions')
+        contributions_strategy.joinedload('legacy_mapping')
         contributions_strategy.subqueryload('references')
+        contributions_strategy.selectinload('person_links')
+        contributions_strategy.selectinload('track').joinedload('track_group')
+        contributions_strategy.selectinload('type')
+        contributions_strategy.selectinload('note')
         if detail_level in {'subcontributions', 'sessions'}:
-            contributions_strategy.subqueryload('subcontributions').subqueryload('references')
+            subcontrib_strategy = contributions_strategy.subqueryload('subcontributions')
+            subcontrib_strategy.subqueryload('references')
+            subcontrib_strategy.subqueryload('legacy_mapping')
+            subcontrib_strategy.selectinload('person_links')
+            subcontrib_strategy.selectinload('note')
         sessions_strategy = subqueryload('sessions')
+        sessions_strategy.joinedload('legacy_mapping')
+        sessions_strategy.selectinload('note')
+        session_block_strategy = sessions_strategy.subqueryload('blocks')
+        session_block_strategy.selectinload('person_links')
         options = [acl_user_strategy, creator_strategy]
         if detail_level in {'contributions', 'subcontributions', 'sessions'}:
             options.append(contributions_strategy)
         if detail_level == 'sessions':
             options.append(sessions_strategy)
         options.append(undefer('effective_protection_mode'))
+        options.append(selectinload('label'))
+        options.append(selectinload('references'))
         return options
 
     def category(self, idlist, format):
         try:
-            idlist = map(int, idlist)
+            idlist = [int(x) for x in idlist]
         except ValueError:
             raise HTTPAPIError('Category IDs must be numeric', 400)
         if format == 'ics':
@@ -476,7 +493,7 @@ class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
         if self._toDT is None:
             has_future_events = False
         else:
-            query = Event.find(Event.category_id.in_(ids), ~Event.is_deleted, Event.start_dt > self._toDT)
+            query = Event.query.filter(Event.category_id.in_(ids), ~Event.is_deleted, Event.start_dt > self._toDT)
             has_future_events = query.has_rows()
         return {
             'eventCategories': self._build_category_path_data(ids),
@@ -484,11 +501,25 @@ class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
         }
 
     def event(self, idlist):
-        query = (Event.find(Event.id.in_(idlist),
-                            ~Event.is_deleted,
-                            Event.happens_between(self._fromDT, self._toDT))
+        try:
+            idlist = [int(x) for x in idlist]
+        except ValueError:
+            raise HTTPAPIError('Event IDs must be numeric', 400)
+        event_filters = (Event.id.in_(idlist),
+                         ~Event.is_deleted,
+                         Event.happens_between(self._fromDT, self._toDT))
+        query = (Event.query
+                 .filter(*event_filters)
                  .options(*self._get_query_options(self._detail_level)))
         query = self._update_query(query)
+        Contribution.preload_relationships(
+            Contribution.query.join(Event).filter(*event_filters),
+            'timetable_entry'
+        )
+        SessionBlock.preload_relationships(
+            SessionBlock.query.join(Session).join(Event).filter(*event_filters),
+            'timetable_entry'
+        )
         return self.serialize_events(x for x in query if self._filter_event(x) and x.can_access(self.user))
 
     def _filter_event(self, event):
@@ -527,7 +558,7 @@ class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
         return query
 
     def serialize_events(self, events):
-        return map(self._build_event_api_data, events)
+        return [self._build_event_api_data(e) for e in events]
 
     def _serialize_category_path(self, category):
         visibility = {'id': None, 'name': 'Everywhere'}
@@ -559,62 +590,93 @@ class CategoryEventFetcher(IteratedDataFetcher, SerializerBase):
     def _build_event_api_data(self, event):
         can_manage = self.user is not None and event.can_manage(self.user)
         data = self._build_event_api_data_base(event)
+        material_data = build_material_legacy_api_data(event)
+        if legacy_note_material := build_note_legacy_api_data(event.note):
+            material_data.append(legacy_note_material)
         data.update({
             '_fossil': self.fossils_mapping['event'].get(self._detail_level),
             'categoryId': event.category_id,
-            'category': event.category.title,
+            'category': event.category.title if event.category else None,
             'note': build_note_api_data(event.note),
             'roomFullname': event.room_name,
             'url': event.external_url,
             'creationDate': self._serialize_date(event.created_dt),
             'creator': self._serialize_person(event.creator, person_type='Avatar', can_manage=can_manage),
             'hasAnyProtection': event.effective_protection_mode != ProtectionMode.public,
-            'roomMapURL': event.room.map_url if event.room else None,
+            'roomMapURL': event.map_url,
             'folders': build_folders_api_data(event),
             'chairs': self._serialize_persons(event.person_links, person_type='ConferenceChair', can_manage=can_manage),
-            'material': build_material_legacy_api_data(event) + filter(None, [build_note_legacy_api_data(event.note)])
+            'material': material_data,
+            'keywords': event.keywords,
+            'organizer': event.organizer_info,
+            'language': event.default_locale or None,
+            'label': self._serialize_event_label(event),
         })
 
-        event_category_path = event.category.chain
-        visibility = {'id': '', 'name': 'Everywhere'}
-        if event.visibility is None:
-            pass  # keep default
-        elif event.visibility == 0:
-            visibility['name'] = 'Nowhere'
-        elif event.visibility:
-            try:
-                path_segment = event_category_path[-event.visibility]
-            except IndexError:
-                pass
-            else:
-                visibility['id'] = path_segment['id']
-                visibility['name'] = path_segment['title']
-        data['visibility'] = visibility
+        if event.is_unlisted:
+            data['visibility'] = {'id': '', 'name': 'Nowhere (unlisted)'}
+        else:
+            visibility = {'id': '', 'name': 'Everywhere'}
+            if event.visibility is None:
+                pass  # keep default
+            elif event.visibility == 0:
+                visibility['name'] = 'Nowhere'
+            elif event.visibility:
+                try:
+                    path_segment = event.category.chain[-event.visibility]
+                except IndexError:
+                    pass
+                else:
+                    visibility['id'] = path_segment['id']
+                    visibility['name'] = path_segment['title']
+            data['visibility'] = visibility
 
         if can_manage:
             data['allowed'] = self._serialize_access_list(event)
+
+        allow_details = contribution_settings.get(event, 'published') or can_manage
         if self._detail_level in {'contributions', 'subcontributions'}:
             data['contributions'] = []
-            for contribution in event.contributions:
-                include_subcontribs = self._detail_level == 'subcontributions'
-                serialized_contrib = self._serialize_contribution(contribution, include_subcontribs)
-                data['contributions'].append(serialized_contrib)
-        elif self._detail_level == 'sessions':
-            # Contributions without a session
-            data['contributions'] = []
-            for contribution in event.contributions:
-                if not contribution.session:
-                    serialized_contrib = self._serialize_contribution(contribution)
+            if allow_details:
+                for contribution in event.contributions:
+                    if not contribution.can_access(self.user):
+                        continue
+                    include_subcontribs = self._detail_level == 'subcontributions'
+                    serialized_contrib = self._serialize_contribution(contribution, include_subcontribs)
                     data['contributions'].append(serialized_contrib)
-
+        elif self._detail_level == 'sessions':
+            data['contributions'] = []
             data['sessions'] = []
-            for session_ in event.sessions:
-                data['sessions'].extend(self._build_session_api_data(session_))
+            if allow_details:
+                # Contributions without a session
+                for contribution in event.contributions:
+                    if not contribution.session and contribution.can_access(self.user):
+                        serialized_contrib = self._serialize_contribution(contribution)
+                        data['contributions'].append(serialized_contrib)
+
+                for session_ in event.sessions:
+                    if not session_.can_access(self.user):
+                        continue
+                    data['sessions'].extend(self._build_session_api_data(session_))
         if self._occurrences:
-            data['occurrences'] = fossilize(self._calculate_occurrences(event, self._fromDT, self._toDT,
-                                            pytz.timezone(config.DEFAULT_TIMEZONE)),
-                                            {Period: IPeriodFossil}, tz=self._tz, naiveTZ=config.DEFAULT_TIMEZONE)
+            data['occurrences'] = self._serialize_event_occurrences(event, self._fromDT, self._toDT)
+        # check whether the plugins want to add/override any data
+        for update in values_from_signal(
+            signals.event.metadata_postprocess.send('http-api', event=event, data=data, user=self.user),
+            as_list=True
+        ):
+            data.update(update)
         return data
+
+    def _serialize_event_label(self, event):
+        if not (label := event.label):
+            return None
+        return {
+            'title': label.title,
+            'color': label.color,
+            'is_event_not_happening': label.is_event_not_happening,
+            'message': event.label_message,
+        }
 
 
 class EventBaseHook(HTTPAPIHook):
@@ -633,7 +695,7 @@ class SessionContribHook(EventBaseHook):
     }
 
     def _getParams(self):
-        super(SessionContribHook, self)._getParams()
+        super()._getParams()
         self._idList = self._pathParams['idlist'].split('-')
         self._eventId = self._pathParams['event']
 
@@ -648,7 +710,7 @@ class SessionContribHook(EventBaseHook):
 
 class SessionContribFetcher(IteratedDataFetcher):
     def __init__(self, user, hook):
-        super(SessionContribFetcher, self).__init__(user, hook)
+        super().__init__(user, hook)
         self._eventId = hook._eventId
 
 
@@ -657,10 +719,18 @@ class SessionHook(SessionContribHook):
     RE = r'(?P<event>[\w\s]+)/session/(?P<idlist>\w+(?:-\w+)*)'
     METHOD_NAME = 'export_session'
 
+    def _has_access(self, user):
+        event = Event.get(self._eventId, is_deleted=False)
+        if event:
+            can_manage = user is not None and event.can_manage(user)
+            if not can_manage and not contribution_settings.get(event, 'published'):
+                return False
+        return True
+
 
 class SessionFetcher(SessionContribFetcher, SerializerBase):
     def __init__(self, user, hook):
-        super(SessionFetcher, self).__init__(user, hook)
+        super().__init__(user, hook)
         self.user = user
 
     def session(self, idlist):
@@ -682,10 +752,11 @@ class SessionFetcher(SessionContribFetcher, SerializerBase):
         return self._build_sessions_api_data(sessions)
 
     def _build_sessions_api_data(self, sessions):
-        """Returns an aggregated list of session blocks given the sessions."""
-
+        """Return an aggregated list of session blocks given the sessions."""
         session_blocks = []
         for session_ in sessions:
+            if not session_.can_access(self.user):
+                continue
             can_manage = self.user is not None and session_.can_manage(self.user)
             session_access_list = None
             serialized_session = self._serialize_session(session_)
@@ -711,8 +782,7 @@ class EventSearchFetcher(IteratedDataFetcher):
     def event(self, query):
         def _iterate_objs(query_string):
             query = (Event.query
-                     .filter(Event.title_matches(to_unicode(query_string)),
-                             ~Event.is_deleted)
+                     .filter(Event.title_matches(query_string), ~Event.is_deleted)
                      .options(undefer('effective_protection_mode')))
             sort_dir = db.desc if self._descending else db.asc
             if self._orderBy == 'start':

@@ -1,20 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from collections import OrderedDict
+from collections import Counter
 from datetime import datetime
 from datetime import time as dt_time
 from datetime import timedelta
@@ -22,21 +13,24 @@ from datetime import timedelta
 import pytz
 from babel.dates import format_date as _format_date
 from babel.dates import format_datetime as _format_datetime
+from babel.dates import format_interval as _format_interval
 from babel.dates import format_time as _format_time
 from babel.dates import format_timedelta as _format_timedelta
-from babel.dates import get_timezone
+from babel.dates import get_timezone, match_skeleton, tokenize_pattern, untokenize_pattern
+from babel.numbers import format_currency as _format_currency
 from babel.numbers import format_number as _format_number
 from dateutil.relativedelta import relativedelta as _relativedelta
-from dateutil.rrule import DAILY, FR, MO, SA, SU, TH, TU, WE, rrule
-from flask import has_request_context, request, session
+from dateutil.rrule import DAILY, FR, MO, TH, TU, WE, rrule
+from flask import has_request_context, session
 
 from indico.core.config import config
-from indico.util.i18n import _, get_current_locale, ngettext, parse_locale
-from indico.util.string import inject_unicode_debug
+from indico.core.logger import Logger
+from indico.util.caching import memoize_request
+from indico.util.i18n import IndicoLocale, _, get_current_locale, ngettext, parse_locale
 
 
-class relativedelta(_relativedelta):
-    """Improved `relativedelta`"""
+class relativedelta(_relativedelta):  # noqa: N801
+    """Improved `relativedelta`."""
 
     def __abs__(self):
         return self.__class__(years=abs(self.years),
@@ -58,26 +52,26 @@ class relativedelta(_relativedelta):
 
 
 def now_utc(exact=True):
-    """Get the current date/time in UTC
+    """Get the current date/time in UTC.
 
     :param exact: Set to ``False`` to set seconds/microseconds to 0.
     :return: A timezone-aware `datetime` object
     """
-    now = datetime.utcnow()
+    now = datetime.now(pytz.UTC)
     if not exact:
         now = now.replace(second=0, microsecond=0)
-    return pytz.utc.localize(now)
+    return now
 
 
 def as_utc(dt):
-    """Returns the given naive datetime with tzinfo=UTC."""
+    """Return the given naive datetime with tzinfo=UTC."""
     if dt.tzinfo and dt.tzinfo != pytz.utc:
-        raise ValueError("{} already contains non-UTC tzinfo data".format(dt))
+        raise ValueError(f'{dt} already contains non-UTC tzinfo data')
     return pytz.utc.localize(dt) if dt.tzinfo is None else dt
 
 
 def localize_as_utc(dt, timezone='UTC'):
-    """Localizes a naive datetime with the timezone and returns it as UTC.
+    """Localize a naive datetime with the timezone and returns it as UTC.
 
     :param dt: A naive :class:`datetime.datetime` object.
     :param timezone: The timezone from which to localize.  UTC by default.
@@ -87,92 +81,145 @@ def localize_as_utc(dt, timezone='UTC'):
 
 
 def server_to_utc(dt):
-    """Converts the given datetime in the server's TZ to UTC.
+    """Convert the given datetime in the server's TZ to UTC.
 
-    The given datetime **MUST** be naive but already contain the correct time in the server's TZ.
+    The given datetime **MUST** be naive but already contain the
+    correct time in the server's TZ.
     """
     server_tz = get_timezone(config.DEFAULT_TIMEZONE)
     return server_tz.localize(dt).astimezone(pytz.utc)
 
 
 def utc_to_server(dt):
-    """Converts the given UTC datetime to the server's TZ."""
+    """Convert the given UTC datetime to the server's TZ."""
     server_tz = get_timezone(config.DEFAULT_TIMEZONE)
     return dt.astimezone(server_tz)
 
 
-def format_datetime(dt, format='medium', locale=None, timezone=None, server_tz=False, keep_tz=False):
-    """
-    Basically a wrapper around Babel's own format_datetime
-    """
-    inject_unicode = True
+def format_datetime(dt, format='medium', locale=None, timezone=None):
+    """Basically a wrapper around Babel's own format_datetime."""
     if format == 'code':
         format = 'dd/MM/yyyy HH:mm'
-        inject_unicode = False
     if not locale:
         locale = get_current_locale()
-    if keep_tz:
-        assert timezone is None
-        timezone = dt.tzinfo
-    elif not timezone and dt.tzinfo:
+    if not timezone and dt.tzinfo:
         timezone = session.tzinfo
-    elif server_tz:
-        timezone = config.DEFAULT_TIMEZONE
 
-    rv = _format_datetime(dt, format=format, locale=locale, tzinfo=timezone)
-    return inject_unicode_debug(rv, 2).encode('utf-8') if inject_unicode else rv.encode('utf-8')
+    return _format_datetime(dt, format=format, locale=locale, tzinfo=timezone)
 
 
 def format_date(d, format='medium', locale=None, timezone=None):
-    """
-    Basically a wrapper around Babel's own format_date
-    """
-    inject_unicode = True
+    """Basically a wrapper around Babel's own format_date."""
     if format == 'code':
         format = 'dd/MM/yyyy'
-        inject_unicode = False
     if not locale:
         locale = get_current_locale()
     if timezone and isinstance(d, datetime) and d.tzinfo:
-        d = d.astimezone(pytz.timezone(timezone) if isinstance(timezone, basestring) else timezone)
+        d = d.astimezone(pytz.timezone(timezone) if isinstance(timezone, str) else timezone)
 
-    rv = _format_date(d, format=format, locale=locale)
-    return inject_unicode_debug(rv, 2).encode('utf-8') if inject_unicode else rv.encode('utf-8')
+    return _format_date(d, format=format, locale=locale)
 
 
 def format_time(t, format='short', locale=None, timezone=None, server_tz=False):
-    """
-    Basically a wrapper around Babel's own format_time
-    """
-    inject_unicode = True
+    """Basically a wrapper around Babel's own format_time."""
     if format == 'code':
         format = 'HH:mm'
-        inject_unicode = False
     if not locale:
         locale = get_current_locale()
     if not timezone and t.tzinfo:
         timezone = session.tzinfo
     elif server_tz:
         timezone = config.DEFAULT_TIMEZONE
-    if isinstance(timezone, basestring):
+    if isinstance(timezone, str):
         timezone = get_timezone(timezone)
-    rv = _format_time(t, format=format, locale=locale, tzinfo=timezone)
-    return inject_unicode_debug(rv, 2).encode('utf-8') if inject_unicode else rv.encode('utf-8')
+    return _format_time(t, format=format, locale=locale, tzinfo=timezone)
 
 
 def format_timedelta(td, format='short', threshold=0.85, locale=None):
-    """
-    Basically a wrapper around Babel's own format_timedelta
-    """
+    """Basically a wrapper around Babel's own format_timedelta."""
     if not locale:
         locale = get_current_locale()
 
-    rv = _format_timedelta(td, format=format, locale=locale, threshold=threshold)
-    return inject_unicode_debug(rv, 2).encode('utf-8')
+    return _format_timedelta(td, format=format, locale=locale, threshold=threshold)
 
 
-def format_human_timedelta(delta, granularity='seconds', narrow=False):
-    """Formats a timedelta in a human-readable way
+def format_interval(start_dt, end_dt, skeleton='yMd', locale=None):
+    """Basically a wrapper around Babel's own format_interval."""
+    if not locale:
+        locale = get_current_locale()
+
+    if skeleton == 'short':
+        if isinstance(locale, str):
+            locale = parse_locale(locale)
+        skeleton = 'hm' if 'a' in locale.time_formats['short'].pattern else 'Hm'
+
+    return _format_interval(start_dt, end_dt, skeleton, locale=locale)
+
+
+def _adjust_skeleton(format, skeleton):
+    """If possible, expand pattern fields to match the requested skeleton.
+
+    For example if the requested skeleton is 'yMM' and the format is 'yM' we can expand
+    this back to 'yMM'. Note that we are not allowed to expand numeric fields to
+    alphanumeric fields and vice versa.
+
+    For example, 'MM' cannot be expanded to 'MMMM'.
+
+    Fields for hours, minutes and seconds should not be expanded at all.
+
+    See: https://cldr-smoke.unicode.org/spec/main/ldml/tr35-dates.html#Matching_Skeletons
+    """
+    skeleton_counter = Counter(skeleton)
+    tokenized_format = []
+
+    for type_, token in tokenize_pattern(format):
+        if type_ == 'chars':
+            # This is a literal string and should not be touched
+            tokenized_format.append((type_, token))
+            continue
+
+        pattern, format_count = token
+        skeleton_count = skeleton_counter[pattern]
+
+        # Hours, minutes and seconds should not be expanded
+        if pattern in 'Hhms':
+            tokenized_format.append((type_, token))
+            continue
+
+        if (format_count <= 2 and skeleton_count <= 2) or (format_count > 2 and skeleton_count > 2):
+            tokenized_format.append((type_, (pattern, skeleton_count)))
+        else:
+            tokenized_format.append((type_, token))
+
+    return untokenize_pattern(tokenized_format)
+
+
+def format_skeleton(dt, skeleton, locale=None, timezone=None):
+    """Basically a wrapper around Babel's own format_skeleton.
+
+    It also keeps the specified width from the originally requested
+    skeleton string and adjusts the one from the locale data accordingly.
+
+    The argument order is swapped to keep uniformity with other format_* functions.
+    """
+    if not locale:
+        locale = get_current_locale()
+    if not timezone and isinstance(dt, datetime) and dt.tzinfo:
+        timezone = session.tzinfo
+
+    # See https://github.com/python-babel/babel/issues/803 if you wonder why
+    # we aren't using the default format_skeleton from Babel.
+    locale = IndicoLocale.parse(locale)
+    requested_skeleton = skeleton
+    if skeleton not in locale.datetime_skeletons:
+        skeleton = match_skeleton(skeleton, locale.datetime_skeletons)
+    format = locale.datetime_skeletons[skeleton]
+    format = _adjust_skeleton(str(format), requested_skeleton)
+    return _format_datetime(dt, format=format, locale=locale, tzinfo=timezone)
+
+
+def format_human_timedelta(delta, granularity='seconds', narrow=False, *, weeks=False):
+    """Format a timedelta in a human-readable way.
 
     :param delta: the timedelta to format
     :param granularity: the granularity, i.e. the lowest unit that is
@@ -180,54 +227,65 @@ def format_human_timedelta(delta, granularity='seconds', narrow=False):
                         the output will never contain seconds unless
                         the whole timedelta spans less than a minute.
                         Accepted values are 'seconds', 'minutes',
-                        'hours' and 'days'.
+                        'hours', 'days' and 'weeks'.
     :param narrow: if true, only the short unit names will be used
+    :param weeks: if true, weeks are used
     """
-    field_order = ('days', 'hours', 'minutes', 'seconds')
+    field_order = ('weeks', 'days', 'hours', 'minutes', 'seconds') if weeks else ('days', 'hours', 'minutes', 'seconds')
     long_names = {
-        'seconds': lambda n: ngettext(u'{0} second', u'{0} seconds', n).format(n),
-        'minutes': lambda n: ngettext(u'{0} minute', u'{0} minutes', n).format(n),
-        'hours': lambda n: ngettext(u'{0} hour', u'{0} hours', n).format(n),
-        'days': lambda n: ngettext(u'{0} day', u'{0} days', n).format(n),
+        'seconds': lambda n: ngettext('{0} second', '{0} seconds', n).format(n),
+        'minutes': lambda n: ngettext('{0} minute', '{0} minutes', n).format(n),
+        'hours': lambda n: ngettext('{0} hour', '{0} hours', n).format(n),
+        'days': lambda n: ngettext('{0} day', '{0} days', n).format(n),
+        'weeks': lambda n: ngettext('{0} week', '{0} weeks', n).format(n),
     }
     short_names = {
-        'seconds': lambda n: ngettext(u'{0}s', u'{0}s', n).format(n),
-        'minutes': lambda n: ngettext(u'{0}m', u'{0}m', n).format(n),
-        'hours': lambda n: ngettext(u'{0}h', u'{0}h', n).format(n),
-        'days': lambda n: ngettext(u'{0}d', u'{0}d', n).format(n),
+        # i18n: Shorthand form for the number of seconds
+        'seconds': lambda n: ngettext('{0}s', '{0}s', n).format(n),
+        # i18n: Shorthand form for the number of minutes
+        'minutes': lambda n: ngettext('{0}m', '{0}m', n).format(n),
+        # i18n: Shorthand form for the number of hours
+        'hours': lambda n: ngettext('{0}h', '{0}h', n).format(n),
+        # i18n: Shorthand form for the number of days
+        'days': lambda n: ngettext('{0}d', '{0}d', n).format(n),
+        # i18n: Shorthand form for the number of weeks
+        'weeks': lambda n: ngettext('{0}w', '{0}w', n).format(n),
     }
     if narrow:
         long_names = short_names
-    values = OrderedDict((key, 0) for key in field_order)
+    values = dict.fromkeys(field_order, 0)
     values['seconds'] = delta.total_seconds()
+    if weeks:
+        values['weeks'], values['seconds'] = divmod(values['seconds'], 7*86400)
     values['days'], values['seconds'] = divmod(values['seconds'], 86400)
     values['hours'], values['seconds'] = divmod(values['seconds'], 3600)
     values['minutes'], values['seconds'] = divmod(values['seconds'], 60)
-    for key, value in values.iteritems():
+    for key, value in values.items():
         values[key] = int(value)
     # keep all fields covered by the granularity, and if that results in
     # no non-zero fields, include otherwise excluded ones
     used_fields = set(field_order[:field_order.index(granularity) + 1])
     available_fields = [x for x in field_order if x not in used_fields]
-    used_fields -= {k for k, v in values.iteritems() if not v}
+    used_fields -= {k for k, v in values.items() if not v}
     while not sum(values[x] for x in used_fields) and available_fields:
         used_fields.add(available_fields.pop(0))
     for key in available_fields:
         values[key] = 0
-    nonzero = OrderedDict((k, v) for k, v in values.iteritems() if v)
+    nonzero = {k: v for k, v in values.items() if v}
     if not nonzero:
         return long_names[granularity](0)
     elif len(nonzero) == 1:
-        key, value = nonzero.items()[0]
+        key, value = list(nonzero.items())[0]
         return long_names[key](value)
     else:
-        parts = [short_names[key](value) for key, value in nonzero.iteritems()]
-        return u' '.join(parts)
+        parts = [short_names[key](value) for key, value in nonzero.items()]
+        return ' '.join(parts)
 
 
 def format_human_date(dt, format='medium', locale=None):
     """
     Return the date in a human-like format for yesterday, today and tomorrow.
+
     Format the date otherwise.
     """
     today = now_utc().date()
@@ -237,11 +295,11 @@ def format_human_date(dt, format='medium', locale=None):
         locale = get_current_locale()
 
     if dt == today - oneday:
-        return _("yesterday")
+        return _('yesterday')
     elif dt == today:
-        return _("today")
+        return _('today')
     elif dt == today + oneday:
-        return _("tomorrow")
+        return _('tomorrow')
     else:
         return format_date(dt, format, locale=locale)
 
@@ -266,27 +324,50 @@ def _format_pretty_datetime(dt, locale, tzinfo, formats):
     return _format_datetime(dt, fmt, tzinfo, locale)
 
 
-def format_pretty_date(dt, locale=None, tzinfo=None):
+def format_pretty_date(dt, locale=None, tzinfo=None, *, capitalize=True):
     """Format a date in a pretty way using relative units if possible.
 
     :param dt: a date or datetime object. if a date is provided, its
                time is assumed to be midnight
     :param locale: the locale to use for formatting
     :param tzinfo: the timezone to use
+    :param capitalize: if the return string should be capitalized
     """
     if not isinstance(dt, datetime):
         dt = datetime.combine(dt, dt_time())
-    return _format_pretty_datetime(dt, locale, tzinfo, {
-        'last_day': _(u"'Yesterday'"),
-        'same_day': _(u"'Today'"),
-        'next_day': _(u"'Tomorrow'"),
-        'last_week': _(u"'Last' EEEE"),
-        'next_week': _(u"EEEE"),
-        'other': _(u"{date_fmt}")
-    })
+    if capitalize:
+        return _format_pretty_datetime(dt, locale, tzinfo, {
+            # i18n: keep the single quotes around the string
+            'last_day': _("'Yesterday'"),
+            # i18n: keep the single quotes around the string
+            'same_day': _("'Today'"),
+            # i18n: keep the single quotes around the string
+            'next_day': _("'Tomorrow'"),
+            # i18n: keep the single quotes around the string, and only translate the "Last".
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'last_week': _("'Last' EEEE"),
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'next_week': _('EEEE'),
+            'other': '{date_fmt}'
+        })
+    else:
+        return _format_pretty_datetime(dt, locale, tzinfo, {
+            # i18n: keep the single quotes around the string
+            'last_day': _("'yesterday'"),
+            # i18n: keep the single quotes around the string
+            'same_day': _("'today'"),
+            # i18n: keep the single quotes around the string
+            'next_day': _("'tomorrow'"),
+            # i18n: keep the single quotes around the string, and only translate the "Last".
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'last_week': _("'last' EEEE"),
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'next_week': _('EEEE'),
+            'other': '{date_fmt}'
+        })
 
 
-def format_pretty_datetime(dt, locale=None, tzinfo=None):
+def format_pretty_datetime(dt, locale=None, tzinfo=None, *, capitalize=True):
     """
     Format a datetime in a pretty way using relative units for the
     date if possible.
@@ -294,29 +375,60 @@ def format_pretty_datetime(dt, locale=None, tzinfo=None):
     :param dt: a datetime object
     :param locale: the locale to use for formatting
     :param tzinfo: the timezone to use
+    :param capitalize: if the return string should be capitalized
     """
-
-    return _format_pretty_datetime(dt, locale, tzinfo, {
-        'last_day': _(u"'Yesterday' 'at' {time_fmt}"),
-        'same_day': _(u"'Today' 'at' {time_fmt}"),
-        'next_day': _(u"'Tomorrow' 'at' {time_fmt}"),
-        'last_week': _(u"'Last' EEEE 'at' {time_fmt}"),
-        'next_week': _(u"EEEE 'at' {time_fmt}"),
-        'other': _(u"{date_fmt} 'at' {time_fmt}")
-    })
+    if capitalize:
+        return _format_pretty_datetime(dt, locale, tzinfo, {
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'last_day': _("'Yesterday' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'same_day': _("'Today' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'next_day': _("'Tomorrow' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside.
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'last_week': _("'Last' EEEE 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the string, and only translate the text inside.
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'next_week': _("EEEE 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the string, and only translate the text inside
+            'other': _("{date_fmt} 'at' {time_fmt}")
+        })
+    else:
+        return _format_pretty_datetime(dt, locale, tzinfo, {
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'last_day': _("'yesterday' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'same_day': _("'today' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside
+            'next_day': _("'tomorrow' 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the strings, and only translate the text inside.
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'last_week': _("'last' EEEE 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the string, and only translate the text inside.
+            # i18n: EEEE is a babel-style placeholder for the long weekday (you should probably keep this as-is)
+            'next_week': _("EEEE 'at' {time_fmt}"),
+            # i18n: keep the single quotes around the string, and only translate the text inside
+            'other': _("{date_fmt} 'at' {time_fmt}")
+        })
 
 
 def format_number(number, locale=None):
     if not locale:
         locale = get_current_locale()
-    rv = _format_number(number, locale=locale)
-    return inject_unicode_debug(rv, 2).encode('utf-8')
+    return _format_number(number, locale=locale)
+
+
+def format_currency(number, currency, locale=None):
+    if not locale:
+        locale = get_current_locale()
+    return _format_currency(number, currency, locale=locale)
 
 
 def timedelta_split(delta):
     """
-    Decomposes a timedelta into hours, minutes and seconds
-    (timedelta only stores days and seconds)n
+    Decompose a timedelta into hours, minutes and seconds
+    (timedelta only stores days and seconds).
     """
     sec = delta.seconds + delta.days * 24 * 3600
     hours, remainder = divmod(sec, 3600)
@@ -362,30 +474,6 @@ def iterdays(start, end, skip_weekends=False, day_whitelist=None, day_blacklist=
         yield day
 
 
-def get_datetime_from_request(prefix='', default=None, source=None):
-    """Retrieves date and time from request data."""
-    if source is None:
-        source = request.values
-
-    if default is None:
-        default = datetime.now()
-
-    date_str = source.get('{}date'.format(prefix), '')
-    time_str = source.get('{}time'.format(prefix), '')
-
-    try:
-        parsed_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-    except ValueError:
-        parsed_date = default.date()
-
-    try:
-        parsed_time = datetime.strptime(time_str, '%H:%M').time()
-    except ValueError:
-        parsed_time = default.time()
-
-    return datetime.combine(parsed_date, parsed_time)
-
-
 def get_day_start(day, tzinfo=None):
     """Return the earliest datetime for a given day.
 
@@ -395,7 +483,7 @@ def get_day_start(day, tzinfo=None):
     """
     if isinstance(day, datetime):
         if day.tzinfo and tzinfo:
-            raise ValueError("datetime is not naive.")
+            raise ValueError('datetime is not naive.')
         tzinfo = day.tzinfo
         day = day.date()
     start_dt = datetime.combine(day, dt_time(0))
@@ -411,47 +499,25 @@ def get_day_end(day, tzinfo=None):
     """
     if isinstance(day, datetime):
         if day.tzinfo and tzinfo:
-            raise ValueError("datetime is not naive.")
+            raise ValueError('datetime is not naive.')
         tzinfo = day.tzinfo
         day = day.date()
     end_dt = datetime.combine(day, dt_time(23, 59))
     return tzinfo.localize(end_dt) if tzinfo else end_dt
 
 
-def round_up_to_minutes(dt, precision=15):
-    """
-    Rounds up a date time object to the given precision in minutes.
-
-    :param dt: datetime -- the time to round up
-    :param precision: int -- the precision to round up by in minutes. Negative
-        values for the precision are allowed but will round down instead of up.
-    :returns: datetime -- the time rounded up by the given precision in minutes.
-    """
-    increment = precision * 60
-    secs_in_current_hour = (dt.minute * 60) + dt.second + (dt.microsecond * 1e-6)
-    delta = (secs_in_current_hour // increment) * increment + increment - secs_in_current_hour
-    return dt + timedelta(seconds=delta)
-
-
-def get_month_start(date):
-    return date + relativedelta(day=1)
-
-
-def get_month_end(date):
-    return date + relativedelta(day=1, months=+1, days=-1)
-
-
 def strftime_all_years(dt, fmt):
-    """Exactly like datetime.strftime but supports year<1900"""
+    """Exactly like datetime.strftime but supports year<1900."""
     assert '%%Y' not in fmt  # unlikely but just in case
     if dt.year >= 1900:
         return dt.strftime(fmt)
     else:
-        return dt.replace(year=1900).strftime(fmt.replace('%Y', '%%Y')).replace('%Y', unicode(dt.year))
+        return dt.replace(year=1900).strftime(fmt.replace('%Y', '%%Y')).replace('%Y', str(dt.year))
 
 
-def get_display_tz(obj=None, as_timezone=False):
-    display_tz = session.timezone if has_request_context() else 'LOCAL'
+@memoize_request
+def get_display_tz(obj=None):
+    display_tz = session_tz = session.timezone if has_request_context() else 'LOCAL'
     if display_tz == 'LOCAL':
         if obj is None:
             display_tz = config.DEFAULT_TIMEZONE
@@ -459,4 +525,14 @@ def get_display_tz(obj=None, as_timezone=False):
             display_tz = getattr(obj, 'timezone', 'UTC')
     if not display_tz:
         display_tz = config.DEFAULT_TIMEZONE
-    return pytz.timezone(display_tz) if as_timezone else display_tz
+    try:
+        return pytz.timezone(display_tz)
+    except pytz.UnknownTimeZoneError:
+        # Avoid failing in a rather ugly way (unformatted error page) when a user has an invalid timezone
+        Logger.get('date_time').warning('Invalid timezone: %s (obj=%r, session_tz=%s)', display_tz, obj, session_tz)
+        return pytz.timezone(config.DEFAULT_TIMEZONE)
+
+
+def convert_py_weekdays_to_js(py_weekdays):
+    """Convert Python weekdays (0=Mon, 6=Sun) to JavaScript (0=Sun, 6=Sat)."""
+    return [(d + 1) % 7 for d in py_weekdays]

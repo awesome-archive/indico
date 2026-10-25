@@ -1,23 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-
-
-class Serializer(object):
-
+class Serializer:
     schemaless = True
     encapsulate = True
 
@@ -40,10 +28,7 @@ class Serializer(object):
 
     @classmethod
     def create(cls, dformat, query_params=None, **kwargs):
-        """
-        A serializer factory
-        """
-
+        """A serializer factory."""
         query_params = query_params or {}
 
         serializer = cls.registry.get(dformat)
@@ -51,13 +36,13 @@ class Serializer(object):
         if serializer:
             return serializer(query_params, **kwargs)
         else:
-            raise Exception("Serializer for '%s' does not exist!" % dformat)
+            raise Exception(f"Serializer for '{dformat}' does not exist!")
 
     def getMIMEType(self):
         return self._mime
 
-    def set_headers(self, response):
-        response.content_type = self.getMIMEType()
+    def get_response_content_type(self):
+        return self.getMIMEType()
 
     def __call__(self, obj, *args, **kwargs):
         self._obj = obj
@@ -65,5 +50,5 @@ class Serializer(object):
         return self._data
 
 
-from indico.web.http_api.metadata.json import JSONSerializer
-from indico.web.http_api.metadata.xml import XMLSerializer
+from indico.web.http_api.metadata.json import JSONSerializer  # noqa: F401,E402
+from indico.web.http_api.metadata.xml import XMLSerializer  # noqa: F401,E402

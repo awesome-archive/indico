@@ -1,28 +1,61 @@
 #!/usr/bin/env python
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
+import difflib
 import os
 import re
 import subprocess
 import sys
+from datetime import date
+from pathlib import Path
 
 import click
+import dateutil.parser
+import yaml
 from babel.dates import format_date
+from dateutil.relativedelta import relativedelta
 from packaging.version import Version
+from pygments import highlight
+from pygments.formatters.terminal256 import Terminal256Formatter
+from pygments.lexers.diff import DiffLexer
+from terminaltables import GithubFlavoredMarkdownTable
+
+
+CHANGELOG_STUB = '''
+{version_line}
+{underline}
+
+*Unreleased*
+
+Improvements
+^^^^^^^^^^^^
+
+- Nothing so far :(
+
+Bugfixes
+^^^^^^^^
+
+- Nothing so far :)
+
+Accessibility
+^^^^^^^^^^^^^
+
+- Nothing so far
+
+Internal Changes
+^^^^^^^^^^^^^^^^
+
+- Nothing so far
+
+
+'''.lstrip()
+
+VERSIONS_SECTION_PATTERN = r'^([\s\S]*^<!-- VERSIONS .* -->)($[\s\S]+)([\n\r]+^<!-- ENDVERSIONS -->$[\s\S]*)$'
 
 
 def fail(message, *args, **kwargs):
@@ -46,21 +79,11 @@ def step(message, *args, **kwargs):
     click.echo(click.style(message.format(*args) + suffix, fg='white', bold=True), err=True)
 
 
-def run(cmd, title, shell=False):
-    if shell:
-        cmd = ' '.join(cmd)
-    try:
-        subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=shell)
-    except subprocess.CalledProcessError as exc:
-        fail('{} failed'.format(title), verbose_msg=exc.output)
-
-
 def _bump_version(version):
     try:
-        parts = map(int, version.split('.'))
+        parts = [int(v) for v in version.split('.')]
     except ValueError:
-        fail('cannot bump version with non-numeric parts; did you forget --no-bump?')
-        sys.exit(1)
+        fail('cannot bump version with non-numeric parts')
     if len(parts) == 2:
         parts.append(0)
     parts[-1] += 1
@@ -68,47 +91,44 @@ def _bump_version(version):
 
 
 def _get_current_version():
-    with open('indico/__init__.py', 'rb') as f:
-        content = f.read()
+    content = Path('indico/__init__.py').read_text()
     match = re.search(r"^__version__ = '([^']+)'$", content, re.MULTILINE)
     return match.group(1)
 
 
 def _set_version(version, dry_run=False):
     step('Setting version to {}', version, dry_run=dry_run)
-    with open('indico/__init__.py', 'rb') as f:
-        orig = content = f.read()
-    content = re.sub(r"^__version__ = '([^']+)'$", "__version__ = '{}'".format(version), content, flags=re.MULTILINE)
+    init_py = Path('indico/__init__.py')
+    orig = content = init_py.read_text()
+    content = re.sub(r"^__version__ = '([^']+)'$", f"__version__ = '{version}'", content, flags=re.MULTILINE)
     assert content != orig
     if not dry_run:
-        with open('indico/__init__.py', 'wb') as f:
-            f.write(content)
+        init_py.write_text(content)
 
 
-def _set_changelog_date(new_version, dry_run=False):
-    with open('CHANGES.rst', 'rb') as f:
-        orig = content = f.read()
-    version_line = 'Version {}'.format(new_version)
+def _set_changelog_date(new_version: str, release_date: date, dry_run=False):
+    changes_rst = Path('CHANGES.rst')
+    orig = content = changes_rst.read_text()
+    version_line = f'Version {new_version}'
     underline = '-' * len(version_line)
     unreleased = re.escape('Unreleased')
-    release_date = format_date(format='MMMM dd, YYYY', locale='en')
-    content = re.sub(r'(?<={}\n{}\n\n\*){}(?=\*\n)'.format(re.escape(version_line), underline, unreleased),
-                     'Released on {}'.format(release_date),
+    formatted_date = format_date(release_date, format='MMMM dd, yyyy', locale='en')
+    content = re.sub(fr'(?<={re.escape(version_line)}\n{underline}\n\n\*){unreleased}(?=\*\n)',
+                     f'Released on {formatted_date}',
                      content,
                      flags=re.DOTALL)
-    step('Setting release date to {}', release_date, dry_run=dry_run)
+    step('Setting release date to {}', formatted_date, dry_run=dry_run)
     if content == orig:
         fail('Could not update changelog - is there an entry for {}?', new_version)
     if not dry_run:
-        with open('CHANGES.rst', 'wb') as f:
-            f.write(content)
+        changes_rst.write_text(content)
 
 
 def _canonicalize_version(new_version):
     version = Version(new_version)
-    if len(version._version.release) == 3 and version._version.release[-1] == 0:
+    if len(version.release) == 3 and version.release[-1] == 0:
         warn('Removing trailing `.0` from {}', new_version)
-        new_version = '.'.join(map(str, version._version.release[:-1]))
+        new_version = '.'.join(map(str, version.release[:-1]))
     return new_version
 
 
@@ -129,7 +149,7 @@ def _tag_name(version):
 
 def _check_tag(version):
     tag_name = _tag_name(version)
-    if tag_name in subprocess.check_output(['git', 'tag']).splitlines():
+    if tag_name in subprocess.check_output(['git', 'tag'], encoding='utf-8').splitlines():
         fail('Git tag already exists: {}', tag_name)
 
 
@@ -137,7 +157,7 @@ def _check_git_clean():
     cmds = [['git', 'diff', '--stat', '--color=always'],
             ['git', 'diff', '--stat', '--color=always', '--staged']]
     for cmd in cmds:
-        rv = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        rv = subprocess.check_output(cmd, stderr=subprocess.STDOUT, encoding='utf-8')
         if rv:
             fail('Git working tree is not clean', verbose_msg=rv)
 
@@ -146,7 +166,7 @@ def _git_commit(message, files, dry_run=False):
     step("Committing '{}'", message, dry_run=dry_run)
     if dry_run:
         return
-    subprocess.check_call(['git', 'add'] + files)
+    subprocess.check_call(['git', 'add', *files])
     subprocess.check_call(['git', 'commit', '--no-verify', '--message', message])
 
 
@@ -156,47 +176,168 @@ def _git_tag(version, message, sign, dry_run):
     if dry_run:
         return
     sign_args = ['--sign'] if sign else []
-    subprocess.check_call(['git', 'tag', '--message', message, tag_name] + sign_args)
+    subprocess.check_call(['git', 'tag', '--message', message, tag_name, *sign_args])
 
 
-def _build_wheel(no_deps, dry_run):
-    step("Building wheel", dry_run=dry_run)
+def _build_wheel(no_assets, dry_run):
+    step('Building wheel', dry_run=dry_run)
     if dry_run:
         return
-    args = ['--no-deps'] if no_deps else []
-    subprocess.check_call(['./bin/maintenance/build-wheel.py', 'indico'] + args)
+    args = ['--no-assets'] if no_assets else []
+    subprocess.check_call(['./bin/maintenance/build-wheel.py', 'indico', *args])
+
+
+def _create_changelog_stub(released_version, next_version, *, dry_run=False):
+    changes_rst = Path('CHANGES.rst')
+    content = changes_rst.read_text()
+    released_version_line = f'Version {released_version}'
+    version_line = f'Version {next_version}'
+    underline = '-' * len(version_line)
+    stub = CHANGELOG_STUB.format(version_line=version_line, underline=underline)
+    if version_line in content:
+        warn('Changelog entry for {} already exists, not creating stub', next_version)
+        return
+    pos = content.index(released_version_line)
+    content = content[:pos] + stub + content[pos:]
+    step('Creating changelog stub for {}', next_version, dry_run=dry_run)
+    if not dry_run:
+        changes_rst.write_text(content)
+
+
+def _parse_changelog_versions() -> list[tuple[str, date]]:
+    """Retrieve versions from the changelog file."""
+    return [(v, dateutil.parser.parse(d).date()) for v, d in re.findall(
+        r'^Version ([0-9.abrc]+)\n-+\n\n\*Released on (.+)\*\n$',
+        Path('CHANGES.rst').read_text(),
+        re.MULTILINE,
+    )]
+
+
+def _replace_auto_section(content: str, new_table: str) -> str:
+    """Replace content within the VERSIONS_SECTION_PATTERN markers."""
+    if match := re.search(VERSIONS_SECTION_PATTERN, content, re.MULTILINE):
+        return f'{match.group(1)}\n{new_table}{match.group(3)}'
+    raise ValueError('Could not find VERSIONS section markers in SECURITY.md')
+
+
+def _show_diff(old: str, new: str, filename: str):
+    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), filename, filename, lineterm='')
+    diff = '\n'.join(diff)
+    print(highlight(diff, DiffLexer(), Terminal256Formatter(style='native')))
+
+
+def _update_security_md(*, dry_run: bool = False):
+    """Update the SECURITY.md file with the new supported version information."""
+    security_md = Path('SECURITY.md')
+    content = security_md.read_text()
+    versions = _parse_changelog_versions()
+
+    # find the date of the first release of the current minor version,
+    # as well as the last release of the previous minor version
+    minor_releases = [(version, release_date) for version, release_date in versions if not Version(version).micro]
+    latest_minor_version, latest_minor_version_date = minor_releases[0]
+    prev_minor_release = minor_releases[1][0]
+
+    # 4 months after the first minor version of the current release
+    deadline = latest_minor_version_date + relativedelta(months=4)
+    deadline_txt = format_date(deadline, format='medium', locale='en')
+
+    support_text = (
+        f'❌ No (ended {deadline_txt})'
+        if date.today() > deadline
+        else f'🚑 Limited (until {deadline_txt})'
+    )
+
+    new_table = GithubFlavoredMarkdownTable(
+        [
+            ['Version', 'Supported'],
+            [f'{latest_minor_version}.x', '✅ Yes (latest version)'],
+            [f'{prev_minor_release}.x', support_text],
+            ['Others', '❌ No'],
+        ]
+    ).table
+
+    # Replace auto-generated section
+    updated_content = _replace_auto_section(content, new_table)
+    if content == updated_content:
+        return
+
+    if dry_run:
+        _show_diff(content, updated_content, security_md.name)
+    else:
+        security_md.write_text(updated_content)
+
+
+def _get_available_languages() -> list[str]:
+    """Get the list of officially supported languages."""
+    translations_dir = Path('indico/translations')
+    babel_locales = [p.name for p in translations_dir.iterdir() if p.is_dir()]
+    # This skips canonicalization, but it should be good enough for our needs
+    bcp47_locales = [locale.replace('_', '-') for locale in babel_locales]
+    return sorted(bcp47_locales)
+
+
+def _update_publiccode_yml(new_version: str, release_date: date, *, dry_run: bool = False):
+    """Update publiccode.yml."""
+    class Dumper(yaml.Dumper):
+        def increase_indent(self, flow=False, indentless=False):
+            return super().increase_indent(flow, indentless=False)
+
+    publiccode_yml = Path('publiccode.yml')
+    content = publiccode_yml.read_text()
+    updated_yaml = yaml.safe_load(content)
+    updated_yaml['softwareVersion'] = new_version
+    updated_yaml['releaseDate'] = release_date.isoformat()
+    updated_yaml['localisation']['availableLanguages'] = _get_available_languages()
+    updated_content = yaml.dump(updated_yaml, Dumper=Dumper, sort_keys=False, allow_unicode=True)
+    if dry_run:
+        _show_diff(content, updated_content, publiccode_yml.name)
+    else:
+        publiccode_yml.write_text(updated_content)
 
 
 @click.command()
 @click.argument('version', required=False)
 @click.option('--dry-run', '-n', is_flag=True, help='Do not modify any files or run commands')
 @click.option('--sign', '-s', is_flag=True, help='Sign the Git commit/tag with GPG')
-@click.option('--no-deps', '-D', is_flag=True, help='Skip setup_deps when building the wheel')
+@click.option('--no-assets', '-D', is_flag=True, help='Skip building assets when building the wheel')
 @click.option('--no-changelog', '-C', is_flag=True, help='Do not update the date in the changelog')
-def cli(version, dry_run, sign, no_deps, no_changelog):
+@click.option('--no-publiccode', '-P', is_flag=True, help='Do not update publiccode.yml')
+@click.option('--next-changelog', '-N', is_flag=True, help='Add changelog stub for next version')
+def cli(version, dry_run, sign, no_assets, no_changelog, no_publiccode, next_changelog):
     os.chdir(os.path.join(os.path.dirname(__file__), '..', '..'))
     cur_version, new_version, next_version = _get_versions(version)
+    release_date = date.today()
     _check_tag(new_version)
     if next_version:
         _check_tag(next_version)
+    elif next_changelog:
+        fail('Next version unknown, cannot generate changelog stub')
     _check_git_clean()
     info('Current version is {}', cur_version)
     info('Going to release {}', new_version)
     if next_version:
         info('Next version will be {}', next_version)
     if not no_changelog:
-        _set_changelog_date(new_version, dry_run=dry_run)
+        _set_changelog_date(new_version, release_date, dry_run=dry_run)
+    if not no_publiccode:
+        _update_publiccode_yml(new_version, release_date, dry_run=dry_run)
+    _update_security_md(dry_run=dry_run)
     _set_version(new_version, dry_run=dry_run)
-    release_msg = 'Release {}'.format(new_version)
-    _git_commit(release_msg, ['CHANGES.rst', 'indico/__init__.py'], dry_run=dry_run)
+    release_msg = f'Release {new_version}'
+    _git_commit(release_msg, ['SECURITY.md', 'CHANGES.rst', 'publiccode.yml', 'indico/__init__.py'], dry_run=dry_run)
     _git_tag(new_version, release_msg, sign=sign, dry_run=dry_run)
     prompt = 'Build release wheel before bumping version?' if next_version else 'Build release wheel now?'
-    if click.confirm(click.style(prompt, fg='blue', bold=True), default=True):
-        _build_wheel(no_deps, dry_run=dry_run)
+    if click.confirm(click.style(prompt, fg='blue', bold=True), default=False):
+        _build_wheel(no_assets, dry_run=dry_run)
     if next_version:
-        next_message = 'Bump version to {}'.format(next_version)
+        next_message = f'Bump version to {next_version}'
         _set_version(next_version, dry_run=dry_run)
         _git_commit(next_message, ['indico/__init__.py'], dry_run=dry_run)
+    if next_changelog:
+        next_release_version = next_version.replace('-dev', '')
+        _create_changelog_stub(new_version, next_release_version, dry_run=dry_run)
+        _git_commit(f'Add {next_release_version} changelog stub', ['CHANGES.rst'], dry_run=dry_run)
 
 
 if __name__ == '__main__':

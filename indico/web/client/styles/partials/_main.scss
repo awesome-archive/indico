@@ -1,283 +1,348 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-
-@import 'base';
-@import 'partials/icons';
+@use 'base' as *;
+@use 'design_system';
+@use 'partials/buttons' as *;
+@use 'partials/icons' as *;
 
 /* Styles for the main menu */
 
-.toolbar.global-menu {
-    @extend %font-family-title-light;
+#global-menu {
+  @extend %text-size-reset;
 
-    height: 3em;
-    line-height: 3em;
+  // Override menu variables for global menu to use inverse (dark) styling
+  --menu-background-color: var(--surface-inverse-color);
+  --menu-text-color: var(--text-inverse-color);
+  --menu-text-hover-color: var(--text-inverse-color);
+  --menu-background-hover-color: var(--surface-highlight-inverse-color);
+  --menu-border: none;
+  --menu-shadow: none;
 
-    padding: 0 0 0 20px;
-    background: $black;
+  padding: 0 1.4em;
+  background: var(--surface-inverse-color);
+  border: none;
+  margin-bottom: 0;
+
+  li {
+    list-style: none; // FIXME: This should be in the global reset
+  }
+
+  > menu {
+    @extend %menu;
+    @extend %flex-row;
+  }
+
+  ind-menu > button::after {
+    @extend %icon;
+    @extend %icon-arrow-down;
+    display: block; // XXX: Required for transform to work
+  }
+
+  ind-menu > button[aria-expanded='true']::after {
+    transform: rotateX(-180deg);
+  }
+
+  ind-menu > menu :is(li, a) {
+    width: 100%;
+  }
+
+  > menu li {
+    list-style: none;
+    padding: 0;
+  }
+
+  li :is(a, button) {
+    @extend %flex-row;
+    flex: none;
+
+    background: var(--surface-inverse-color);
+    color: var(--text-inverse-color);
+    padding: 0.7em 1em;
     border: none;
-    margin-bottom: 0;
 
-    border-color: darken($black, 10%);
-    border-style: solid;
-    border-width: 1px 0;
-
-    > a {
-        @include transition(background-color);
-
-        display: inline-block;
-        height: 3em;
-        line-height: 3em;
-
-        color: white;
-        padding: 0 20px;
-
-        &:first-child, &.arrow:last-of-type {
-            border-radius: 0;
-        }
-
-        &:hover, &.open {
-            background: $light-black !important;
-        }
-
-        &.arrow {
-            @include icon-after('icon-arrow-down');
-
-            &::after {
-                vertical-align: middle;
-            }
-        }
+    &:first-child,
+    &.arrow:last-of-type {
+      border-radius: 0;
     }
+
+    &:hover,
+    &.open {
+      background: var(--surface-highlight-inverse-color);
+    }
+
+    &.arrow {
+      @include icon-after('icon-arrow-down');
+
+      &::after {
+        vertical-align: middle;
+      }
+    }
+  }
+
+  ind-with-tooltip {
+    --flex-layout: flex;
+  }
 }
 
 /* Header */
 
-div.page-header {
-    position: relative;
-    background-color: $dark-blue;
-    width: 100%;
+.page-header {
+  position: relative;
+  background-color: $dark-blue;
+  width: 100%;
 
-    img.header-logo {
-        margin: 17px 0 10px 40px;
-        border: none;
-        height: 60px;
-    }
+  img.header-logo {
+    margin: 17px 0 10px 40px;
+    border: none;
+    height: 60px;
+  }
 }
 
-div.page-header-dark {
-    background: #424242;
+.page-header-dark {
+  background: #424242;
 }
 
 /* Announcements */
-div.announcement-bar {
-    @extend %font-family-title;
+div.announcement-bar:not([hidden]) {
+  @include font-family-title();
+
+  display: flex;
+  align-items: center;
+  padding: 0.75em;
+  font-size: 1.1em;
+  text-align: center;
+
+  .icon {
+    margin-right: 0.25em;
+    font-size: 1.1em;
+  }
+
+  .close-button {
+    @extend %button-icon-only;
 
     display: flex;
-    align-items: center;
-    padding: 0.75em;
-    font-size: 1.1em;
-    text-align: center;
+    font-size: 1.5em;
+    cursor: pointer;
+
+    &::before {
+      @extend %icon;
+      @extend %icon-close;
+    }
+  }
+
+  .close-button span {
+    @extend %visually-hidden;
+  }
+
+  &.highlight {
+    background-color: $light-blue;
+    color: $dark-black;
 
     .icon {
-        margin-right: 0.25em;
-        font-size: 1.1em;
+      color: $blue;
     }
 
     .close-button {
-        display: flex;
-        font-size: 1.5em;
-        cursor: pointer;
+      color: $dark-blue;
+    }
+  }
+
+  &.warning {
+    background-color: lighten($light-yellow, 5%);
+    color: $dark-black;
+
+    .icon {
+      color: $yellow;
     }
 
-    &.warning {
-        background-color: lighten($light-yellow, 5%);
-        color: $dark-black;
+    .close-button {
+      color: $dark-yellow;
+    }
+  }
 
-        .icon {
-            color: $yellow;
-        }
+  &.error {
+    background-color: $dark-red;
+    color: $light-red;
 
-        .close-button {
-            color: $dark-yellow;
-        }
+    .icon {
+      color: $light-red;
     }
 
-    &.error {
-        background-color: $dark-red;
-        color: $light-red;
-
-        .icon {
-            color: $light-red;
-        }
-
-        .close-button {
-            color: $light-red;
-        }
+    .close-button {
+      color: $light-red;
     }
+  }
 
-    &.weak-hidden {
-        display: none;
-    }
+  &.weak-hidden {
+    display: none;
+  }
 }
 
 /* Breadcrumbs */
 
-div.main-breadcrumb {
-    @extend %font-family-title;
+nav.main-breadcrumb {
+  @include font-family-title();
 
-    background-color: darken($light-gray, 5%);
-    border-bottom: 1px solid $gray;
-    padding: 0.6em 0 0.6em 40px;
+  background-color: darken($light-gray, 5%);
+  border-bottom: 1px solid $gray;
+  padding: 0.6em 0 0.6em 40px;
 
-    &.management {
-        background-color: #fff;
+  &.management {
+    background-color: #fff;
+  }
+
+  .path {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+
+    li {
+      display: flex;
+      align-items: center;
     }
 
-    .path {
-        .sep {
-            color: $dark-gray;
-            padding: 0 0.5em;
-        }
-
-        .item {
-            color: $light-black;
-            font-size: 12px;
-        }
-
-        a.item:hover {
-            color: $dark-blue;
-        }
+    .sep {
+      color: var(--text-secondary-color);
+      padding: 0 0.5em;
     }
+
+    .item {
+      color: var(--text-color);
+      font-size: 12px;
+    }
+
+    a.item:hover {
+      color: var(--clickable-text-highlight-color);
+    }
+
+    .current-page-indicator {
+      @extend %visually-hidden;
+    }
+  }
 }
 
 /* Styles for the session bar at the top right corner */
 
 div.session-bar {
-    @extend %font-family-title;
+  @include font-family-title();
 
-    margin: 0.5em 0.5em 0 0;
+  margin: 0.5em 0.5em 0 0;
 
-    .toolbar {
-        padding: 0;
-        margin: 0;
+  .toolbar {
+    padding: 0;
+    margin: 0;
+  }
+
+  .icon-shield {
+    vertical-align: middle;
+  }
+
+  .i-button {
+    font-weight: normal;
+
+    &.protection-public {
+      @extend .accept;
     }
 
-    .icon-shield {
-        vertical-align: middle;
+    &.protection-restricted {
+      @extend .danger;
     }
 
-    .i-button {
-        font-weight: normal;
-
-        &.protection-public {
-            @extend .i-button.accept;
-        }
-
-        &.protection-restricted {
-            @extend .i-button.danger;
-        }
-
-        &.protection-network {
-            @extend .i-button.warning;
-        }
+    &.protection-network {
+      @extend .warning;
     }
+  }
 
-    &.scrolling {
-        background-color: transparent;
-        box-shadow: none;
-        right: 0;
-        margin-top: 0;
-        padding: 0 0 5px 5px;
-        z-index: 999;
-    }
+  &.sticky-scrolling {
+    background-color: transparent;
+    box-shadow: none;
+    right: 0;
+    margin-top: 0;
+    padding: 0 0 5px 5px;
+    z-index: 999;
+  }
 }
 
 div.tz-selector-widget {
-    .tz-mode-container > div {
-        margin-bottom: 0.5em;
-    }
+  .tz-mode-container > div {
+    margin-bottom: 0.5em;
+  }
 
-    .tz-update-user-container {
-        margin: 1em 0;
-    }
+  .tz-update-user-container {
+    margin: 1em 0;
+  }
 
-    .tz-save-container {
-        text-align: center;
-        margin-top: 1em;
-    }
+  .tz-save-container {
+    text-align: center;
+    margin-top: 1em;
+  }
 }
 
 /* Impersonation header */
 
 div.impersonation-header {
-    padding: 0.5em;
-    background-color: $dark-black;
-    color: lighten($yellow, 15%);
-    font-family: Verdana;
-    font-size: 1.1em;
+  padding: 0.5em;
+  background-color: $dark-black;
+  color: lighten($yellow, 15%);
+  font-family: Verdana, sans-serif;
+  font-size: 1.1em;
 
-    .text {
-        display: inline-block;
+  .text {
+    display: inline-block;
 
-        .logged-user-name {
-            font-weight: bold;
-            color: lighten($yellow, 30%);
-            margin: 0.1em;
-            line-height: 1em;
-            max-width: 200px;
-        }
-
-        &::before {
-            margin-right: 0.4em;
-            font-size: 1.5em;
-            line-height: 1em;
-            vertical-align: middle;
-        }
-
+    .logged-user-name {
+      font-weight: bold;
+      color: lighten($yellow, 30%);
+      margin: 0.1em;
+      line-height: 1em;
+      max-width: 200px;
     }
 
-    .undo-login-as {
-        color: inherit;
-        float: right;
-        margin-right: 2px;
-        vertical-align: middle;
-        font-size: 1.5em;
-        line-height: 1em;
+    &::before {
+      margin-right: 0.4em;
+      font-size: 1.5em;
+      line-height: 1em;
+      vertical-align: middle;
     }
+  }
+
+  .undo-login-as {
+    color: inherit;
+    float: right;
+    margin-right: 2px;
+    vertical-align: middle;
+    font-size: 1.5em;
+    line-height: 1em;
+  }
 }
 
 .location-info-tip {
-    .location-address {
-        color: $gray;
-        white-space: pre;
-    }
+  .location-address {
+    color: $gray;
+    white-space: pre;
+  }
 
-    .map-link {
-        float: right;
-        margin-top: 0.5em;
-    }
+  .map-link {
+    float: right;
+    margin-top: 0.5em;
+  }
 
-    h3, h4 {
-        line-height: 1.2em;
-        margin-top: 0 !important;
-        margin-bottom: 0;
+  h3,
+  h4 {
+    line-height: 1.2em;
+    margin-top: 0 !important;
+    margin-bottom: 0;
 
-        &:not(:last-child) {
-            margin-bottom: 0.4em;
-        }
+    &:not(:last-child) {
+      margin-bottom: 0.4em;
     }
+  }
 }

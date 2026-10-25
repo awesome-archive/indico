@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime, timedelta
 
@@ -20,9 +11,10 @@ import pytest
 import pytz
 
 from indico.core.settings import PrefixSettingsProxy, SettingsProxy
-from indico.core.settings.converters import DatetimeConverter, TimedeltaConverter
+from indico.core.settings.converters import DatetimeConverter, EnumConverter, TimedeltaConverter
 from indico.modules.events.settings import EventSettingsProxy
 from indico.modules.users import User
+from indico.util.enum import IndicoIntEnum
 
 
 def test_proxy_strict_nodefaults():
@@ -34,7 +26,7 @@ def test_proxy_strict_nodefaults():
 def test_proxy_strict_off():
     proxy = SettingsProxy('test', {}, False)
     assert proxy.get('foo') is None
-    proxy.get('foo', 'bar') == 'bar'
+    assert proxy.get('foo', 'bar') == 'bar'
     proxy.set('foo', 'foobar')
     assert proxy.get('foo') == 'foobar'
 
@@ -42,11 +34,16 @@ def test_proxy_strict_off():
 @pytest.mark.usefixtures('db')
 def test_proxy_strict():
     proxy = SettingsProxy('test', {'hello': 'world'})
-    pytest.raises(ValueError, proxy.get, 'foo')
-    pytest.raises(ValueError, proxy.get, 'foo', 'bar')
-    pytest.raises(ValueError, proxy.set, 'foo', 'foobar')
-    pytest.raises(ValueError, proxy.set_multi, {'hello': 'world', 'foo': 'foobar'})
-    pytest.raises(ValueError, proxy.delete, 'hello', 'foo')
+    with pytest.raises(ValueError):
+        proxy.get('foo')
+    with pytest.raises(ValueError):
+        proxy.get('foo', 'bar')
+    with pytest.raises(ValueError):
+        proxy.set('foo', 'foobar')
+    with pytest.raises(ValueError):
+        proxy.set_multi({'hello': 'world', 'foo': 'foobar'})
+    with pytest.raises(ValueError):
+        proxy.delete('hello', 'foo')
     assert proxy.get('hello') == 'world'
 
 
@@ -102,7 +99,7 @@ def test_proxy_preload(count_queries):
         assert proxy.get('foo', 'bar') == 'bar'
     assert cnt() == 0
     with count_queries() as cnt:
-        assert proxy.get('bar') is 'test'
+        assert proxy.get('bar') == 'test'
     assert cnt() == 0
 
 
@@ -119,13 +116,20 @@ def test_proxy_cache_mutable():
 def test_acls_invalid():
     user = User()
     proxy = SettingsProxy('foo', {'reg': None}, acls={'acl'})
-    pytest.raises(ValueError, proxy.get, 'acl')
-    pytest.raises(ValueError, proxy.set, 'acl', 'foo')
-    pytest.raises(ValueError, proxy.acls.get, 'reg')
-    pytest.raises(ValueError, proxy.acls.set, 'reg', {user})
-    pytest.raises(ValueError, proxy.acls.contains_user, 'reg', user)
-    pytest.raises(ValueError, proxy.acls.add_principal, 'reg', user)
-    pytest.raises(ValueError, proxy.acls.remove_principal, 'reg', user)
+    with pytest.raises(ValueError):
+        proxy.get('acl')
+    with pytest.raises(ValueError):
+        proxy.set('acl', 'foo')
+    with pytest.raises(ValueError):
+        proxy.acls.get('reg')
+    with pytest.raises(ValueError):
+        proxy.acls.set('reg', {user})
+    with pytest.raises(ValueError):
+        proxy.acls.contains_user('reg', user)
+    with pytest.raises(ValueError):
+        proxy.acls.add_principal('reg', user)
+    with pytest.raises(ValueError):
+        proxy.acls.remove_principal('reg', user)
 
 
 @pytest.mark.usefixtures('db')
@@ -151,8 +155,8 @@ def test_acls(dummy_user, create_user):
 
 
 def test_delete_propagate(mocker):
-    Setting = mocker.patch('indico.core.settings.proxy.Setting')
-    SettingPrincipal = mocker.patch('indico.core.settings.proxy.SettingPrincipal')
+    Setting = mocker.patch('indico.core.settings.proxy.Setting')  # noqa: N806
+    SettingPrincipal = mocker.patch('indico.core.settings.proxy.SettingPrincipal')  # noqa: N806
     proxy = SettingsProxy('foo', {'reg': None}, acls={'acl'})
     proxy.delete('reg', 'acl')
     Setting.delete.assert_called_once_with('foo', 'reg')
@@ -160,8 +164,8 @@ def test_delete_propagate(mocker):
 
 
 def test_set_multi_propagate(mocker):
-    Setting = mocker.patch('indico.core.settings.proxy.Setting')
-    SettingPrincipal = mocker.patch('indico.core.settings.proxy.SettingPrincipal')
+    Setting = mocker.patch('indico.core.settings.proxy.Setting')  # noqa: N806
+    SettingPrincipal = mocker.patch('indico.core.settings.proxy.SettingPrincipal')  # noqa: N806
     proxy = SettingsProxy('foo', {'reg': None}, acls={'acl'})
     proxy.set_multi({
         'reg': 'bar',
@@ -175,10 +179,14 @@ def test_prefix_settings_invalid():
     foo_proxy = SettingsProxy('foo', {'a': 1, 'b': 2})
     bar_proxy = SettingsProxy('bar', {'x': 3, 'y': 4})
     proxy = PrefixSettingsProxy({'foo': foo_proxy, 'bar': bar_proxy})
-    pytest.raises(ValueError, proxy.get, 'x')
-    pytest.raises(ValueError, proxy.get, 'x_y')
-    pytest.raises(ValueError, proxy.set, 'x', 'test')
-    pytest.raises(ValueError, proxy.set, 'x_y', 'test')
+    with pytest.raises(ValueError):
+        proxy.get('x')
+    with pytest.raises(ValueError):
+        proxy.get('x_y')
+    with pytest.raises(ValueError):
+        proxy.set('x', 'test')
+    with pytest.raises(ValueError):
+        proxy.set('x_y', 'test')
 
 
 @pytest.mark.parametrize('with_arg', (True, False))
@@ -203,3 +211,27 @@ def test_prefix_settings(dummy_event, with_arg):
     proxy.set_multi({'foo_a': 11, 'bar_x': 33}, **kw)
     proxy.delete_all(**kw)
     assert proxy.get_all(no_defaults=True, **kw) == {}
+
+
+def test_bound_settings(dummy_event, dummy_user):
+    class TestEnum(IndicoIntEnum):
+        foo = 123
+        bar = 456
+
+    proxy = EventSettingsProxy(
+        'test',
+        {'a': 1, 'b': 2, 'e': TestEnum.foo},
+        acls={'acl'},
+        converters={'e': EnumConverter(TestEnum)}
+    )
+    proxy.set(dummy_event, 'a', 111)
+    proxy.set(dummy_event, 'e', TestEnum.bar)
+    proxy.acls.set(dummy_event, 'acl', {dummy_user})
+    bound = proxy.bind(dummy_event)
+    assert bound.converters == proxy.converters
+    assert bound.get('a') == 111
+    assert bound.get('b') == 2
+    assert bound.acls.contains_user('acl', dummy_user)
+    assert bound.acls.get('acl') == {dummy_user}
+    assert bound.get('e') == TestEnum.bar
+    assert isinstance(bound.get('e'), TestEnum)

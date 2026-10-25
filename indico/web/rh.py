@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import cProfile
 import inspect
@@ -24,6 +13,7 @@ import time
 from functools import partial, wraps
 
 import jsonschema
+import sentry_sdk
 from flask import current_app, g, redirect, request, session
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm.exc import NoResultFound
@@ -35,26 +25,23 @@ from indico.core import signals
 from indico.core.config import config
 from indico.core.db import db
 from indico.core.db.sqlalchemy.core import handle_sqlalchemy_database_error
-from indico.core.logger import Logger, sentry_set_tags
+from indico.core.logger import Logger
 from indico.core.notifications import flush_email_queue, init_email_queue
-from indico.legacy.common import fossilize
-from indico.legacy.common.security import Sanitization
 from indico.util.i18n import _
 from indico.util.locators import get_locator
 from indico.util.signals import values_from_signal
-from indico.web.flask.util import ResponseUtil, create_flat_args, url_for
+from indico.web.flask.util import url_for
+from indico.web.util import get_request_user
 
 
 HTTP_VERBS = {'GET', 'PATCH', 'POST', 'PUT', 'DELETE'}
 logger = Logger.get('rh')
 
 
-class RH(object):
-    NOT_SANITIZED_FIELDS = frozenset()
+class RH:
     CSRF_ENABLED = True  # require a csrf_token when accessing the RH with anything but GET
     EVENT_FEATURE = None  # require a certain event feature when accessing the RH. See `EventFeature` for details
     DENY_FRAMES = False  # whether to send an X-Frame-Options:DENY header
-    CHECK_HTML = False  # whether to run the legacy HTML sanitizer
 
     #: A dict specifying how the url should be normalized.
     #: `args` is a dictionary mapping view args keys to callables
@@ -63,6 +50,11 @@ class RH(object):
     #: `locators` is a set of callables returning objects with locators.
     #: `preserved_args` is a set of view arg names which will always
     #: be copied from the current request if present.
+    #: `skipped_args` is a set of view arg names which will be ignored if
+    #: present in the request or the locators.
+    #: `copy_query_args` specified arguments that are in the query string
+    #: but may be provided by one of the locators and thus need to be taken
+    #: from the query string when checking if a redirect is needed.
     #: The callables are always invoked with a single `self` argument
     #: containing the RH instance.
     #: `endpoint` may be used to specify the endpoint used to build
@@ -83,17 +75,22 @@ class RH(object):
         'args': {},
         'locators': set(),
         'preserved_args': set(),
+        'skipped_args': set(),
+        'copy_query_args': set(),
         'endpoint': None
     }
 
+    #: Like `normalize_url_spec`, but runs after the access check succeeded
+    normalize_url_spec_late = None
+
     def __init__(self):
         self.commit = True
-        self._responseUtil = ResponseUtil()
+        self.noindex = False
 
     # Methods =============================================================
 
     def validate_json(self, schema, json=None):
-        """Validates the request's JSON payload using a JSON schema.
+        """Validate the request's JSON payload using a JSON schema.
 
         :param schema: The JSON schema used for validation.
         :param json: The JSON object (defaults to ``request.json``)
@@ -103,15 +100,15 @@ class RH(object):
             json = request.json
         try:
             jsonschema.validate(json, schema)
-        except jsonschema.ValidationError as e:
-            raise BadRequest('Invalid JSON payload: {}'.format(e.message))
+        except jsonschema.ValidationError as exc:
+            raise BadRequest(f'Invalid JSON payload: {exc}')
 
     @property
     def csrf_token(self):
         return session.csrf_token if session.csrf_protected else ''
 
-    def normalize_url(self):
-        """Performs URL normalization.
+    def normalize_url(self, *, late=False):
+        """Perform URL normalization.
 
         This uses the :attr:`normalize_url_spec` to check if the URL
         params are what they should be and redirects or fails depending
@@ -119,7 +116,10 @@ class RH(object):
 
         :return: ``None`` or a redirect response
         """
-        if current_app.debug and self.normalize_url_spec is RH.normalize_url_spec:
+        spec = self.normalize_url_spec_late if late else self.normalize_url_spec
+        base_spec = RH.normalize_url_spec_late if late else RH.normalize_url_spec
+
+        if current_app.debug and spec is base_spec and spec is not None:
             # in case of ``class SomeRH(RH, MixinWithNormalization)``
             # the default value from `RH` overwrites the normalization
             # rule from ``MixinWithNormalization``.  this is never what
@@ -128,23 +128,25 @@ class RH(object):
             cls = next((x
                         for x in inspect.getmro(self.__class__)
                         if (x is not RH and x is not self.__class__ and hasattr(x, 'normalize_url_spec') and
-                            getattr(x, 'normalize_url_spec', None) is not RH.normalize_url_spec)),
+                            getattr(x, 'normalize_url_spec', None) is not base_spec)),
                        None)
             if cls is not None:
-                raise Exception('Normalization rule of {} in {} is overwritten by base RH. Put mixins with class-level '
-                                'attributes on the left of the base class'.format(cls, self.__class__))
-        if not self.normalize_url_spec or not any(self.normalize_url_spec.itervalues()):
+                raise Exception(f'Normalization rule of {cls} in {type(self)} is overwritten by base RH. '
+                                'Put mixins with class-level attributes on the left of the base class')
+        if not spec or not any(spec.values()):
             return
         spec = {
-            'args': self.normalize_url_spec.get('args', {}),
-            'locators': self.normalize_url_spec.get('locators', set()),
-            'preserved_args': self.normalize_url_spec.get('preserved_args', set()),
-            'endpoint': self.normalize_url_spec.get('endpoint', None)
+            'args': spec.get('args', {}),
+            'locators': spec.get('locators', set()),
+            'preserved_args': spec.get('preserved_args', set()),
+            'skipped_args': spec.get('skipped_args', set()),
+            'copy_query_args': spec.get('copy_query_args', set()),
+            'endpoint': spec.get('endpoint'),
         }
         # Initialize the new view args with preserved arguments (since those would be lost otherwise)
-        new_view_args = {k: v for k, v in request.view_args.iteritems() if k in spec['preserved_args']}
+        new_view_args = {k: v for k, v in request.view_args.items() if k in spec['preserved_args']}
         # Retrieve the expected values for all simple arguments (if they are currently present)
-        for key, getter in spec['args'].iteritems():
+        for key, getter in spec['args'].items():
             if key in request.view_args:
                 new_view_args[key] = getter(self)
         # Retrieve the expected values from locators
@@ -153,8 +155,8 @@ class RH(object):
             value = getter(self)
             if value is None:
                 raise NotFound('The URL contains invalid data. Please go to the previous page and refresh it.')
-            locator_args = get_locator(value)
-            reused_keys = set(locator_args) & prev_locator_args.viewkeys()
+            locator_args = {k: v for k, v in get_locator(value).items() if k not in spec['skipped_args']}
+            reused_keys = set(locator_args) & prev_locator_args.keys()
             if any(locator_args[k] != prev_locator_args[k] for k in reused_keys):
                 raise NotFound('The URL contains invalid data. Please go to the previous page and refresh it.')
             new_view_args.update(locator_args)
@@ -166,20 +168,26 @@ class RH(object):
 
         def _convert(v):
             # some legacy code has numeric ids in the locator data, but still takes
-            # string ids in the url rule (usually for confId)
-            return unicode(v) if isinstance(v, (int, long)) else v
+            # string ids in the url rule (usually for `confId` which is now numeric and
+            # called `event_id`, but just in case there's any other code that also has
+            # this ugly string/int mix we'll leave this here - there is no harm in
+            # passing strings to `url_for` even for int segments)
+            return str(v) if isinstance(v, int) else v
 
-        provided = {k: _convert(v) for k, v in request.view_args.iteritems() if k not in defaults}
-        new_view_args = {k: _convert(v) for k, v in new_view_args.iteritems()}
+        provided = {k: _convert(v) for k, v in request.view_args.items() if k not in defaults}
+        if spec['copy_query_args']:
+            provided.update((k, _convert(v)) for k, v in request.args.items() if k in spec['copy_query_args'])
+        new_view_args = {k: _convert(v) for k, v in new_view_args.items() if v is not None}
         if new_view_args != provided:
             if request.method in {'GET', 'HEAD'}:
                 endpoint = spec['endpoint'] or request.endpoint
+                build_args = request.args.to_dict() | new_view_args
                 try:
-                    return redirect(url_for(endpoint, **dict(request.args.to_dict(), **new_view_args)))
+                    return redirect(url_for(endpoint, **build_args))
                 except BuildError as e:
                     if current_app.debug:
                         raise
-                    logger.warn('BuildError during normalization: %s', e)
+                    logger.warning('BuildError during normalization: %s', e)
                     raise NotFound
             else:
                 raise NotFound('The URL contains invalid data. Please go to the previous page and refresh it.')
@@ -210,18 +218,27 @@ class RH(object):
         return method()
 
     def _check_csrf(self):
+        if get_request_user()[1] in ('oauth', 'signed_url'):
+            # no csrf checks needed since both of these auth methods require secrets
+            # not available to a malicious site (and if they were, they wouldn't have
+            # to use CSRF to abuse them)
+            return
         token = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
         if token is None:
             # Might be a WTForm with a prefix. In that case the field name is '<prefix>-csrf_token'
-            token = next((v for k, v in request.form.iteritems() if k.endswith('-csrf_token')), None)
+            token = next((v for k, v in request.form.items() if k.endswith('-csrf_token')), None)
         if self.CSRF_ENABLED and request.method != 'GET' and token != session.csrf_token:
             msg = _("It looks like there was a problem with your current session. Please use your browser's back "
-                    "button, reload the page and try again.")
+                    'button, reload the page and try again.')
             raise BadRequest(msg)
+
+    def _check_terms(self):
+        from indico.modules.legal import confirm_rh_terms_required
+        return confirm_rh_terms_required()
 
     def _check_event_feature(self):
         from indico.modules.events.features.util import require_feature
-        event_id = request.view_args.get('confId') or request.view_args.get('event_id')
+        event_id = request.view_args.get('event_id')
         if event_id is not None:
             require_feature(event_id, self.EVENT_FEATURE)
 
@@ -234,14 +251,18 @@ class RH(object):
         except NoResultFound:  # sqlalchemy .one() not finding anything
             raise NotFound(_('The specified item could not be found.'))
 
-        rv = self.normalize_url()
-        if rv is not None:
+        if rv := self.normalize_url():
             return rv
 
-        self._check_access()
+        signal_rv = values_from_signal(signals.rh.before_check_access.send(type(self), rh=self))
+        if not all(signal_rv):
+            raise Forbidden('Unauthorized access.')
+        if not signal_rv:
+            self._check_access()
         signals.rh.check_access.send(type(self), rh=self)
-        if self.CHECK_HTML:
-            Sanitization.sanitizationCheck(create_flat_args(), self.NOT_SANITIZED_FIELDS)
+
+        if rv := self.normalize_url(late=True):
+            return rv
 
         signal_rv = values_from_signal(signals.rh.before_process.send(type(self), rh=self),
                                        single_value=True, as_list=True)
@@ -252,7 +273,7 @@ class RH(object):
 
         if config.PROFILE:
             result = [None]
-            profile_path = os.path.join(config.TEMP_DIR, '{}-{}.prof'.format(type(self).__name__, time.time()))
+            profile_path = os.path.join(config.TEMP_DIR, f'{type(self).__name__}-{time.time()}.prof')
             cProfile.runctx('result[0] = self._process()', globals(), locals(), profile_path)
             rv = result[0]
         else:
@@ -274,20 +295,22 @@ class RH(object):
 
         res = ''
         g.rh = self
-        sentry_set_tags({'rh': self.__class__.__name__})
+        sentry_sdk.set_tag('rh', type(self).__name__)
 
         if self.EVENT_FEATURE is not None:
             self._check_event_feature()
 
-        logger.info('%s %s [IP=%s] [PID=%s] [UID=%r]',
-                    request.method, request.relative_url, request.remote_addr, os.getpid(), session.get('_user_id'))
+        logger.info('%s %s [IP=%s] [PID=%s]',
+                    request.method, request.relative_url, request.remote_addr, os.getpid())
 
         try:
-            fossilize.clearCache()
             init_email_queue()
             self._check_csrf()
+            if terms_response := self._check_terms():
+                return terms_response
+
             res = self._do_process()
-            signals.after_process.send()
+            signals.core.after_process.send()
 
             if self.commit:
                 db.session.commit()
@@ -305,44 +328,136 @@ class RH(object):
         logger.debug('Request successful')
 
         if res is None:
-            return self._responseUtil.make_empty()
+            # flask doesn't accept None but we might be returning it in some places...
+            res = ''
 
-        response = self._responseUtil.make_response(res)
+        response = current_app.make_response(res)
+        if self.noindex:
+            response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive, nosnippet'
         if self.DENY_FRAMES:
             response.headers['X-Frame-Options'] = 'DENY'
         return response
 
 
 class RHSimple(RH):
-    """A simple RH that calls a function to build the response
+    """A simple RH that calls a function to build the response.
 
     The preferred way to use this class is by using the
     `RHSimple.wrap_function` decorator.
 
     :param func: A function returning HTML
     """
+
     def __init__(self, func):
         RH.__init__(self)
         self.func = func
 
     def _process(self):
-        rv = self.func()
-        return rv
+        return self.func()
 
     @classmethod
-    def wrap_function(cls, func):
-        """Decorates a function to run within the RH's framework"""
+    def wrap_function(cls, func, *, disable_csrf_check=False):
+        """Decorate a function to run within the RH's framework."""
         @wraps(func)
         def wrapper(*args, **kwargs):
-            return cls(partial(func, *args, **kwargs)).process()
+            rh = cls(partial(func, *args, **kwargs))
+            if disable_csrf_check:
+                rh.CSRF_ENABLED = False
+            return rh.process()
 
         return wrapper
 
 
 class RHProtected(RH):
+    """Base RH that requires the user to be authenticated."""
+
     def _require_user(self):
         if session.user is None:
             raise Forbidden
 
     def _check_access(self):
         self._require_user()
+
+
+class RequireUserMixin:
+    def _check_access(self):
+        if session.user is None:
+            raise Forbidden
+
+
+def oauth_scope(scope):
+    """Specify a custom OAuth scope needed to access an RH.
+
+    By default RHs require one of the ``everything`` OAuth scopes to use
+    them when authenticating with an OAuth token. These scopes are meant
+    as wildcards for things that aren't official APIs though. Any RH that
+    expose actual APIs should use scopes related to what they do (within
+    reason of course).
+    """
+    # TODO: we should probably allow setting scopes for specific methods using
+    # a syntax like `@oauth_scope('foo', 'read:foo')` which would require `foo`
+    # or `read:foo` for GET requests and require `foo` for any other method
+    def decorator(rh):
+        rh._OAUTH_SCOPE = scope
+        return rh
+    return decorator
+
+
+def custom_auth(rh):
+    """Use custom (bearer token) auth for this RH.
+
+    This is useful when creating endpoints that will handle Bearer tokens
+    on their own and should never try to verify a token against Indico's
+    own OAuth or personal tokens.
+
+    It completely disables any of the core auth features, so neither bearer
+    tokens nor session cookies nor signed URLs will be handled; this means
+    the "current user" is always going to be None.
+    """
+    rh._DISABLE_CORE_AUTH = True
+    return rh
+
+
+def allow_signed_url(rh):
+    """Allow accessing this RH using persistent signed URLs.
+
+    By default RHs do not allow access using a persistent URL containing
+    a ``user_token``. By decorating a RH with this decorator, the RH will
+    allow requests authenticated using such a token.
+    """
+    rh._ALLOW_SIGNED_URL = True
+    return rh
+
+
+def json_errors(rh):
+    """Specify that the RH should always jsonify errors.
+
+    This is meant for API endpoints and similar places where errors
+    should be returned as JSON and not as a formatted HTML error page.
+    """
+    rh._JSON_ERRORS = True
+    return rh
+
+
+def cors(rh=None, /, **options):
+    """Enable CORS for the decorated RH.
+
+    Note that this MUST NOT be used for RHs that use ``send_file()`` from
+    an actual file, or ``send()`` from a file in a storage backend, because
+    depending on how these files are served, the CORS headers would not
+    actually be included in the response sent to the client.
+
+    If you need to use CORS no such an endpoint, read the file contents
+    into a `BytesIO` and use ``send_file`` with that.
+    """
+
+    def decorator(rh):
+        rh._CORS = options
+        return rh
+
+    if rh is None:
+        # if we used `@cors()` we need to return the inner decorator
+        return decorator
+
+    # in case of `@cors` we have the RH and can apply the actual decorator
+    return decorator(rh)

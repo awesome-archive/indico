@@ -1,61 +1,70 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import itertools
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 
-from flask import flash, redirect, request, session
+from flask import flash, jsonify, redirect, request, session
+from marshmallow import fields
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import contains_eager, joinedload
+from webargs import validate
+from webargs.flaskparser import abort
+from werkzeug.exceptions import Forbidden
 
 from indico.core.db import db
+from indico.core.db.sqlalchemy.custom.unaccent import unaccent_match
 from indico.core.db.sqlalchemy.principals import PrincipalType
 from indico.core.notifications import make_email, send_email
-from indico.modules.events import EventLogKind, EventLogRealm
+from indico.modules.events import EventLogRealm
+from indico.modules.events.abstracts.models.abstracts import Abstract
+from indico.modules.events.abstracts.models.persons import AbstractPersonLink
 from indico.modules.events.contributions.models.contributions import Contribution
+from indico.modules.events.contributions.models.persons import ContributionPersonLink, SubContributionPersonLink
 from indico.modules.events.contributions.models.principals import ContributionPrincipal
+from indico.modules.events.contributions.models.subcontributions import SubContribution
+from indico.modules.events.controllers.base import EditEventSettingsMixin, RHAuthenticatedEventBase
 from indico.modules.events.management.controllers import RHManageEventBase
 from indico.modules.events.models.persons import EventPerson
 from indico.modules.events.models.principals import EventPrincipal
 from indico.modules.events.models.roles import EventRole
-from indico.modules.events.persons.forms import EmailEventPersonsForm, EventPersonForm
+from indico.modules.events.persons import logger, persons_settings
+from indico.modules.events.persons.forms import ManagePersonListsForm
 from indico.modules.events.persons.operations import update_person
+from indico.modules.events.persons.schemas import EventPersonSchema, EventPersonUpdateSchema
 from indico.modules.events.persons.views import WPManagePersons
+from indico.modules.events.registration.models.forms import RegistrationForm
 from indico.modules.events.registration.models.registrations import Registration
 from indico.modules.events.sessions.models.principals import SessionPrincipal
 from indico.modules.events.sessions.models.sessions import Session
-from indico.modules.users import User
+from indico.modules.files.controllers import UploadFileMixin
+from indico.modules.logs import LogKind
+from indico.modules.users import user_management_settings
+from indico.modules.users.models.affiliations import Affiliation
 from indico.util.date_time import now_utc
 from indico.util.i18n import _, ngettext
-from indico.util.placeholders import replace_placeholders
+from indico.util.marshmallow import FilesField, LowercaseString, no_relative_urls, not_empty, validate_with_message
+from indico.util.placeholders import get_sorted_placeholders, replace_placeholders
+from indico.util.user import principal_from_identifier, validate_search_token
+from indico.web.args import use_args, use_kwargs
 from indico.web.flask.templating import get_template_module
 from indico.web.flask.util import jsonify_data, url_for
-from indico.web.forms.base import FormDefaults
-from indico.web.util import jsonify_form
 
 
-BUILTIN_ROLES = {'chairperson': {'name': 'Chairperson', 'code': 'CHR', 'color': 'f7b076',
+BUILTIN_ROLES = {'chairperson': {'name': _('Chairperson'), 'code': 'CHR', 'color': 'f7b076',
                                  'css': 'background-color: #f7b076 !important; border-color: #f7b076 !important'},
-                 'author': {'name': 'Author', 'code': 'AUT', 'color': '6582e8',
+                 'author': {'name': _('Author'), 'code': 'AUT', 'color': '6582e8',
                             'css': 'background-color: #6582e8 !important; border-color: #6582e8 !important'},
-                 'convener': {'name': 'Convener', 'code': 'CON', 'color': 'ce69e0',
+                 'convener': {'name': _('Convener'), 'code': 'CON', 'color': 'ce69e0',
                               'css': 'background-color: #ce69e0 !important; border-color: #ce69e0 !important'},
-                 'speaker': {'name': 'Speaker', 'code': 'SPK', 'color': '53c7ad',
-                             'css': 'background-color: #53c7ad !important; border-color: #53c7ad !important'}}
+                 'speaker': {'name': _('Speaker'), 'code': 'SPK', 'color': '53c7ad',
+                             'css': 'background-color: #53c7ad !important; border-color: #53c7ad !important'},
+                 'lecture_speaker': {'name': _('Speaker'), 'code': 'SPK', 'color': '53c7ad',
+                                     'css': 'background-color: #53c7ad !important; border-color: #53c7ad !important'}}
 
 
 class RHPersonsBase(RHManageEventBase):
@@ -72,10 +81,9 @@ class RHPersonsBase(RHManageEventBase):
                                selected=person_link.contribution.friendly_id)}
 
     def generate_subcontributions_data(self, person_link):
-        return {'title': '{} ({})'.format(person_link.subcontribution.contribution.title,
-                                          person_link.subcontribution.title),
+        return {'title': f'{person_link.subcontribution.contribution.title} ({person_link.subcontribution.title})',
                 'url': url_for('contributions.manage_contributions', self.event,
-                               selected=person_link.subcontribution.friendly_id)}
+                               selected=person_link.subcontribution.contribution.friendly_id)}
 
     def get_persons(self):
         abstract_strategy = joinedload('abstract_links')
@@ -94,7 +102,7 @@ class RHPersonsBase(RHManageEventBase):
         event_strategy.joinedload('person').joinedload('user')
 
         chairpersons = {link.person for link in self.event.person_links}
-        persons = defaultdict(lambda: {'roles': OrderedDict(),
+        persons = defaultdict(lambda: {'roles': {},
                                        'registrations': [],
                                        'has_event_person': True,
                                        'id_field_name': 'person_id'})
@@ -105,7 +113,11 @@ class RHPersonsBase(RHManageEventBase):
                                           EventPerson.email == Registration.email))
         event_persons_query = (db.session.query(EventPerson, Registration)
                                .filter(EventPerson.event_id == self.event.id)
-                               .outerjoin(Registration, (Registration.event_id == self.event.id) & _reg_person_join)
+                               .outerjoin(Registration, db.and_(
+                                   Registration.event_id == self.event.id,
+                                   Registration.registration_form.has(~RegistrationForm.is_deleted),
+                                   _reg_person_join
+                               ))
                                .options(abstract_strategy,
                                         event_strategy,
                                         contribution_strategy,
@@ -121,11 +133,14 @@ class RHPersonsBase(RHManageEventBase):
         event_person_users = set()
         for event_person, registration in event_persons_query:
             data = persons[event_person.email or event_person.id]
-            if registration:
+            if registration and registration.is_active:
                 data['registrations'].append(registration)
             data['person'] = event_person
             if event_person in chairpersons:
-                data['roles']['chairperson'] = BUILTIN_ROLES['chairperson'].copy()
+                if self.event.type != 'lecture':
+                    data['roles']['chairperson'] = BUILTIN_ROLES['chairperson'].copy()
+                else:
+                    data['roles']['lecture_speaker'] = BUILTIN_ROLES['lecture_speaker'].copy()
 
             if self.event.type == 'lecture':
                 continue
@@ -157,34 +172,56 @@ class RHPersonsBase(RHManageEventBase):
 
             if contributions or subcontributions:
                 data['roles']['speaker'] = BUILTIN_ROLES['speaker'].copy()
-                data['roles']['speaker']['elements'] = dict(contributions, **subcontributions)
+                data['roles']['speaker']['elements'] = contributions | subcontributions
+
+            author_contributions = {person_link.contribution.id: self.generate_contributions_data(person_link)
+                                    for person_link in event_person.contribution_links
+                                    if person_link.is_author and not person_link.contribution.is_deleted}
+
+            if author_contributions:
+                data['roles']['author'] = BUILTIN_ROLES['author'].copy()
+                data['roles']['author']['elements'] = author_contributions
 
             event_user_roles_data = {}
             for role in event_user_roles[event_person.user]:
-                event_user_roles_data['custom_{}'.format(role.id)] = {'name': role.name, 'code': role.code,
-                                                                      'css': role.css}
-            event_user_roles_data = OrderedDict(sorted(event_user_roles_data.items(), key=lambda t: t[1]['code']))
-            data['roles'] = OrderedDict(data['roles'].items() + event_user_roles_data.items())
+                event_user_roles_data[f'custom_{role.id}'] = {'name': role.name, 'code': role.code, 'css': role.css}
+            event_user_roles_data = dict(sorted(event_user_roles_data.items(), key=lambda t: t[1]['code']))
+            data['roles'] |= event_user_roles_data
 
             event_person_users.add(event_person.user)
 
-        internal_role_users = defaultdict(lambda: {'roles': OrderedDict(),
+        internal_role_users = defaultdict(lambda: {'roles': {},
                                                    'person': [],
+                                                   'registrations': [],
                                                    'has_event_person': False,
                                                    'id_field_name': 'user_id'})
-        for user, roles in event_user_roles.viewitems():
+        for user, roles in event_user_roles.items():
             if user in event_person_users:
                 continue
             for role in roles:
                 user_metadata = internal_role_users[user.email]
                 user_metadata['person'] = user
-                user_metadata['roles']['custom_{}'.format(role.id)] = {'name': role.name, 'code': role.code,
-                                                                       'css': role.css}
-            user_metadata['roles'] = OrderedDict(sorted(user_metadata['roles'].items(), key=lambda x: x[1]['code']))
+                user_metadata['roles'][f'custom_{role.id}'] = {'name': role.name, 'code': role.code, 'css': role.css}
+            user_metadata['roles'] = dict(sorted(user_metadata['roles'].items(), key=lambda x: x[1]['code']))
 
-        # Some EventPersons will have no roles since they were connected to deleted things
-        persons = {email: data for email, data in persons.viewitems() if any(data['roles'].viewvalues())}
-        persons = dict(persons, **internal_role_users)
+        regs = (Registration.query
+                .with_parent(self.event)
+                .join(Registration.registration_form)
+                .filter(Registration.user_id.in_(data['person'].id for data in internal_role_users.values()),
+                        Registration.is_active, ~RegistrationForm.is_deleted)
+                .all())
+        for reg in regs:
+            internal_role_users[reg.user.email]['registrations'].append(reg)
+
+        persons |= internal_role_users
+        # Some EventPersons will have no built-in roles since they were connected to deleted things
+        builtin_roles = set(BUILTIN_ROLES)
+        for person in persons:
+            roles = set(persons[person]['roles'].keys())
+            if not roles:
+                persons[person]['roles']['no_roles'] = True
+            if not roles & builtin_roles:
+                persons[person]['roles']['no_builtin_roles'] = True
         return persons
 
 
@@ -194,19 +231,22 @@ class RHPersonsList(RHPersonsBase):
                                  .filter(EventPrincipal.type == PrincipalType.email,
                                          EventPrincipal.has_management_permission('submit')))
 
-        contrib_principal_query = (ContributionPrincipal.find(Contribution.event == self.event,
-                                                              ContributionPrincipal.type == PrincipalType.email,
-                                                              ContributionPrincipal.has_management_permission('submit'))
+        contrib_principal_query = (ContributionPrincipal.query
+                                   .filter(Contribution.event == self.event,
+                                           ContributionPrincipal.type == PrincipalType.email,
+                                           ContributionPrincipal.has_management_permission('submit'))
                                    .join(Contribution)
                                    .options(contains_eager('contribution')))
 
-        session_principal_query = (SessionPrincipal.find(Session.event == self.event,
-                                                         SessionPrincipal.type == PrincipalType.email,
-                                                         SessionPrincipal.has_management_permission())
-                                   .join(Session).options(joinedload('session').joinedload('acl_entries')))
+        session_principal_query = (SessionPrincipal.query
+                                   .filter(Session.event == self.event,
+                                           SessionPrincipal.type == PrincipalType.email,
+                                           SessionPrincipal.has_management_permission())
+                                   .join(Session)
+                                   .options(joinedload('session').joinedload('acl_entries')))
 
         persons = self.get_persons()
-        person_list = sorted(persons.viewvalues(), key=lambda x: x['person'].display_full_name.lower())
+        person_list = sorted(persons.values(), key=lambda x: x['person'].display_full_name.lower())
 
         num_no_account = 0
         for principal in itertools.chain(event_principal_query, contrib_principal_query, session_principal_query):
@@ -215,72 +255,50 @@ class RHPersonsList(RHPersonsBase):
             if not persons[principal.email].get('no_account'):
                 persons[principal.email]['roles']['no_account'] = True
                 num_no_account += 1
-        custom_roles = {'custom_{}'.format(r.id): {'name': r.name, 'code': r.code, 'color': r.color}
+        custom_roles = {f'custom_{r.id}': {'name': r.name, 'code': r.code, 'color': r.color}
                         for r in self.event.roles}
+        for person_data in persons.values():
+            if not person_data['registrations']:
+                person_data['roles']['no_registration'] = True
+        has_predefined_affiliations = Affiliation.query.filter_by(is_deleted=False).has_rows()
+        allow_custom_affiliations = not user_management_settings.get('only_predefined_affiliations')
         return WPManagePersons.render_template('management/person_list.html', self.event, persons=person_list,
                                                num_no_account=num_no_account, builtin_roles=BUILTIN_ROLES,
-                                               custom_roles=custom_roles)
+                                               custom_roles=custom_roles, person_schema=EventPersonSchema(),
+                                               has_predefined_affiliations=has_predefined_affiliations,
+                                               allow_custom_affiliations=allow_custom_affiliations)
 
 
-class RHEmailEventPersons(RHManageEventBase):
-    """Send emails to selected EventPersons"""
+class RHAPIEmailEventPersonsUpload(UploadFileMixin, RHManageEventBase):
+    """Upload an attachment for an email to EventPersons."""
 
-    NOT_SANITIZED_FIELDS = {'from_address'}
+    PERMISSION = 'contributions'
 
-    def _process_args(self):
-        self.no_account = request.args.get('no_account') == '1'
+    def get_file_context(self):
+        return 'event', self.event.id, 'email-attachments'
+
+
+class RHEmailEventPersonsBase(RHManageEventBase):
+    """Send emails to selected EventPersons."""
+
+    PERMISSION = 'contributions'
+
+    @use_kwargs({
+        'role_id': fields.List(fields.Integer(), load_default=lambda: []),
+        'persons': fields.List(fields.String(), load_default=lambda: []),
+        'not_invited_only': fields.Bool(load_default=None),
+        'no_account': fields.Bool(load_default=False),
+    })
+    def _process_args(self, role_id, persons, not_invited_only, no_account):
         RHManageEventBase._process_args(self)
-
-    def _process(self):
-        person_ids = request.form.getlist('person_id')
-        user_ids = request.form.getlist('user_id')
-        role_ids = request.form.getlist('role_id')
-        recipients = set(self._find_event_persons(person_ids, request.args.get('not_invited_only') == '1'))
-        recipients |= set(self._find_users(user_ids))
-        recipients |= set(self._find_role_members(role_ids))
-        if self.no_account:
-            tpl = get_template_module('events/persons/emails/invitation.html', event=self.event)
-            disabled_until_change = False
-        else:
-            tpl = get_template_module('events/persons/emails/generic.html', event=self.event)
-            disabled_until_change = True
-        form = EmailEventPersonsForm(person_id=person_ids, user_id=user_ids,
-                                     recipients=sorted(x.email for x in recipients), body=tpl.get_html_body(),
-                                     subject=tpl.get_subject(), register_link=self.no_account, event=self.event)
-        if form.validate_on_submit():
-            self._send_emails(form, recipients)
-            num = len(recipients)
-            flash(ngettext('Your email has been sent.', '{} emails have been sent.', num).format(num))
-            return jsonify_data()
-        return jsonify_form(form, disabled_until_change=disabled_until_change, submit=_('Send'), back=_('Cancel'))
-
-    def _send_emails(self, form, recipients):
-        for recipient in recipients:
-            if self.no_account and isinstance(recipient, EventPerson):
-                recipient.invited_dt = now_utc()
-            email_body = replace_placeholders('event-persons-email', form.body.data, person=recipient,
-                                              event=self.event, register_link=self.no_account)
-            email_subject = replace_placeholders('event-persons-email', form.subject.data, person=recipient,
-                                                 event=self.event, register_link=self.no_account)
-            tpl = get_template_module('emails/custom.html', subject=email_subject, body=email_body)
-            bcc = [session.user.email] if form.copy_for_sender.data else []
-            email = make_email(to_list=recipient.email, bcc_list=bcc, from_address=form.from_address.data,
-                               template=tpl, html=True)
-            send_email(email, self.event, 'Event Persons')
-
-    def _find_event_persons(self, person_ids, not_invited_only):
-        if not person_ids:
-            return []
-        query = self.event.persons
-        query = query.filter(EventPerson.id.in_(person_ids), EventPerson.email != '')
+        principals = [principal_from_identifier(identifier, allow_event_persons=True, event_id=self.event.id)
+                      for identifier in persons]
         if not_invited_only:
-            query = query.filter(EventPerson.invited_dt.is_(None))
-        return query.all()
-
-    def _find_users(self, user_ids):
-        if not user_ids:
-            return []
-        return User.query.filter(User.id.in_(user_ids), User.email != '').all()
+            self.recipients = {p for p in principals if p.invited_dt is None}
+        else:
+            self.recipients = set(principals)
+        self.recipients |= set(self._find_role_members(role_id))
+        self.no_account = no_account
 
     def _find_role_members(self, role_ids):
         if not role_ids:
@@ -291,8 +309,79 @@ class RHEmailEventPersons(RHManageEventBase):
         return itertools.chain.from_iterable(role.members for role in query)
 
 
+class RHEmailEventPersonsPreview(RHEmailEventPersonsBase):
+    """Preview an email with EventPersons associated placeholders."""
+
+    @use_kwargs({
+        'body': fields.String(required=True),
+        'subject': fields.String(required=True, validate=validate.Length(max=200)),
+    })
+    def _process(self, body, subject):
+        person = next(iter(self.recipients)) if self.recipients else session.user
+        email_body = replace_placeholders('event-persons-email', body, event=self.event, person=person,
+                                          register_link=self.no_account)
+        email_subject = replace_placeholders('event-persons-email', subject, event=self.event, person=person,
+                                             register_link=self.no_account)
+        tpl = get_template_module('events/persons/emails/custom_email.html', email_subject=email_subject,
+                                  email_body=email_body)
+        return jsonify(subject=tpl.get_subject(), body=tpl.get_body())
+
+
+class RHAPIEmailEventPersonsMetadata(RHEmailEventPersonsBase):
+    def _process(self):
+        with self.event.force_event_locale():
+            if self.no_account:
+                tpl = get_template_module('events/persons/emails/invitation.html', event=self.event)
+            else:
+                tpl = get_template_module('events/persons/emails/generic.html', event=self.event)
+            body = tpl.get_html_body()
+            subject = tpl.get_subject()
+        placeholders = get_sorted_placeholders('event-persons-email', event=None, person=None,
+                                               register_link=self.no_account)
+        return jsonify({
+            'senders': list(self.event.get_allowed_sender_emails().items()),
+            'recipients': sorted(x.email for x in self.recipients),
+            'body': body,
+            'subject': subject,
+            'placeholders': [p.serialize(event=None, person=None) for p in placeholders],
+        })
+
+
+class RHAPIEmailEventPersonsSend(RHEmailEventPersonsBase):
+    @use_kwargs({
+        'sender_address': fields.String(required=True, validate=not_empty),
+        'body': fields.String(required=True, validate=[not_empty, no_relative_urls]),
+        'subject': fields.String(required=True, validate=[not_empty, validate.Length(max=200)]),
+        'bcc_addresses': fields.List(LowercaseString(validate=validate.Email())),
+        'copy_for_sender': fields.Bool(load_default=False),
+        'attachments': FilesField(load_default=lambda: []),
+    })
+    def _process(self, sender_address, body, subject, bcc_addresses, copy_for_sender, attachments):
+        if not (sender_address := self.event.get_verbose_email_sender(sender_address)):
+            abort(422, messages={'sender_address': ['Invalid sender address']})
+        email_attachments = [f.as_attachment() for f in attachments]
+        for recipient in self.recipients:
+            if self.no_account and isinstance(recipient, EventPerson):
+                recipient.invited_dt = now_utc()
+            email_body = replace_placeholders('event-persons-email', body, person=recipient,
+                                              event=self.event, register_link=self.no_account)
+            email_subject = replace_placeholders('event-persons-email', subject, person=recipient,
+                                                 event=self.event, register_link=self.no_account)
+            bcc = {session.user.email} if copy_for_sender else set()
+            bcc.update(bcc_addresses)
+            with self.event.force_event_locale():
+                tpl = get_template_module('emails/custom.html', subject=email_subject, body=email_body)
+                try:
+                    email = make_email(to_list=recipient.email, bcc_list=bcc, sender_address=sender_address,
+                                       template=tpl, html=True, attachments=email_attachments)
+                except ValueError as e:
+                    abort(422, messages={'attachments': [str(e)]})
+            send_email(email, self.event, 'Event Persons')
+        return jsonify(count=len(self.recipients))
+
+
 class RHGrantSubmissionRights(RHManageEventBase):
-    """Grants submission rights to all contribution speakers"""
+    """Grant submission rights to all contribution speakers."""
 
     def _process(self):
         count = 0
@@ -305,7 +394,7 @@ class RHGrantSubmissionRights(RHManageEventBase):
                 if principal:
                     cont.update_principal(principal, add_permissions={'submit'})
                     count += 1
-        self.event.log(EventLogRealm.management, EventLogKind.positive, 'Protection',
+        self.event.log(EventLogRealm.management, LogKind.positive, 'Protection',
                        'Contribution speakers have been granted with submission rights', session.user)
         flash(ngettext('Submission rights have been granted to one speaker',
                        'Submission rights have been granted to {} speakers', count).format(count))
@@ -313,7 +402,7 @@ class RHGrantSubmissionRights(RHManageEventBase):
 
 
 class RHGrantModificationRights(RHManageEventBase):
-    """Grants session modification rights to all session conveners"""
+    """Grant session modification rights to all session conveners."""
 
     def _process(self):
         count = 0
@@ -323,7 +412,7 @@ class RHGrantModificationRights(RHManageEventBase):
                 if principal:
                     sess.update_principal(principal, full_access=True)
                     count += 1
-        self.event.log(EventLogRealm.management, EventLogKind.positive, 'Protection',
+        self.event.log(EventLogRealm.management, LogKind.positive, 'Protection',
                        'Modification rights have been granted to all session conveners', session.user)
         flash(ngettext('Session modification rights have been granted to one session convener',
                        'Session modification rights have been granted to {} session conveners', count).format(count))
@@ -331,7 +420,7 @@ class RHGrantModificationRights(RHManageEventBase):
 
 
 class RHRevokeSubmissionRights(RHManageEventBase):
-    """Revokes submission rights"""
+    """Revoke submission rights."""
 
     def _process(self):
         count = 0
@@ -342,23 +431,122 @@ class RHRevokeSubmissionRights(RHManageEventBase):
         for entry in set(self.event.acl_entries):
             self.event.update_principal(entry.principal, del_permissions={'submit'})
             count += 1
-        self.event.log(EventLogRealm.management, EventLogKind.negative, 'Protection',
+        self.event.log(EventLogRealm.management, LogKind.negative, 'Protection',
                        'Submission privileges have been revoked from event submitters', session.user)
         flash(ngettext('Submission rights have been revoked from one user',
                        'Submission rights have been revoked from {} users', count).format(count))
         return redirect(url_for('.person_list', self.event))
 
 
-class RHEditEventPerson(RHPersonsBase):
+class RHEventPersonActionBase(RHPersonsBase):
     def _process_args(self):
         RHPersonsBase._process_args(self)
         self.person = EventPerson.query.with_parent(self.event).filter_by(id=request.view_args['person_id']).one()
 
+
+class RHUpdateEventPerson(RHEventPersonActionBase):
+    @use_args(EventPersonUpdateSchema, partial=True)
+    def _process(self, args):
+        update_person(self.person, args)
+        person_data = self.get_persons()[self.person.email or self.person.id]
+        tpl = get_template_module('events/persons/management/_person_list_row.html')
+        allow_custom_affiliations = not user_management_settings.get('only_predefined_affiliations')
+        return jsonify(html=tpl.render_person_row(person_data, bool(self.event.registration_forms),
+                                                  EventPersonSchema(), Affiliation.query.has_rows(),
+                                                  allow_custom_affiliations))
+
+
+class RHDeleteUnusedEventPerson(RHEventPersonActionBase):
     def _process(self):
-        form = EventPersonForm(obj=FormDefaults(self.person, skip_attrs={'title'}, title=self.person._title))
-        if form.validate_on_submit():
-            update_person(self.person, form.data)
-            person_data = self.get_persons()[self.person.email or self.person.id]
-            tpl = get_template_module('events/persons/management/_person_list_row.html')
-            return jsonify_data(html=tpl.render_person_row(person_data, bool(self.event.registration_forms)))
-        return jsonify_form(form)
+        if self.person.has_links:
+            raise Forbidden(_('Only users with no ties to the event can be deleted.'))
+        db.session.delete(self.person)
+        logger.info('EventPerson deleted from event %r: %r', self.event, self.person)
+        return jsonify_data()
+
+
+class RHSyncEventPerson(RHEventPersonActionBase):
+    def _process(self):
+        if not self.person.user:
+            raise Forbidden(_('Persons with no associated users cannot be synced.'))
+        self.person.sync_user(notify=False)
+        logger.info('EventPerson synced with user in event %r: %r', self.event, self.person)
+        person_data = self.get_persons()[self.person.email or self.person.id]
+        tpl = get_template_module('events/persons/management/_person_list_row.html')
+        allow_custom_affiliations = not user_management_settings.get('only_predefined_affiliations')
+        return jsonify_data(html=tpl.render_person_row(person_data, bool(self.event.registration_forms),
+                                                       EventPersonSchema(), Affiliation.query.has_rows(),
+                                                       allow_custom_affiliations))
+
+
+class RHEventPersonSearch(RHAuthenticatedEventBase):
+    @use_kwargs({
+        'token': fields.String(load_default=''),
+    }, location='query')
+    def _check_access(self, token):
+        RHAuthenticatedEventBase._check_access(self)
+        validate_search_token(token, session.user)
+
+    def _search_event_persons(self, exact=False, **criteria):
+        criteria = {key: v for key, value in criteria.items() if (v := value.strip())}
+
+        if not criteria:
+            return []
+
+        query = EventPerson.query.distinct(EventPerson.id).filter(EventPerson.event_id == self.event.id)
+
+        query = query.filter(
+            or_(
+                EventPerson.abstract_links.any(AbstractPersonLink.abstract.has(~Abstract.is_deleted)),
+                EventPerson.contribution_links.any(ContributionPersonLink.contribution.has(~Contribution.is_deleted)),
+                EventPerson.event_links.any(),
+                EventPerson.subcontribution_links.any(
+                    SubContributionPersonLink.subcontribution.has(
+                        and_(~SubContribution.is_deleted, SubContribution.contribution.has(~Contribution.is_deleted))
+                    )
+                ),
+                EventPerson.session_block_links.any(),
+            )
+        )
+
+        for k, v in criteria.items():
+            query = query.filter(unaccent_match(getattr(EventPerson, k), v, exact))
+
+        # wrap as subquery so we can apply order regardless of distinct-by-id
+        query = query.from_self()
+        query = query.order_by(
+            db.func.lower(db.func.indico.indico_unaccent(EventPerson.first_name)),
+            db.func.lower(db.func.indico.indico_unaccent(EventPerson.last_name)),
+            EventPerson.id,
+        )
+        return query.limit(10).all(), query.count()
+
+    @use_kwargs({
+        'first_name': fields.Str(validate=validate.Length(min=1)),
+        'last_name': fields.Str(validate=validate.Length(min=1)),
+        'email': fields.Str(validate=lambda s: len(s) > 3),
+        'affiliation': fields.Str(validate=validate.Length(min=1)),
+        'exact': fields.Bool(load_default=False),
+    }, validate=validate_with_message(
+        lambda args: args.keys() & {'first_name', 'last_name', 'email', 'affiliation'},
+        'No criteria provided'
+    ), location='query')
+    def _process(self, exact, **criteria):
+        matches, total = self._search_event_persons(exact=exact, **criteria)
+        return jsonify(
+            users=EventPersonSchema(only=EventPersonSchema.Meta.public_fields).dump(matches, many=True),
+            total=total
+        )
+
+
+class RHManagePersonLists(EditEventSettingsMixin, RHManageEventBase):
+    """Dialog to configure person list settings."""
+
+    settings_proxy = persons_settings
+    form_cls = ManagePersonListsForm
+    success_message = _('Person lists settings changed successfully')
+    log_module = 'Persons'
+    log_message = 'Settings updated'
+    log_fields = {'custom_persons_mode': 'Allow custom persons',
+                  'default_search_external': 'Include users with no Indico account by default',
+                  'show_titles': 'Show person titles'}

@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 
@@ -23,6 +12,7 @@ from indico.modules.events.models.persons import EventPerson
 
 @pytest.fixture
 def create_event_person(db):
+    """Return a callable which lets you create event persons."""
     def _create(event, user=None, first_name=None, last_name=None, email=None, affiliation=None, title=None):
         person = EventPerson(event=event,
                              user=user,
@@ -30,8 +20,14 @@ def create_event_person(db):
                              last_name=last_name or user.last_name,
                              email=email or user.email,
                              affiliation=affiliation or user.affiliation,
-                             title=title or user.title)
+                             title=title or user._title)
         db.session.add(person)
         db.session.flush()
         return person
     return _create
+
+
+@pytest.fixture
+def dummy_event_person(dummy_event, dummy_user, create_event_person):
+    """Create a dummy event person."""
+    return create_event_person(dummy_event, dummy_user)

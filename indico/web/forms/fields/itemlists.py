@@ -1,26 +1,15 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import json
 import uuid
 
 from markupsafe import escape
-from wtforms import HiddenField
+from wtforms import HiddenField, ValidationError
 
 from indico.web.forms.fields.util import is_preprocessed_formdata
 from indico.web.forms.widgets import JinjaWidget
@@ -49,7 +38,7 @@ class MultiStringField(HiddenField):
         self.uuid_field = kwargs.pop('uuid_field', None)
         if self.flat and self.uuid_field:
             raise ValueError('`uuid_field` and `flat` are mutually exclusive')
-        super(MultiStringField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def process_formdata(self, valuelist):
         if is_preprocessed_formdata(valuelist):
@@ -59,22 +48,22 @@ class MultiStringField(HiddenField):
             if self.uuid_field:
                 for item in self.data:
                     if self.uuid_field not in item:
-                        item[self.uuid_field] = unicode(uuid.uuid4())
+                        item[self.uuid_field] = str(uuid.uuid4())
 
     def pre_validate(self, form):
         try:
             if not all(isinstance(item, dict) for item in self.data):
-                raise ValueError('Invalid data. Expected list of dicts.')
+                raise ValidationError('Invalid data. Expected list of dicts.')
             if self.unique:
                 unique_values = {item[self.field_name] for item in self.data}
                 if len(unique_values) != len(self.data):
-                    raise ValueError('Items must be unique')
+                    raise ValidationError('Items must be unique')
             if self.uuid_field:
                 unique_uuids = {uuid.UUID(item[self.uuid_field], version=4) for item in self.data}
                 if len(unique_uuids) != len(self.data):
-                    raise ValueError('UUIDs must be unique')
+                    raise ValidationError('UUIDs must be unique')
             if not all(item[self.field_name].strip() for item in self.data):
-                raise ValueError('Empty items are not allowed')
+                raise ValidationError('Empty items are not allowed')
         finally:
             if self.flat:
                 self.data = [x[self.field_name] for x in self.data]
@@ -115,7 +104,7 @@ class MultipleItemsField(HiddenField):
     :param sortable: Whether items should be sortable.
     """
 
-    widget = JinjaWidget('forms/multiple_items_widget.html')
+    widget = JinjaWidget('forms/multiple_items_widget.html', single_kwargs=True)
 
     def __init__(self, *args, **kwargs):
         self.fields = getattr(self, 'fields', None) or kwargs.pop('fields')
@@ -129,7 +118,7 @@ class MultipleItemsField(HiddenField):
             assert self.uuid_field != self.unique_field
             assert self.uuid_field not in self.fields
         self.field_names = {item['id']: item['caption'] for item in self.fields}
-        super(MultipleItemsField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def process_formdata(self, valuelist):
         if is_preprocessed_formdata(valuelist):
@@ -141,7 +130,7 @@ class MultipleItemsField(HiddenField):
             if self.uuid_field and not self.uuid_field_opaque:
                 for item in self.data:
                     if self.uuid_field not in item:
-                        item[self.uuid_field] = unicode(uuid.uuid4())
+                        item[self.uuid_field] = str(uuid.uuid4())
 
     def pre_validate(self, form):
         unique_used = set()
@@ -149,28 +138,30 @@ class MultipleItemsField(HiddenField):
         coercions = {f['id']: f['coerce'] for f in self.fields if f.get('coerce') is not None}
         for i, item in enumerate(self.serialized_data):
             if not isinstance(item, dict):
-                raise ValueError('Invalid item type: {}'.format(type(item).__name__))
+                raise ValidationError(f'Invalid item type: {type(item).__name__}')
             item_keys = set(item)
             if self.uuid_field:
                 item_keys.discard(self.uuid_field)
             if item_keys != {x['id'] for x in self.fields}:
-                raise ValueError('Invalid item (bad keys): {}'.format(escape(', '.join(item.viewkeys()))))
+                raise ValidationError('Invalid item (bad keys): {}'.format(escape(', '.join(item.keys()))))
             if self.unique_field:
                 if item[self.unique_field] in unique_used:
-                    raise ValueError('{} must be unique'.format(self.field_names[self.unique_field]))
+                    raise ValidationError(f'{self.field_names[self.unique_field]} must be unique')
                 unique_used.add(item[self.unique_field])
             if self.uuid_field and not self.uuid_field_opaque:
                 if item[self.uuid_field] in uuid_used:
-                    raise ValueError('UUID must be unique')
+                    raise ValidationError('UUID must be unique')
                 # raises ValueError if uuid is invalid
-                uuid.UUID(item[self.uuid_field], version=4)
+                try:
+                    uuid.UUID(item[self.uuid_field], version=4)
+                except ValueError:
+                    raise ValidationError('Invalid UUID')
                 uuid_used.add(item[self.uuid_field])
-            for key, fn in coercions.viewitems():
+            for key, fn in coercions.items():
                 try:
                     self.data[i][key] = fn(self.data[i][key])
-                except ValueError:
-                    raise ValueError(u"Invalid value for field '{}': {}".format(self.field_names[key],
-                                                                                escape(item[key])))
+                except ValidationError:
+                    raise ValidationError(f"Invalid value for field '{self.field_names[key]}': {escape(item[key])}")
 
     def _value(self):
         return self.data or []
@@ -178,7 +169,7 @@ class MultipleItemsField(HiddenField):
     @property
     def _field_spec(self):
         # Field data for the widget; skip non-json-serializable data
-        return [{k: v for k, v in field.iteritems() if k != 'coerce'}
+        return [{k: v for k, v in field.items() if k != 'coerce'}
                 for field in self.fields]
 
 
@@ -202,7 +193,7 @@ class OverrideMultipleItemsField(HiddenField):
         self.field_data = kwargs.pop('field_data', None)  # usually set after creating the form instance
         self.unique_field = kwargs.pop('unique_field')
         self.edit_fields = set(kwargs.pop('edit_fields'))
-        super(OverrideMultipleItemsField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def process_formdata(self, valuelist):
         if is_preprocessed_formdata(valuelist):
@@ -217,12 +208,12 @@ class OverrideMultipleItemsField(HiddenField):
                 # e.g. a row removed from field_data that had a value before
                 del self.data[key]
                 continue
-            if set(values.viewkeys()) > self.edit_fields:
+            if set(values.keys()) > self.edit_fields:
                 # e.g. a field that was editable before
-                self.data[key] = {k: v for k, v in values.iteritems() if k in self.edit_fields}
+                self.data[key] = {k: v for k, v in values.items() if k in self.edit_fields}
         # Remove anything empty
-        for key, values in self.data.items():
-            for field, value in values.items():
+        for key, values in list(self.data.items()):
+            for field, value in list(values.items()):
                 if not value:
                     del values[field]
             if not self.data[key]:
@@ -232,10 +223,10 @@ class OverrideMultipleItemsField(HiddenField):
         return self.data or {}
 
     def get_overridden_value(self, row, name):
-        """Utility for the widget to get the entered value for an editable field"""
+        """Utility for the widget to get the entered value for an editable field."""
         key = self.get_row_key(row)
         return self._value().get(key, {}).get(name, '')
 
     def get_row_key(self, row):
-        """Utility for the widget to get the unique value for a row"""
+        """Utility for the widget to get the unique value for a row."""
         return row[self.unique_field]

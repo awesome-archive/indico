@@ -1,24 +1,12 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db import db
-from indico.core.db.sqlalchemy.util.models import get_simple_column_attrs
-from indico.modules.events.cloning import EventCloner
+from indico.modules.events.cloning import EventCloner, get_attrs_to_clone
 from indico.modules.events.features.util import is_feature_enabled
 from indico.modules.events.layout import layout_settings
 from indico.modules.events.layout.models.menu import EventPage, MenuEntry
@@ -36,14 +24,18 @@ class ImageCloner(EventCloner):
 
     @property
     def is_available(self):
-        return self._find_images().has_rows()
+        return self._find_images(self.old_event).has_rows()
 
-    def _find_images(self):
-        return self.old_event.layout_images
+    def get_conflicts(self, target_event):
+        if self._find_images(target_event).has_rows():
+            return [_('The target event already has images')]
 
-    def run(self, new_event, cloners, shared_data):
+    def _find_images(self, event):
+        return event.layout_images
+
+    def run(self, new_event, cloners, shared_data, event_exists=False):
         from indico.modules.events.layout.models.images import ImageFile
-        for old_image in self._find_images():
+        for old_image in self._find_images(self.old_event):
             new_image = ImageFile(filename=old_image.filename, content_type=old_image.content_type)
             new_event.layout_images.append(new_image)
             with old_image.open() as fd:
@@ -54,14 +46,16 @@ class ImageCloner(EventCloner):
 class LayoutCloner(EventCloner):
     name = 'layout'
     friendly_name = _('Layout settings and menu customization')
+    new_event_only = True
 
     @property
     def is_visible(self):
         return self.old_event.type_ == EventType.conference
 
-    def run(self, new_event, cloners, shared_data):
-        for col in ('logo_metadata', 'logo', 'stylesheet_metadata', 'stylesheet'):
-            setattr(new_event, col, getattr(self.old_event, col))
+    def run(self, new_event, cloners, shared_data, event_exists=False):
+        with db.session.no_autoflush:
+            for col in ('logo_metadata', 'logo', 'stylesheet_metadata', 'stylesheet'):
+                setattr(new_event, col, getattr(self.old_event, col))
 
         layout_settings.set_multi(new_event, layout_settings.get_all(self.old_event, no_defaults=True))
         if layout_settings.get(self.old_event, 'use_custom_menu'):
@@ -70,7 +64,7 @@ class LayoutCloner(EventCloner):
         db.session.flush()
 
     def _copy_menu_entry(self, menu_entry, new_event, parent=None, include_children=True):
-        base_columns = get_simple_column_attrs(MenuEntry)
+        base_columns = get_attrs_to_clone(MenuEntry)
         new_menu_entry = MenuEntry(**{col: getattr(menu_entry, col) for col in base_columns})
         if menu_entry.is_page:
             with db.session.no_autoflush:  # menu_entry.page is lazy-loaded

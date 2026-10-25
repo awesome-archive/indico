@@ -1,26 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
+import json
 import operator
+import os
 import re
-from itertools import imap, product
+from email import message_from_string
+from email.policy import SMTPUTF8
+from itertools import product
+
+import yaml
 
 
 def bool_matrix(template, mask=None, expect=None):
-    """Creates a boolean matrix suitable for parametrized tests.
+    """Create a boolean matrix suitable for parametrized tests.
 
     This function lets you create a boolean matrix with certain columns being
     fixed to a static value or certain combinations being skipped. It also adds
@@ -79,14 +76,14 @@ def bool_matrix(template, mask=None, expect=None):
             raise ValueError('cannot combine ! with mask')
         if len(mask) != len(template):
             raise ValueError('mask length differs from template length')
-        if any(x != '.' and y != '.' for x, y in zip(template, mask)):
+        if any(x != '.' and y != '.' for x, y in zip(template, mask, strict=True)):
             raise ValueError('mask cannot have a value for a fixed column')
     else:
         mask = '.' * len(template)
 
     mapping = {'0': False, '1': True, '.': None}
-    template = tuple(imap(mapping.__getitem__, template))
-    mask = tuple(imap(mapping.__getitem__, mask))
+    template = tuple(map(mapping.__getitem__, template))
+    mask = tuple(map(mapping.__getitem__, mask))
     # full truth table
     iterable = product((True, False), repeat=len(template))
     if exclude_all:
@@ -102,15 +99,15 @@ def bool_matrix(template, mask=None, expect=None):
     if expect is None:
         pass
     elif expect == 'any_dynamic':
-        iterable = (x + (any(y for i, y in enumerate(x) if template[i] is None),) for x in iterable)
+        iterable = ((*x, any(y for i, y in enumerate(x) if template[i] is None)) for x in iterable)
     elif expect == 'all_dynamic':
-        iterable = (x + (all(y for i, y in enumerate(x) if template[i] is None),) for x in iterable)
+        iterable = ((*x, all(y for i, y in enumerate(x) if template[i] is None)) for x in iterable)
     elif callable(expect):
-        iterable = (x + (expect(x),) for x in iterable)
+        iterable = ((*x, expect(x)) for x in iterable)
     elif isinstance(expect, (tuple, list)):
-        iterable = (x + (x == expect,) for x in iterable)
+        iterable = ((*x, x == expect) for x in iterable)
     else:
-        iterable = (x + (expect,) for x in iterable)
+        iterable = ((*x, expect) for x in iterable)
     matrix = tuple(iterable)
     if not matrix:
         raise ValueError('empty matrix')
@@ -118,7 +115,7 @@ def bool_matrix(template, mask=None, expect=None):
 
 
 def extract_emails(smtp, required=True, count=None, one=False, regex=False, **kwargs):
-    """Extracts emails from an smtp outbox.
+    """Extract emails from an smtp outbox.
 
     :param smtp: The `smtp` fixture from the testcase
     :param required: Fail if no matching emails were found
@@ -134,26 +131,28 @@ def extract_emails(smtp, required=True, count=None, one=False, regex=False, **kw
         count = 1
     compare = re.search if regex else operator.eq
     found = []
+    orig_found = set()
     for mail in smtp.outbox:
-        for header, value in kwargs.iteritems():
-            if not compare(value, mail[header]):
+        parsed_mail = message_from_string(str(mail), policy=SMTPUTF8)
+        for header, value in kwargs.items():
+            if not compare(value, parsed_mail[header]):
                 break
         else:  # everything matched
-            found.append(mail)
-    found_set = set(found)
-    smtp.outbox = [mail for mail in smtp.outbox if mail not in found_set]
+            found.append(parsed_mail)
+            orig_found.add(mail)
+    smtp.handler.outbox = [mail for mail in smtp.handler.outbox if mail not in orig_found]
     __tracebackhide__ = True
     if required:
         assert found, 'No matching emails found'
     if count is not None:
-        assert len(found) == count, 'Expected {} emails, got {}'.format(count, len(found))
+        assert len(found) == count, f'Expected {count} emails, got {len(found)}'
     if one:
         return found[0] if found else None
     return found
 
 
 def extract_logs(caplog, required=True, count=None, one=False, regex=False, **kwargs):
-    """Extracts log records from python's logging system.
+    """Extract log records from python's logging system.
 
     :param caplog: The `caplog` fixture from the testcase
     :param required: Fail if no matching records were found
@@ -170,7 +169,7 @@ def extract_logs(caplog, required=True, count=None, one=False, regex=False, **kw
     compare = re.search if regex else operator.eq
     found = []
     for record in caplog.handler.records:
-        for key, value in kwargs.iteritems():
+        for key, value in kwargs.items():
             if not compare(value, getattr(record, key)):
                 break
         else:  # everything matched
@@ -181,7 +180,86 @@ def extract_logs(caplog, required=True, count=None, one=False, regex=False, **kw
     if required:
         assert found, 'No matching records found'
     if count is not None:
-        assert len(found) == count, 'Expected {} records, got {}'.format(count, len(found))
+        assert len(found) == count, f'Expected {count} records, got {len(found)}'
     if one:
         return found[0] if found else None
     return found
+
+
+def _strip_html_whitespace(content):
+    """Remove trailing/leading whitespace in each line of the input content."""
+    return '\n'.join(stripped for line in content.splitlines() if (stripped := line.strip()))
+
+
+def assert_email_snapshot(snapshot, template, snapshot_filename, *, html=False):
+    """Assert that an email matches a snapshot.
+
+    This verifies that both the subject and the body match the snapshots.
+
+    :param snapshot: The pytest snapshot fixture
+    :param template: The email template module
+    :param snapshot_filename: The filename for the snapshot
+    :param html: Whether the template is HTML
+    """
+    body = template.get_body()
+    if html:
+        # we add a trailing linebreak to make manually editing the snapshot easier
+        body = _strip_html_whitespace(body) + '\n'
+    subject = template.get_subject()
+    name, ext = os.path.splitext(snapshot_filename)
+    snapshot_filename_subject = f'{name}.subject{ext}'
+    __tracebackhide__ = True
+    assert '\n' not in subject
+    snapshot.assert_match(body, snapshot_filename)
+    # we add a trailing linebreak so make manually editing the snapshot easier
+    snapshot.assert_match(subject + '\n', snapshot_filename_subject)
+
+
+def assert_string_snapshot(snapshot, string, snapshot_filename):
+    """Assert that a string matches a snapshot.
+
+    This is intended for single-line strings which do not have their own trailing linebreak.
+
+    :param snapshot: The pytest snapshot fixture
+    :param obj: The string to compare
+    :param snapshot_filename: The filename for the snapshot
+    """
+    __tracebackhide__ = True
+    snapshot.assert_match(f'{string}\n', snapshot_filename)
+
+
+def assert_json_snapshot(snapshot, obj, snapshot_filename):
+    """Assert that a json object matches a snapshot.
+
+    :param snapshot: The pytest snapshot fixture
+    :param obj: The json object to compare
+    :param snapshot_filename: The filename for the snapshot
+    """
+    __tracebackhide__ = True
+    snapshot.assert_match(json.dumps(obj, indent=2, sort_keys=True) + '\n', snapshot_filename)
+
+
+def assert_yaml_snapshot(snapshot, obj, snapshot_filename, *, strip_dynamic_data=False):
+    """Assert that a yaml object matches a snapshot.
+
+    :param snapshot: The pytest snapshot fixture
+    :param obj: The yaml object to compare
+    :param snapshot_filename: The filename for the snapshot
+    :param strip_dynamic_data: Whether to replace likely-dynamic data like IDs and
+                               dates with placeholders
+    """
+    dumped = yaml.dump(obj)
+    if strip_dynamic_data:
+        dumped = remove_dynamic_data(dumped)
+    __tracebackhide__ = True
+    snapshot.assert_match(dumped, snapshot_filename)
+
+
+def remove_dynamic_data(yaml_string):
+    """Remove data that appears dynamic (IDs, dates) from a YAML string."""
+    yaml_string = re.sub(r'(?<=_date: )(?!null$).+$', '<timestamp>', yaml_string, flags=re.MULTILINE)
+    yaml_string = re.sub(r'(?<=_dt: )(?!null$).+$', '<timestamp>', yaml_string, flags=re.MULTILINE)
+    yaml_string = re.sub(r'(?<=: )[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', '<uuid>',
+                         yaml_string, flags=re.MULTILINE)
+    yaml_string = re.sub(r'(?<=_id: )(?!null$).+$', '<id>', yaml_string, flags=re.MULTILINE)
+    return re.sub(r'(?<=\bid: )(?!null$).+$', '<id>', yaml_string, flags=re.MULTILINE)

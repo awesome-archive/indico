@@ -1,35 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+import functools
+import hashlib
+import re
 
 import bcrypt
+import requests
+
+from indico.core.config import config
+from indico.util.i18n import _
 
 
-class BCryptPassword(object):
-    def __init__(self, hash_):
-        self.hash = str(hash_)
+class BCryptPassword:
+    def __init__(self, pwhash):
+        if pwhash is not None and not isinstance(pwhash, str):
+            raise TypeError(f'pwhash must be str or None, not {type(pwhash)}')
+        self.hash = pwhash
 
     def __eq__(self, value):
         if not self.hash or not value:
             # For security reasons we never consider an empty password/hash valid
             return False
-        if isinstance(value, unicode):
-            value = value.encode('utf-8')
-        return bcrypt.checkpw(value, self.hash)
+        if not isinstance(value, str):
+            raise TypeError(f'password must be str, not {type(value)}')
+        # we truncate to avoid bcrypt failing loudly (it previously truncated).
+        # our secure password check considers such a password bad and forces the
+        # user to change it nonetheless
+        return bcrypt.checkpw(value.encode()[:72], self.hash.encode())
 
     def __ne__(self, other):
         return not (self == other)
@@ -38,17 +40,46 @@ class BCryptPassword(object):
         return hash(self.hash)
 
     def __repr__(self):
-        return '<BCryptPassword({})>'.format(self.hash)
+        return f'<BCryptPassword({self.hash})>'
 
     @staticmethod
-    def hash(value):
-        if isinstance(value, unicode):
-            value = value.encode('utf-8')
-        return bcrypt.hashpw(value, bcrypt.gensalt())
+    def create_hash(value):
+        return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
 
 
-class PasswordProperty(object):
-    """Defines a hashed password property.
+class SHA256Token:
+    def __init__(self, pwhash):
+        if pwhash is not None and not isinstance(pwhash, str):
+            raise TypeError(f'pwhash must be str or None, not {type(pwhash)}')
+        self.hash = pwhash
+
+    def __eq__(self, value):
+        if not self.hash or not value:
+            # For security reasons we never consider an empty password/hash valid
+            return False
+        if not isinstance(value, str):
+            raise TypeError(f'password must be str, not {type(value)}')
+        return hashlib.sha256(value.encode()).hexdigest() == self.hash
+
+    def __ne__(self, other):
+        return not (self == other)
+
+    def __hash__(self):  # pragma: no cover
+        return hash(self.hash)
+
+    def __repr__(self):
+        return f'<SHA256Token({self.hash})>'
+
+    def __str__(self):
+        raise RuntimeError('Hashed tokens have no string representation')
+
+    @staticmethod
+    def create_hash(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
+
+class PasswordProperty:
+    """Define a hashed password property.
 
     When reading this property, it will return an object which will
     let you use the ``==`` operator to compare  the password against
@@ -71,7 +102,106 @@ class PasswordProperty(object):
     def __set__(self, instance, value):
         if not value:
             raise ValueError('Password may not be empty')
-        setattr(instance, self.attr, self.backend.hash(value))
+        setattr(instance, self.attr, self.backend.create_hash(value))
 
     def __delete__(self, instance):
         setattr(instance, self.attr, None)
+
+
+class TokenProperty(PasswordProperty):
+    """Similar to `PasswordProperty` but tailored towards API tokens.
+
+    Since tokens are used much more often than passwords, they use
+    a fast hash algorithm instead of a secure one. This is not a
+    problem for tokens as they are fully random and much longer
+    than the typical password or even passphrase.
+    """
+
+    def __init__(self, attr):
+        super().__init__(attr, backend=SHA256Token)
+
+    def __set__(self, instance, value):
+        if len(value) < 30:
+            raise ValueError('Token is too short')
+        super().__set__(instance, value)
+
+
+@functools.lru_cache
+def _get_pwned_hashes(prefix, timeout=1):
+    try:
+        resp = requests.get(f'https://api.pwnedpasswords.com/range/{prefix}', timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    return {x.split(':', 1)[0] for x in resp.text.splitlines() if not x.endswith(':0')}
+
+
+def check_password_pwned(password, *, fast=False):
+    """Check if a password is in the pwned-passwords list.
+
+    :param password: The plaintext password
+    :param fast: Whether the check should finish quickly, even if that may
+                 indicate not being able to check the password. This should
+                 be used during interactive requests
+    :return: A bool indicating whether the password has been pwned or not,
+             or `None` in case checking it was not possible.
+    """
+    timeout = 1 if fast else 3
+    sha = hashlib.sha1(password.encode()).hexdigest().upper()
+    hashes = _get_pwned_hashes(sha[:5], timeout)
+    if hashes is None:
+        return None
+    return sha[5:] in hashes
+
+
+def validate_secure_password(context, password, *, username='', emails=frozenset(), fast=False):
+    """Check if a password is considered secure.
+
+    A password is considered secure if it:
+
+    - is at least :data:`LOCAL_PASSWORD_MIN_LENGTH` characters long
+    - does not contain the username unless the username is <5 chars and the password is >16 chars long
+    - does not contain the strings 'indico' (or common variations)
+    - is not in the pwned password list
+
+    :param context: A string indicating the context where the password is used
+    :param password: The plaintext password
+    :param username: The corresponding username (may be empty if not applicable)
+    :param emails: A set of email addresses (that may not be in the password)
+    :param fast: Whether the check should finish quickly, even if that may
+                 indicate not being able to check the password against the list
+                 of pwned passwords. This should be used during interactive requests
+                 where slowdowns are generally frowned upon (e.g. during login).
+    :return: A string indicating why the password is bad, or `None if it's secure.
+    """
+    from indico.core import signals
+    from indico.util.signals import values_from_signal
+
+    # See https://pages.nist.gov/800-63-3/sp800-63b.html#-511-memorized-secrets for some useful
+    # guidelines for passwords. Ideally we would also perform a dictionary check, but unless we
+    # rely on someone installing OS packages with dictionaries we don't have one available, and
+    # there's a good chance that single dictionary words are already included in the pwned password
+    # list.
+
+    if errors := values_from_signal(signals.core.check_password_secure.send(context, username=username,
+                                                                            password=password),
+                                    as_list=True):
+        return errors[0]
+
+    if len(password) < config.LOCAL_PASSWORD_MIN_LENGTH:
+        return _('Passwords must be at least {} characters long.').format(config.LOCAL_PASSWORD_MIN_LENGTH)
+
+    if len(password.encode()) > 72:  # encode to bytes since that's what bcrypt checks
+        return _('Passwords cannot be longer than 72 characters')
+
+    if re.search(r'[i1|]nd[1i|]c[o0]', password.lower()):
+        return _('Passwords may not contain the word "indico" or variations.')
+
+    if len(username) >= 5 and len(password) <= 16 and username.lower() in password.lower():
+        return _('Passwords may not contain your username.')
+
+    if any(x in password for x in emails):
+        return _('Passwords may not contain your email address.')
+
+    if check_password_pwned(password, fast=fast):
+        return _('This password has been seen in previous data breaches.')

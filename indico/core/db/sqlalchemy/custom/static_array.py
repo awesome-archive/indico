@@ -1,11 +1,16 @@
+# This file is part of Indico.
+# Copyright (C) 2002 - 2026 CERN
+#
+# Indico is free software; you can redistribute it and/or
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
+
 # Based on https://groups.google.com/d/topic/sqlalchemy/cQ9e9IVOykE/discussion
 # By David Gardner (dgardner@creatureshop.com)
 
-"""
-StaticArray class and functions that SQLAlchemy can process instead of non hashable lists
-"""
+"""StaticArray class and functions that SQLAlchemy can process instead of non hashable lists."""
 
-from cStringIO import StringIO
+from io import StringIO
 
 from sqlalchemy import String, types
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -16,9 +21,10 @@ from sqlalchemy.sql import expression
 
 class StaticArray(types.TypeDecorator):
     impl = types.TypeEngine
+    cache_ok = True
 
     def __init__(self):
-        super(StaticArray, self).__init__()
+        super().__init__()
         self.__supported = {PGDialect: ARRAY}
 
     def load_dialect_impl(self, dialect):

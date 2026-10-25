@@ -1,55 +1,40 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
 .clearableinput {
-    display: flex;
-    align-items: center;
-    position: relative;
+  display: flex;
+  align-items: center;
+  position: relative;
 
-    .clearabletext {
-        padding-right: 1.7em !important;
+  .clearabletext {
+    padding-right: 1.7em !important;
 
-        &.actionabletext {
-            padding-right: 3.1em !important;
-            word-break: break-all;
-        }
-
-        &::-webkit-search-cancel-button {
-            display: none;
-        }
+    &::-webkit-search-cancel-button {
+      display: none;
     }
+  }
 
-    .button-box {
-        position: absolute;
-        padding: 0 2px;
-        right: 0;
-        height: 1.1em;
+  .button-box {
+    position: absolute;
+    padding: 0 2px;
+    right: 0;
+    height: 1.1em;
 
-        a.i-link {
-            padding-left: 2px;
-            visibility: hidden;
+    a.i-link {
+      padding-left: 2px;
+      visibility: hidden;
 
-            &::before {
-                font-size: 1.1em;
-            }
+      &::before {
+        font-size: 1.1em;
+      }
 
-            &:last-child {
-                padding-right: 2px;
-            }
-        }
+      &:last-child {
+        padding-right: 2px;
+      }
     }
+  }
 }

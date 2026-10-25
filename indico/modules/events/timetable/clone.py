@@ -1,29 +1,17 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.orm import defaultload, joinedload
 
 from indico.core.db import db
-from indico.core.db.sqlalchemy.util.models import get_simple_column_attrs
-from indico.modules.events.cloning import EventCloner
+from indico.modules.events.cloning import EventCloner, get_attrs_to_clone
 from indico.modules.events.models.events import EventType
 from indico.modules.events.timetable.models.breaks import Break
-from indico.modules.events.timetable.models.entries import TimetableEntry
+from indico.modules.events.timetable.models.entries import TimetableEntry, TimetableEntryType
 from indico.util.i18n import _
 
 
@@ -34,7 +22,7 @@ class TimetableCloner(EventCloner):
 
     @property
     def is_available(self):
-        return bool(self.old_event.timetable_entries.count())
+        return self._has_content(self.old_event)
 
     @property
     def is_default(self):
@@ -44,24 +32,42 @@ class TimetableCloner(EventCloner):
     def is_visible(self):
         return self.old_event.type_ in {EventType.meeting, EventType.conference}
 
-    def run(self, new_event, cloners, shared_data):
+    def get_conflicts(self, target_event):
+        conflicts = []
+        if self._has_content(target_event):
+            conflicts.append(_('The target event already has a timetable'))
+
+        if self.old_event.duration > target_event.duration:
+            conflicts.append(_('The source event is longer than the target event'))
+
+        return conflicts
+
+    def run(self, new_event, cloners, shared_data, event_exists=False):
         self._session_block_map = shared_data['sessions']['session_block_map']
         self._contrib_map = shared_data['contributions']['contrib_map']
         with db.session.no_autoflush:
             self._clone_timetable(new_event)
         db.session.flush()
 
+    def _has_content(self, event):
+        return event.timetable_entries.has_rows()
+
     def _clone_timetable(self, new_event):
         offset = new_event.start_dt - self.old_event.start_dt
         # no need to copy the type; it's set automatically based on the object
-        attrs = get_simple_column_attrs(TimetableEntry) - {'type', 'start_dt'}
+        attrs = get_attrs_to_clone(TimetableEntry, skip={'type', 'start_dt'})
         break_strategy = defaultload('break_')
         break_strategy.joinedload('own_venue')
         break_strategy.joinedload('own_room').lazyload('*')
+        entry_key_order = db.case({
+            TimetableEntryType.SESSION_BLOCK: db.func.concat('s', TimetableEntry.id),
+            TimetableEntryType.CONTRIBUTION: db.func.concat('c', TimetableEntry.id),
+            TimetableEntryType.BREAK: db.func.concat('b', TimetableEntry.id),
+        }, value=TimetableEntry.type)
         query = (self.old_event.timetable_entries
                  .options(joinedload('parent').lazyload('*'),
                           break_strategy)
-                 .order_by(TimetableEntry.parent_id.is_(None).desc()))
+                 .order_by(TimetableEntry.parent_id.is_(None).desc(), entry_key_order))
         # iterate over all timetable entries; start with top-level
         # ones so we can build a mapping that can be used once we
         # reach nested entries
@@ -82,7 +88,7 @@ class TimetableCloner(EventCloner):
             entry_map[old_entry] = entry
 
     def _clone_break(self, old_break):
-        attrs = get_simple_column_attrs(Break) | {'own_room', 'own_venue'}
+        attrs = get_attrs_to_clone(Break, add={'own_room', 'own_venue'})
         break_ = Break()
         break_.populate_from_attrs(old_break, attrs)
         return break_

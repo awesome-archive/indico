@@ -1,23 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from collections import OrderedDict
-from datetime import timedelta
+from datetime import date, timedelta
 
 from pytz import timezone
 from sqlalchemy.orm import load_only
@@ -34,12 +22,13 @@ from indico.modules.events import Event
 from indico.modules.events.contributions import Contribution
 from indico.modules.events.contributions.models.subcontributions import SubContribution
 from indico.modules.events.sessions import Session
+from indico.modules.events.settings import unlisted_events_settings
 from indico.modules.events.timetable.models.entries import TimetableEntry, TimetableEntryType
-from indico.modules.events.util import serialize_event_for_json_ld
-from indico.util.caching import memoize_redis
+from indico.util.caching import global_lock, memoize_redis
 from indico.util.date_time import now_utc
 from indico.util.i18n import _, ngettext
-from indico.util.struct.iterables import materialize_iterable
+from indico.util.iterables import materialize_iterable
+from indico.util.signals import make_interceptable
 
 
 def get_events_by_year(category_id=None):
@@ -47,7 +36,7 @@ def get_events_by_year(category_id=None):
 
     :param category_id: The category ID to get statistics for. Events
                         from subcategories are also included.
-    :return: An `OrderedDict` mapping years to event counts.
+    :return: A dictionary mapping years to event counts.
     """
     category_filter = Event.category_chain_overlaps(category_id) if category_id else True
     query = (db.session
@@ -57,7 +46,7 @@ def get_events_by_year(category_id=None):
                      category_filter)
              .order_by('year')
              .group_by('year'))
-    return OrderedDict(query)
+    return dict(query)
 
 
 def get_contribs_by_year(category_id=None):
@@ -66,7 +55,7 @@ def get_contribs_by_year(category_id=None):
     :param category_id: The category ID to get statistics for.
                         Contributions from subcategories are also
                         included.
-    :return: An `OrderedDict` mapping years to contribution counts.
+    :return: A dictionary mapping years to contribution counts.
     """
     category_filter = Event.category_chain_overlaps(category_id) if category_id else True
     query = (db.session
@@ -78,7 +67,18 @@ def get_contribs_by_year(category_id=None):
                      category_filter)
              .order_by('year')
              .group_by('year'))
-    return OrderedDict(query)
+    return dict(query)
+
+
+def get_min_year(category_id=None):
+    """Get the min year.
+
+    :param category_id: The category ID to get statistics for.
+    :return: The year.
+    """
+    category_filter = Event.category_chain_overlaps(category_id) if category_id else True
+    min_dt = db.session.query(db.func.min(Event.created_dt)).filter(~Event.is_deleted, category_filter).scalar()
+    return min_dt.year if min_dt else date.today().year
 
 
 def get_attachment_count(category_id=None):
@@ -112,6 +112,7 @@ def get_attachment_count(category_id=None):
 
 
 @memoize_redis(86400)
+@global_lock(timeout=300, use_args=False)
 def get_category_stats(category_id=None):
     """Get category statistics.
 
@@ -124,13 +125,15 @@ def get_category_stats(category_id=None):
     return {'events_by_year': get_events_by_year(category_id),
             'contribs_by_year': get_contribs_by_year(category_id),
             'attachments': get_attachment_count(category_id),
-            'updated': now_utc()}
+            'updated': now_utc(),
+            'min_year': get_min_year(category_id)}
 
 
 @memoize_redis(3600)
+@make_interceptable
 @materialize_iterable()
 def get_upcoming_events():
-    """Get the global list of upcoming events"""
+    """Get the global list of upcoming events."""
     from indico.modules.events import Event
     data = upcoming_events_settings.get_all()
     if not data['max_entries'] or not data['entries']:
@@ -143,12 +146,13 @@ def get_upcoming_events():
                           Event.end_dt.astimezone(tz) > now)
                   .options(load_only('id', 'title', 'start_dt', 'end_dt')))
     queries = []
-    cols = {'category': Event.category_id,
-            'event': Event.id}
+    predicates = {'category': lambda id_: Event.category_id == id_,
+                  'category_tree': lambda id_: Event.category_chain_overlaps(id_) & Event.is_visible_in(id_),
+                  'event': lambda id_: Event.id == id_}
     for entry in data['entries']:
         delta = timedelta(days=entry['days'])
         query = (base_query
-                 .filter(cols[entry['type']] == entry['id'])
+                 .filter(predicates[entry['type']](entry['id']))
                  .filter(db.cast(Event.start_dt.astimezone(tz), db.Date) > (now - delta).date())
                  .with_entities(Event, db.literal(entry['weight']).label('weight')))
         queries.append(query)
@@ -176,23 +180,28 @@ def get_visibility_options(category_or_event, allow_invisible=True):
     def _category_above_message(number):
         return ngettext('From the category above', 'From {} categories above', number).format(number)
 
-    options = [(n + 1, ('{} \N{RIGHTWARDS ARROW} "{}"'.format(_category_above_message(n).format(n), title)))
+    options = [(n + 1, (f'{_category_above_message(n).format(n)} \N{RIGHTWARDS ARROW} "{title}"'))
                for n, title in enumerate(category.chain_titles[::-1])]
     if event is None:
-        options[0] = (1, _("From this category only"))
+        options[0] = (1, _('From this category only'))
     else:
-        options[0] = (1, '{} \N{RIGHTWARDS ARROW} "{}"'.format(_("From the current category only"), category.title))
-    options[-1] = ('', _("From everywhere"))
+        options[0] = (1, '{} \N{RIGHTWARDS ARROW} "{}"'.format(_('From the current category only'), category.title))
+    options[-1] = ('', _('From everywhere'))
 
     if allow_invisible:
-        options.insert(0, (0, _("Invisible")))
+        options.insert(0, (0, _('Invisible')))
 
     # In case the current visibility is higher than the distance to the root category
     if category_or_event.visibility is not None and not any(category_or_event.visibility == x[0] for x in options):
         options.append((category_or_event.visibility,
                         '({} \N{RIGHTWARDS ARROW} {})'.format(_category_above_message(category_or_event.visibility),
-                                                              _("Everywhere"))))
+                                                              _('Everywhere'))))
     return options
+
+
+def format_visibility(category_or_event, visibility):
+    options = dict(get_visibility_options(category_or_event, allow_invisible=True))
+    return options[visibility if visibility is not None else '']
 
 
 def get_image_data(image_type, category):
@@ -204,3 +213,63 @@ def get_image_data(image_type, category):
         'size': metadata['size'],
         'content_type': metadata['content_type']
     }
+
+
+def serialize_category_role(role, legacy=True):
+    """Serialize role to JSON-like object."""
+    if legacy:
+        return {
+            'id': role.id,
+            'name': role.name,
+            'code': role.code,
+            'color': role.color,
+            'category': role.category.title,
+            'identifier': f'CategoryRole:{role.id}',
+            '_type': 'CategoryRole'
+        }
+    else:
+        return {
+            'id': role.id,
+            'name': role.name,
+            'identifier': f'CategoryRole:{role.id}',
+        }
+
+
+def can_create_unlisted_events(user):
+    if not user or not unlisted_events_settings.get('enabled'):
+        return False
+    elif user.is_admin or not unlisted_events_settings.get('restricted'):
+        return True
+    else:
+        return unlisted_events_settings.acls.contains_user('authorized_creators', user)
+
+
+def can_create_events_explicit(user):
+    """Check if the user has explicit event creation permissions somewhere.
+
+    For performance reasons this only checks local groups and roles, but
+    ignores any membership in remote (multipass) groups from LDAP or similar
+    provides. It also does not take into account any permissions granted
+    through plugins that affect the regular user permission checks.
+    """
+    from indico.modules.categories.models.categories import Category
+    from indico.modules.categories.models.principals import CategoryPrincipal
+    from indico.modules.categories.models.roles import CategoryRole
+    from indico.modules.groups.models.groups import LocalGroup
+    from indico.modules.users.models.users import User
+
+    return (
+        CategoryPrincipal.query.join(Category)
+        .filter(
+            ~Category.is_deleted,
+            CategoryPrincipal.has_management_permission('create'),
+        )
+        .filter(
+            db.or_(
+                CategoryPrincipal.user == user,
+                CategoryPrincipal.local_group.has(LocalGroup.members.any(User.id == user.id)),
+                CategoryPrincipal.category_role.has(CategoryRole.members.any(User.id == user.id)),
+            )
+        )
+        .has_rows()
+    )

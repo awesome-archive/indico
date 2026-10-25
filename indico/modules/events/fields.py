@@ -1,38 +1,39 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import json
+from operator import attrgetter
 
+from flask import session
+from marshmallow import EXCLUDE
+from marshmallow import ValidationError as MMValidationError
 from sqlalchemy import inspect
 from wtforms import RadioField, SelectField
 
 from indico.core import signals
+from indico.core.cache import make_scoped_cache
 from indico.core.db.sqlalchemy.util.session import no_autoflush
 from indico.core.errors import UserValueError
-from indico.modules.events.layout import theme_settings
-from indico.modules.events.models.persons import EventPerson, EventPersonLink, PersonLinkBase
+from indico.modules.events.layout import layout_settings, theme_settings
+from indico.modules.events.models.events import EventType
+from indico.modules.events.models.persons import EventPersonLink
 from indico.modules.events.models.references import ReferenceType
+from indico.modules.events.persons import CustomPersonsMode, persons_settings
 from indico.modules.events.persons.util import get_event_person
-from indico.modules.events.util import serialize_person_link
+from indico.modules.users import user_management_settings
+from indico.modules.users.models.affiliations import Affiliation
 from indico.modules.users.models.users import UserTitle
 from indico.modules.users.util import get_user_by_email
-from indico.util.i18n import _, orig_string
-from indico.web.forms.fields import MultipleItemsField, PrincipalListField
+from indico.util.i18n import _
+from indico.util.signals import values_from_signal
+from indico.util.user import make_user_search_token
+from indico.web.flask.util import url_for
+from indico.web.forms.fields import MultipleItemsField
+from indico.web.forms.fields.principals import PrincipalListField
 from indico.web.forms.widgets import JinjaWidget
 
 
@@ -41,13 +42,13 @@ class ReferencesField(MultipleItemsField):
 
     def __init__(self, *args, **kwargs):
         self.reference_class = kwargs.pop('reference_class')
-        self.fields = [{'id': 'type', 'caption': _("Type"), 'type': 'select', 'required': True},
-                       {'id': 'value', 'caption': _("Value"), 'type': 'text', 'required': True}]
-        self.choices = {'type': {unicode(r.id): r.name for r in ReferenceType.find_all()}}
-        super(ReferencesField, self).__init__(*args, uuid_field='id', uuid_field_opaque=True, **kwargs)
+        self.fields = [{'id': 'type', 'caption': _('Type'), 'type': 'select', 'required': True},
+                       {'id': 'value', 'caption': _('Value'), 'type': 'text', 'required': True}]
+        self.choices = {'type': {str(r.id): r.name for r in ReferenceType.query}}
+        super().__init__(*args, uuid_field='id', uuid_field_opaque=True, **kwargs)
 
     def process_formdata(self, valuelist):
-        super(ReferencesField, self).process_formdata(valuelist)
+        super().process_formdata(valuelist)
         if valuelist:
             existing = {x.id: x for x in self.object_data or ()}
             data = []
@@ -67,66 +68,19 @@ class ReferencesField(MultipleItemsField):
             self.data = data
 
     def pre_validate(self, form):
-        super(ReferencesField, self).pre_validate(form)
+        super().pre_validate(form)
         for reference in self.serialized_data:
             if reference['type'] not in self.choices['type']:
-                raise ValueError(u'Invalid type choice: {}'.format(reference['type']))
+                raise ValueError('Invalid type choice: {}'.format(reference['type']))
 
     def _value(self):
         if not self.data:
             return []
         else:
-            return [{'id': r.id, 'type': unicode(r.reference_type_id), 'value': r.value} for r in self.data]
+            return [{'id': r.id, 'type': str(r.reference_type_id), 'value': r.value} for r in self.data]
 
 
-class EventPersonListField(PrincipalListField):
-    """A field that lets you select a list Indico user and EventPersons
-
-    Requires its form to have an event set.
-    """
-
-    #: Whether new event persons created by the field should be
-    #: marked as untrusted
-    create_untrusted_persons = False
-
-    def __init__(self, *args, **kwargs):
-        self.event_person_conversions = {}
-        super(EventPersonListField, self).__init__(*args, groups=False, allow_external=True, **kwargs)
-
-    @property
-    def event(self):
-        return getattr(self.get_form(), 'event', None)
-
-    def _convert_data(self, data):
-        raise NotImplementedError
-
-    def _serialize_principal(self, principal):
-        from indico.modules.events.util import serialize_event_person
-        if principal.id is None:
-            # We created an EventPerson which has not been persisted to the
-            # database. Revert the conversion.
-            principal = self.event_person_conversions[principal]
-            if isinstance(principal, dict):
-                return principal
-        if not isinstance(principal, EventPerson):
-            return super(EventPersonListField, self)._serialize_principal(principal)
-        return serialize_event_person(principal)
-
-    def pre_validate(self, form):
-        # Override parent behavior
-        pass
-
-    def process_formdata(self, valuelist):
-        if valuelist:
-            self.data = json.loads(valuelist[0])
-            try:
-                self.data = self._convert_data(self.data)
-            except ValueError:
-                self.data = []
-                raise
-
-
-class PersonLinkListFieldBase(EventPersonListField):
+class PersonLinkListFieldBase(PrincipalListField):
     #: class that inherits from `PersonLinkBase`
     person_link_cls = None
     #: name of the attribute on the form containing the linked object
@@ -135,28 +89,128 @@ class PersonLinkListFieldBase(EventPersonListField):
     default_sort_alpha = True
 
     widget = None
+    create_untrusted_persons = False
 
     def __init__(self, *args, **kwargs):
-        super(PersonLinkListFieldBase, self).__init__(*args, **kwargs)
+        super().__init__(*args, allow_groups=False, allow_external_users=True, **kwargs)
         self.object = getattr(kwargs['_form'], self.linked_object_attr, None)
 
+    @property
+    def event(self):
+        # The event should be a property as it may only be available later, such as, in creation forms
+        return getattr(self.get_form(), 'event', None)
+
+    @property
+    def search_token(self):
+        if not getattr(self.get_form(), 'allow_user_search', True):
+            # allow forms to disable user search, e.g. during abstract submission
+            return None
+        return make_user_search_token()
+
+    @property
+    def has_predefined_affiliations(self):
+        return Affiliation.query.filter(~Affiliation.is_deleted).has_rows()
+
+    @property
+    def allow_custom_affiliations(self):
+        return not user_management_settings.get('only_predefined_affiliations')
+
+    @property
+    def default_search_external(self):
+        if not self.event:
+            return False
+        return persons_settings.get(self.event, 'default_search_external')
+
+    @property
+    def custom_persons_mode(self):
+        if self.event is None:
+            return persons_settings.defaults['custom_persons_mode']
+        return persons_settings.get(self.event, 'custom_persons_mode')
+
+    @property
+    def disallow_enter_manually(self):
+        return self.custom_persons_mode == CustomPersonsMode.never
+
+    @property
+    def required_person_fields(self):
+        return values_from_signal(signals.event.person_required_fields.send(self.get_form()), multi_value_types=list)
+
+    @property
+    def name_format(self):
+        from indico.modules.users.models.users import NameFormat
+        name_format = layout_settings.get(self.event, 'name_format') if self.event else None
+        if name_format is None and session.user:
+            name_format = session.user.settings.get('name_format')
+        return name_format if name_format is not None else NameFormat.first_last
+
+    @property
+    def validate_email_url(self):
+        return url_for('events.check_email', self.object) if self.object and self.search_token else None
+
+    @property
+    def extra_params(self):
+        values = values_from_signal(signals.event.person_link_field_extra_params.send(self), as_list=True)
+        return {k: v for d in values for k, v in d.items()}
+
     @no_autoflush
-    def _get_person_link(self, data, extra_data=None):
-        extra_data = extra_data or {}
+    def _get_person_link(self, data):
+        from indico.modules.events.persons.schemas import PersonLinkSchema
+        identifier = data.get('identifier')
+        affiliations_disabled = self.extra_params.get('disable_affiliations', False)
+        schema = PersonLinkSchema(unknown=EXCLUDE, context={'affiliations_disabled': affiliations_disabled})
+        try:
+            data = schema.load(data)
+        except MMValidationError as exc:
+            if isinstance(exc.messages, dict) and exc.messages.keys() == {'email'}:
+                raise UserValueError(
+                    _('Validation of {email} failed: {error}').format(
+                        email=exc.data['email'],
+                        error=', '.join(exc.messages['email']),
+                    )
+                )
+            # XXX this also happens when custom affiliations are disabled but someone sends one anyway.
+            # it should never happen so we don't bother formatting it in a pretty way
+            raise UserValueError(f'Validation failed: {exc}')
+        if not data.get('type'):
+            if self.disallow_enter_manually:
+                raise UserValueError('Manually entered persons are not allowed')
+            required_fields = values_from_signal(signals.event.person_required_fields.send(self.get_form()),
+                                                 multi_value_types=list)
+            if not all(data.get(field) for field in required_fields):
+                raise UserValueError('Missing required person fields')
+        if identifier and identifier.startswith('ExternalUser:'):
+            # if the data came from an external user, look up their affiliation if the names still match;
+            # we do not have an affiliation ID yet since it may not exist in the local DB yet
+            cache = make_scoped_cache('external-user')
+            external_user_data = cache.get(identifier.removeprefix('ExternalUser:'), {})
+            if self.custom_persons_mode != CustomPersonsMode.always:
+                # if we don't allow entering persons manually before searching, we don't allow edits either
+                for key in ('first_name', 'last_name', 'email', 'affiliation', 'phone', 'address'):
+                    data[key] = external_user_data.get(key, '')
+                data['_title'] = UserTitle.none
+                data['affiliation_link'] = None
+            if (
+                not affiliations_disabled and
+                (affiliation_data := external_user_data.get('affiliation_data')) and
+                data['affiliation'] == affiliation_data['name']
+            ):
+                data['affiliation_link'] = Affiliation.get_or_create_from_data(affiliation_data)
+                data['affiliation'] = data['affiliation_link'].name
+        if not self.has_predefined_affiliations or affiliations_disabled:
+            data['affiliation_link'] = None
         person = get_event_person(self.event, data, create_untrusted_persons=self.create_untrusted_persons,
                                   allow_external=True)
-        person_data = {'title': next((x.value for x in UserTitle if data.get('title') == orig_string(x.title)),
-                                     UserTitle.none),
-                       'first_name': data.get('firstName', ''), 'last_name': data['familyName'],
-                       'affiliation': data.get('affiliation', ''), 'address': data.get('address', ''),
-                       'phone': data.get('phone', ''), 'display_order': data['displayOrder']}
-        person_data.update(extra_data)
         person_link = None
         if self.object and inspect(person).persistent:
-            person_link = self.person_link_cls.find_first(person=person, object=self.object)
+            person_link = self.person_link_cls.query.filter_by(person=person, object=self.object).first()
         if not person_link:
             person_link = self.person_link_cls(person=person)
-        person_link.populate_from_dict(person_data)
+        if self.disallow_enter_manually:
+            # if we don't allow entering persons manually before searching, we don't allow edits either
+            person_link.populate_from_dict(data, keys=('display_order',))
+            return person_link
+        person_link.populate_from_dict(data, keys=('first_name', 'last_name', 'affiliation', 'affiliation_link',
+                                                   'address', 'phone', '_title', 'display_order'))
         email = data.get('email', '').lower()
         if email != person_link.email:
             if not self.event or not self.event.persons.filter_by(email=email).first():
@@ -165,47 +219,66 @@ class PersonLinkListFieldBase(EventPersonListField):
                 if inspect(person).persistent:
                     signals.event.person_updated.send(person_link.person)
             else:
-                raise UserValueError(_('There is already a person with the email {}').format(email))
+                raise UserValueError(_('There is already a person with the email {email}').format(email=email))
         return person_link
 
-    def _serialize_principal(self, principal):
-        if not isinstance(principal, PersonLinkBase):
-            return super(PersonLinkListFieldBase, self)._serialize_principal(principal)
-        if principal.id is None:
-            return super(PersonLinkListFieldBase, self)._serialize_principal(principal.person)
-        else:
-            return self._serialize_person_link(principal)
-
-    def _serialize_person_link(self, principal, extra_data=None):
+    def _serialize_person_link(self, principal):
         raise NotImplementedError
 
+    def _convert_data(self, data):
+        return list({self._get_person_link(x) for x in data})
+
     def _value(self):
-        return [self._serialize_person_link(person_link) for person_link in self.data] if self.data else []
+        if submitted_data := getattr(self, '_submitted_data', None):
+            return submitted_data
+        return [self._serialize_person_link(person_link)
+                for person_link in sorted(self.data, key=attrgetter('display_order_key'))] if self.data else []
+
+    def process_formdata(self, valuelist):
+        if valuelist:
+            self.data = self._submitted_data = json.loads(valuelist[0])
+            try:
+                self.data = self._convert_data(self.data)
+            except ValueError:
+                self.data = []
+                raise
 
 
 class EventPersonLinkListField(PersonLinkListFieldBase):
-    """A field to manage event's chairpersons"""
+    """A field to manage event's chairpersons."""
 
     person_link_cls = EventPersonLink
     linked_object_attr = 'event'
-    widget = JinjaWidget('events/forms/event_person_link_widget.html')
+    widget = JinjaWidget('forms/person_link_widget.html')
 
-    def __init__(self, *args, **kwargs):
-        self.allow_submitters = True
-        self.default_is_submitter = kwargs.pop('default_is_submitter', True)
-        super(EventPersonLinkListField, self).__init__(*args, **kwargs)
+    @property
+    def roles(self):
+        return [{'name': 'submitter', 'label': _('Submitter'), 'icon': 'paperclip',
+                 'default': self.default_is_submitter}]
+
+    def __init__(self, *args, default_is_submitter=True, event_type=None, search_token_source=None, **kwargs):
+        self.default_is_submitter = default_is_submitter
+        self.empty_message = _('There are no chairpersons')
+        self.search_token_source = search_token_source
+        super().__init__(*args, **kwargs)
+        if not event_type and self.object:
+            event_type = self.object.event.type_
+        if event_type == EventType.lecture:
+            self.empty_message = _('There are no speakers')
 
     def _convert_data(self, data):
-        return {self._get_person_link(x): x.pop('isSubmitter', self.default_is_submitter) for x in data}
+        return {self._get_person_link(x): 'submitter' in x.get('roles', []) for x in data}
 
-    def _serialize_person_link(self, principal, extra_data=None):
-        extra_data = extra_data or {}
-        data = dict(extra_data, **serialize_person_link(principal))
-        data['isSubmitter'] = self.data[principal] if self.get_form().is_submitted() else principal.is_submitter
+    def _serialize_person_link(self, principal):
+        from indico.modules.events.persons.schemas import PersonLinkSchema
+        data = PersonLinkSchema().dump(principal)
+        data['roles'] = []
+        if (self.get_form().is_submitted() and self.data[principal]) or (principal.event and principal.is_submitter):
+            data['roles'].append('submitter')
         return data
 
     def pre_validate(self, form):
-        super(EventPersonLinkListField, self).pre_validate(form)
+        super().pre_validate(form)
         persons = set()
         for person_link in self.data:
             if person_link.person in persons:
@@ -217,9 +290,9 @@ class IndicoThemeSelectField(SelectField):
     def __init__(self, *args, **kwargs):
         allow_default = kwargs.pop('allow_default', False)
         event_type = kwargs.pop('event_type').name
-        super(IndicoThemeSelectField, self).__init__(*args, **kwargs)
-        self.choices = sorted([(tid, theme['title'])
-                               for tid, theme in theme_settings.get_themes_for(event_type).viewitems()],
+        super().__init__(*args, **kwargs)
+        self.choices = sorted(((tid, theme['title'])
+                               for tid, theme in theme_settings.get_themes_for(event_type).items()),
                               key=lambda x: x[1].lower())
         if allow_default:
             self.choices.insert(0, ('', _('Category default')))
@@ -232,4 +305,4 @@ class RatingReviewField(RadioField):
     def __init__(self, *args, **kwargs):
         self.question = kwargs.pop('question')
         self.rating_range = kwargs.pop('rating_range')
-        super(RatingReviewField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)

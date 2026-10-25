@@ -1,23 +1,13 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.orm import joinedload
 
+from indico.core import signals
 from indico.core.db import db
 from indico.core.db.sqlalchemy.links import LinkType
 from indico.modules.events.cloning import EventCloner
@@ -32,9 +22,13 @@ class NoteCloner(EventCloner):
 
     @property
     def is_available(self):
-        return bool(self.old_event.all_notes.filter_by(is_deleted=False).count())
+        return self._has_content(self.old_event)
 
-    def run(self, new_event, cloners, shared_data):
+    def get_conflicts(self, target_event):
+        if self._has_content(target_event):
+            return [_('The target event already has minutes')]
+
+    def run(self, new_event, cloners, shared_data, event_exists=False):
         self._clone_nested_notes = False
         self._session_map = self._contrib_map = self._subcontrib_map = None
         if cloners >= {'sessions', 'contributions'}:
@@ -42,9 +36,20 @@ class NoteCloner(EventCloner):
             self._session_map = shared_data['sessions']['session_map']
             self._contrib_map = shared_data['contributions']['contrib_map']
             self._subcontrib_map = shared_data['contributions']['subcontrib_map']
+        self._note_map = {}
+        self._restored_notes = set()
         with db.session.no_autoflush:
             self._clone_notes(new_event)
         db.session.flush()
+        if event_exists:
+            for note in self._note_map.values():
+                if note in self._restored_notes:
+                    signals.event.notes.note_restored.send(note)
+                else:
+                    signals.event.notes.note_added.send(note)
+
+    def _has_content(self, event):
+        return event.all_notes.filter_by(is_deleted=False).has_rows()
 
     def _query_notes(self):
         return (self.old_event.all_notes
@@ -72,5 +77,7 @@ class NoteCloner(EventCloner):
 
     def _clone_note(self, old_note, new_object):
         revision = old_note.current_revision
-        new_object.note = EventNote()
-        new_object.note.create_revision(render_mode=revision.render_mode, source=revision.source, user=revision.user)
+        self._note_map[old_note] = note = EventNote.get_or_create(new_object)
+        if note.is_deleted:
+            self._restored_notes.add(note)
+        note.create_revision(render_mode=revision.render_mode, source=revision.source, user=revision.user)

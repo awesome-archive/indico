@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import random
 
@@ -22,16 +11,20 @@ from flask import request, session
 from sqlalchemy.orm import joinedload
 
 from indico.core.db import db
-from indico.modules.events import EventLogKind, EventLogRealm
+from indico.modules.events import EventLogRealm
 from indico.modules.events.management.controllers import RHManageEventBase
 from indico.modules.events.models.roles import EventRole
 from indico.modules.events.roles import logger
-from indico.modules.events.roles.forms import RoleForm
-from indico.modules.events.roles.util import get_role_colors, serialize_role
+from indico.modules.events.roles.forms import EventRoleForm
+from indico.modules.events.roles.util import serialize_event_role
 from indico.modules.events.roles.views import WPEventRoles
+from indico.modules.logs import LogKind
 from indico.modules.users import User
-from indico.util.user import principal_from_fossil
+from indico.util.marshmallow import PrincipalList
+from indico.util.roles import ExportRoleMembersMixin, ImportRoleMembersMixin, RolesAPIMixin
+from indico.web.args import use_kwargs
 from indico.web.flask.templating import get_template_module
+from indico.web.forms.colors import get_role_colors
 from indico.web.util import jsonify_data, jsonify_form
 
 
@@ -52,25 +45,25 @@ def _render_role(role, collapsed=True):
 
 
 class RHEventRoles(RHManageEventBase):
-    """Event role management"""
+    """Event role management."""
 
     def _process(self):
         return WPEventRoles.render_template('roles.html', self.event, roles=_get_roles(self.event))
 
 
 class RHAddEventRole(RHManageEventBase):
-    """Add a new event role"""
+    """Add a new event role."""
 
     def _process(self):
-        form = RoleForm(event=self.event, color=self._get_color())
+        form = EventRoleForm(event=self.event, color=self._get_color())
         if form.validate_on_submit():
             role = EventRole(event=self.event)
             form.populate_obj(role)
             db.session.flush()
             logger.info('Event role %r created by %r', role, session.user)
-            self.event.log(EventLogRealm.management, EventLogKind.positive, 'Roles',
-                           'Added role: "{}"'.format(role.name), session.user)
-            return jsonify_data(html=_render_roles(self.event), role=serialize_role(role))
+            self.event.log(EventLogRealm.management, LogKind.positive, 'Roles',
+                           f'Added role: "{role.name}"', session.user)
+            return jsonify_data(html=_render_roles(self.event), role=serialize_event_role(role))
         return jsonify_form(form)
 
     def _get_color(self):
@@ -80,7 +73,7 @@ class RHAddEventRole(RHManageEventBase):
 
 
 class RHManageEventRole(RHManageEventBase):
-    """Base class to manage a specific event role"""
+    """Base class to manage a specific event role."""
 
     normalize_url_spec = {
         'locators': {
@@ -90,66 +83,85 @@ class RHManageEventRole(RHManageEventBase):
 
     def _process_args(self):
         RHManageEventBase._process_args(self)
-        self.role = EventRole.get_one(request.view_args['role_id'])
+        self.role = EventRole.get_or_404(request.view_args['role_id'])
 
 
 class RHEditEventRole(RHManageEventRole):
-    """Edit an event role"""
+    """Edit an event role."""
 
     def _process(self):
-        form = RoleForm(obj=self.role, event=self.event)
+        form = EventRoleForm(obj=self.role, event=self.event)
         if form.validate_on_submit():
             form.populate_obj(self.role)
             db.session.flush()
             logger.info('Event role %r updated by %r', self.role, session.user)
-            self.event.log(EventLogRealm.management, EventLogKind.change, 'Roles',
-                           'Updated role: "{}"'.format(self.role.name), session.user)
+            self.event.log(EventLogRealm.management, LogKind.change, 'Roles',
+                           f'Updated role: "{self.role.name}"', session.user)
             return jsonify_data(html=_render_role(self.role))
         return jsonify_form(form)
 
 
 class RHDeleteEventRole(RHManageEventRole):
-    """Delete an event role"""
+    """Delete an event role."""
 
     def _process(self):
         db.session.delete(self.role)
         logger.info('Event role %r deleted by %r', self.role, session.user)
-        self.event.log(EventLogRealm.management, EventLogKind.negative, 'Roles',
-                       'Deleted role: "{}"'.format(self.role.name), session.user)
+        self.event.log(EventLogRealm.management, LogKind.negative, 'Roles',
+                       f'Deleted role: "{self.role.name}"', session.user)
         return jsonify_data(html=_render_roles(self.event))
 
 
 class RHRemoveEventRoleMember(RHManageEventRole):
-    """Remove a user from an event role"""
+    """Remove a user from an event role."""
 
     normalize_url_spec = dict(RHManageEventRole.normalize_url_spec, preserved_args={'user_id'})
 
     def _process_args(self):
         RHManageEventRole._process_args(self)
-        self.user = User.get_one(request.view_args['user_id'])
+        self.user = User.get_or_404(request.view_args['user_id'])
 
     def _process(self):
         if self.user in self.role.members:
             self.role.members.remove(self.user)
             logger.info('User %r removed from role %r by %r', self.user, self.role, session.user)
-            self.event.log(EventLogRealm.management, EventLogKind.negative, 'Roles',
-                           'Removed user from role "{}"'.format(self.role.name), session.user,
+            self.event.log(EventLogRealm.management, LogKind.negative, 'Roles',
+                           f'Removed user from role "{self.role.name}"', session.user,
                            data={'Name': self.user.full_name,
                                  'Email': self.user.email})
         return jsonify_data(html=_render_role(self.role, collapsed=False))
 
 
 class RHAddEventRoleMembers(RHManageEventRole):
-    """Add users to an event role"""
+    """Add users to an event role."""
 
-    def _process(self):
-        for data in request.json['users']:
-            user = principal_from_fossil(data, allow_pending=True, allow_groups=False)
-            if user not in self.role.members:
-                self.role.members.add(user)
-                logger.info('User %r added to role %r by %r', user, self.role, session.user)
-                self.event.log(EventLogRealm.management, EventLogKind.positive, 'Roles',
-                               'Added user to role "{}"'.format(self.role.name), session.user,
-                               data={'Name': user.full_name,
-                                     'Email': user.email})
+    @use_kwargs({
+        'users': PrincipalList(required=True, allow_external_users=True),
+    })
+    def _process(self, users):
+        for user in users - self.role.members:
+            self.role.members.add(user)
+            logger.info('User %r added to role %r by %r', user, self.role, session.user)
+            self.event.log(EventLogRealm.management, LogKind.positive, 'Roles',
+                           f'Added user to role "{self.role.name}"', session.user,
+                           data={'Name': user.full_name, 'Email': user.email})
         return jsonify_data(html=_render_role(self.role, collapsed=False))
+
+
+class RHEventRoleMembersImportCSV(ImportRoleMembersMixin, RHManageEventRole):
+    """Add users to an event role from CSV."""
+
+    logger = logger
+    log_realm = EventLogRealm.management
+
+
+class RHEventRoleMembersExportCSV(ExportRoleMembersMixin, RHManageEventRole):
+    """Export event role members to a CSV."""
+
+
+class RHEventRolesAPI(RolesAPIMixin, RHManageEventBase):
+    """Export event role members to JSON."""
+
+    def _process_args(self):
+        RHManageEventBase._process_args(self)
+        self.roles = EventRole.query.with_parent(self.event).options(joinedload('members'))

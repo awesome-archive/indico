@@ -1,45 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import print_function, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import posixpath
 
-from flask import current_app, render_template, request
+from flask import current_app, render_template, request, session
 from sqlalchemy.orm import load_only
 from werkzeug.utils import cached_property
 
+from indico.core import signals
+from indico.core.config import config
 from indico.modules.admin.views import WPAdmin
-from indico.modules.core.settings import core_settings, social_settings
+from indico.modules.core.settings import social_settings
 from indico.modules.events import Event
-from indico.modules.events.layout import layout_settings, theme_settings
-from indico.modules.events.layout.util import (build_menu_entry_name, get_css_url, get_menu_entry_by_name,
+from indico.modules.events.layout import get_theme_global_settings, layout_settings, theme_settings
+from indico.modules.events.layout.util import (build_menu_entry_name, get_css_url, get_js_url, get_menu_entry_by_name,
                                                menu_entries_for_event)
+from indico.modules.events.management.settings import privacy_settings
 from indico.modules.events.models.events import EventType
 from indico.modules.events.util import serialize_event_for_json_ld
 from indico.util.date_time import format_date
 from indico.util.mathjax import MathjaxMixin
-from indico.util.string import strip_tags, to_unicode, truncate
+from indico.util.signals import values_from_signal
+from indico.util.string import strip_tags, truncate
 from indico.web.flask.util import url_for
 from indico.web.views import WPDecorated, WPJinjaMixin
 
 
 def _get_print_url(event, theme=None, theme_override=False):
     view = theme if theme_override else None
-
     if event.type_ == EventType.conference:
         return url_for('timetable.timetable', event, print='1', view=view)
     elif event.type_ == EventType.meeting:
@@ -50,7 +42,7 @@ def _get_print_url(event, theme=None, theme_override=False):
             show_date = None
         if show_session == 'all':
             show_session = None
-        if detail_level in ('all', 'contrinbution'):
+        if detail_level in ('all', 'contribution'):
             detail_level = None
         return url_for('events.display', event, showDate=show_date, showSession=show_session, detailLevel=detail_level,
                        print='1', view=view)
@@ -62,16 +54,24 @@ def render_event_header(event, conference_layout=False, theme=None, theme_overri
     print_url = _get_print_url(event, theme, theme_override) if not conference_layout else None
     show_nav_bar = event.type_ != EventType.conference or layout_settings.get(event, 'show_nav_bar')
     themes = {tid: {'name': data['title'], 'user_visible': data.get('user_visible')}
-              for tid, data in theme_settings.get_themes_for(event.type_.name).viewitems()}
-    return render_template('events/header.html',
-                           event=event, print_url=print_url, show_nav_bar=show_nav_bar, themes=themes, theme=theme)
+              for tid, data in theme_settings.get_themes_for(event.type_.name).items()}
+    forced_event_locale = event.get_forced_event_locale(session.user, allow_session=True)
+    forced_event_locale_alts = event.supported_locales if forced_event_locale else None
+    show_management_button = (
+        not config.CHECK_ACTION_PERMISSIONS
+        or (session.user and event.can_manage(session.user))
+        or bool(values_from_signal(signals.event_management.management_url.send(event)))
+    )
+    return render_template('events/header.html', event=event, print_url=print_url, show_nav_bar=show_nav_bar,
+                           themes=themes, theme=theme, force_locale=forced_event_locale,
+                           force_locale_alts=forced_event_locale_alts, show_management_button=show_management_button)
 
 
 def render_event_footer(event, dark=False):
     location = event.venue_name
     if event.room_name:
-        location = '{} ({})'.format(event.room_name, location)
-    description = '{}\n\n{}'.format(truncate(event.description, 1000), event.short_external_url).strip()
+        location = f'{event.room_name} ({location})'
+    description = f'{truncate(event.description, 1000)}\n\n{event.short_external_url}'.strip()
     google_calendar_params = {
         'action': 'TEMPLATE',
         'text': event.title,
@@ -82,24 +82,50 @@ def render_event_footer(event, dark=False):
         'trp': False,
         'sprop': [event.external_url, 'name:indico']
     }
+    outlook_calendar_params = {
+        'body': description,
+        'subject': event.title,
+        'location': location,
+        'startdt': event.start_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'enddt': event.end_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'path': '/calendar/action/compose',
+        'rru': 'addevent'
+    }
 
-    social_settings_data = social_settings.get_all()
-    show_social = social_settings_data['enabled'] and layout_settings.get(event, 'show_social_badges')
+    show_social = social_settings.get('enabled') and layout_settings.get(event, 'show_social_badges')
     return render_template('events/footer.html',
                            event=event,
                            dark=dark,
-                           social_settings=social_settings_data,
                            show_social=show_social,
-                           google_calendar_params=google_calendar_params)
+                           google_calendar_params=google_calendar_params,
+                           outlook_calendar_params=outlook_calendar_params)
 
 
-class WPReferenceTypes(WPAdmin):
+class WPEventAdmin(WPAdmin):
     template_prefix = 'events/'
+    bundles = ('module_events.admin.js', 'module_events.admin.css')
 
 
 class WPEventBase(WPDecorated):
     ALLOW_JSON = False
-    bundles = ('module_events.display.js',)
+    bundles = ('module_events.display.js', 'module_events.contributions.js', 'module_events.header.js',
+               'module_events.search.js')
+
+    @property
+    def page_metadata(self):
+        metadata = super().page_metadata
+        return {
+            'og': {
+                **metadata['og'],
+                'title': self.event.title,
+                'type': 'event',
+                'image': (self.event.logo_url if self.event.has_logo else
+                          url_for('assets.image', filename='indico_square.png', _external=True)),
+                'description': self.event.description
+            },
+            'json_ld': serialize_event_for_json_ld(self.event, full=True),
+            'keywords': self.event.keywords
+        }
 
     def __init__(self, rh, event_, **kwargs):
         assert event_ == kwargs.setdefault('event', event_)
@@ -107,44 +133,44 @@ class WPEventBase(WPDecorated):
         WPDecorated.__init__(self, rh, **kwargs)
         start_dt_local = event_.start_dt_display.astimezone(event_.display_tzinfo)
         end_dt_local = event_.end_dt_display.astimezone(event_.display_tzinfo)
-        dates = ' ({})'.format(to_unicode(format_date(start_dt_local, format='long')))
+        dates = ' ({})'.format(format_date(start_dt_local, format='long'))
         if start_dt_local.date() != end_dt_local.date():
             if start_dt_local.year == end_dt_local.year and start_dt_local.month == end_dt_local.month:
-                dates = ' ({}-{})'.format(start_dt_local.day, to_unicode(format_date(end_dt_local, format='long')))
+                dates = ' ({}-{})'.format(start_dt_local.day, format_date(end_dt_local, format='long'))
             else:
-                dates = ' ({} - {})'.format(to_unicode(format_date(start_dt_local, format='long')),
-                                            to_unicode(format_date(end_dt_local, format='long')))
-        self.title = '{} {}'.format(strip_tags(self.event.title), dates)
+                dates = ' ({} - {})'.format(format_date(start_dt_local, format='long'),
+                                            format_date(end_dt_local, format='long'))
+        self.title = f'{strip_tags(self.event.title)} {dates}'
         page_title = kwargs.get('page_title')
         if page_title:
-            self.title += ': {}'.format(strip_tags(page_title))
+            self.title += f': {strip_tags(page_title)}'
 
-    def _getHeader(self):
+    def _get_header(self):
         raise NotImplementedError  # must be overridden by meeting/lecture and conference WPs
-
-    def _getHeadContent(self):
-        site_name = core_settings.get('site_title')
-        meta = render_template('events/meta.html', event=self.event, site_name=site_name,
-                               json_ld=serialize_event_for_json_ld(self.event, full=True))
-        return WPDecorated._getHeadContent(self) + meta
 
 
 class WPSimpleEventDisplayBase(MathjaxMixin, WPEventBase):
-    """Base class for displaying something on a lecture/meeting page"""
+    """Base class for displaying something on a lecture/meeting page."""
 
     def __init__(self, rh, event_, **kwargs):
         self.event = event_
         WPEventBase.__init__(self, rh, event_, **kwargs)
 
-    def _getHeader(self):
-        return render_event_header(self.event).encode('utf-8')
+    def _get_header(self):
+        return render_event_header(self.event)
 
-    def _getFooter(self):
-        return render_event_footer(self.event).encode('utf-8')
+    def _get_footer(self):
+        return render_event_footer(self.event)
 
 
 class WPSimpleEventDisplay(WPSimpleEventDisplayBase):
-    bundles = ('module_vc.js', 'module_vc.css', 'module_events.cloning.js')
+    bundles = (
+        'markdown.js',
+        'module_vc.js',
+        'module_vc.css',
+        'module_events.cloning.js',
+        'module_events.importing.js',
+    )
 
     def __init__(self, rh, conf, theme_id, theme_override=False):
         WPSimpleEventDisplayBase.__init__(self, rh, conf)
@@ -159,37 +185,45 @@ class WPSimpleEventDisplay(WPSimpleEventDisplayBase):
         print_stylesheet = self.theme.get('print_stylesheet')
         if plugin:
             manifest = plugin.manifest
+            if manifest is None:
+                raise RuntimeError(f'Assets for plugin {plugin.name} have not been built')
         else:
             manifest = current_app.manifest
         return {
-            'screen': (manifest['themes_{}.css'.format(self.theme_file_name)],),
-            'print': ((manifest['themes_{}.print.css'.format(self.theme_file_name)],)
+            'screen': (manifest[f'themes_{self.theme_file_name}.css'],),
+            'print': ((manifest[f'themes_{self.theme_file_name}.print.css'],)
                       if print_stylesheet else ())
         }
 
-    def _getHeadContent(self):
-        return MathjaxMixin._getHeadContent(self) + WPEventBase._getHeadContent(self)
+    def _get_head_content(self):
+        return MathjaxMixin._get_head_content(self) + WPEventBase._get_head_content(self)
 
     def get_extra_css_files(self):
         custom_url = get_css_url(self.event)
         return [custom_url] if custom_url else []
 
-    def _applyDecoration(self, body):
+    def get_extra_js_files(self):
+        custom_url = get_js_url(self.event)
+        return [custom_url] if custom_url else []
+
+    def _apply_decoration(self, body):
         if request.args.get('frame') == 'no' or request.args.get('fr') == 'no' or request.args.get('print') == '1':
             return render_template('events/display/print.html', content=body)
         else:
-            return WPEventBase._applyDecoration(self, body)
+            return WPEventBase._apply_decoration(self, body)
 
-    def _getHeader(self):
-        return render_event_header(self.event, theme=self.theme_id, theme_override=self.theme_override).encode('utf-8')
+    def _get_header(self):
+        return render_event_header(self.event, theme=self.theme_id, theme_override=self.theme_override)
 
-    def _getFooter(self):
-        return render_event_footer(self.event, dark=True).encode('utf-8')
+    def _get_footer(self):
+        dark = self.theme.get('settings', {}).get('page_is_dark', True)
+        return render_event_footer(self.event, dark=dark)
 
-    def _getBody(self, params):
+    def _get_body(self, params):
         attached_items = self.event.attached_items
         folders = [folder for folder in attached_items.get('folders', []) if folder.title != 'Internal Page Files']
         files = attached_items.get('files', [])
+        privacy_info = privacy_settings.get_all(self.event)
 
         lectures = []
         if self.event.series is not None and self.event.series.show_links:
@@ -205,16 +239,16 @@ class WPSimpleEventDisplay(WPSimpleEventDisplayBase):
                if (plugin and tpl_name[0] == ':')
                else posixpath.join('events/display', tpl_name))
 
-        rv = render_template(tpl,
-                             event=self.event,
-                             category=self.event.category.title,
-                             timezone=self.event.display_tzinfo,
-                             theme_settings=self.theme.get('settings', {}),
-                             theme_user_settings=layout_settings.get(self.event, 'timetable_theme_settings'),
-                             files=files,
-                             folders=folders,
-                             lectures=lectures)
-        return rv.encode('utf-8')
+        return render_template(tpl,
+                               event=self.event,
+                               category=(self.event.category.title if self.event.category else None),
+                               timezone=self.event.display_tzinfo,
+                               theme_settings=get_theme_global_settings(self.event, self.theme_id),
+                               theme_user_settings=layout_settings.get(self.event, 'timetable_theme_settings'),
+                               files=files,
+                               folders=folders,
+                               privacy_info=privacy_info,
+                               lectures=lectures)
 
 
 class WPConferenceDisplayBase(WPJinjaMixin, MathjaxMixin, WPEventBase):
@@ -238,17 +272,22 @@ class WPConferenceDisplayBase(WPJinjaMixin, MathjaxMixin, WPEventBase):
         return {
             'menu': menu_entries_for_event(self.event),
             'active_menu_item': self.sidemenu_option,
-            'bg_color_css': 'background: #{0}; border-color: #{0};'.format(bg_color) if bg_color else '',
-            'text_color_css': 'color: #{};'.format(text_color) if text_color else '',
-            'announcement': announcement
+            'bg_color_css': f'background: #{bg_color}; border-color: #{bg_color};' if bg_color else '',
+            'text_color_css': f'color: #{text_color};' if text_color else '',
+            'logo_as_banner': layout_settings.get(self.event, 'header_logo_as_banner'),
+            'announcement': announcement,
         }
 
     def get_extra_css_files(self):
         theme_url = self._kwargs.get('css_url_override', get_css_url(self.event))
         return [theme_url] if theme_url else []
 
-    def _getHeader(self):
-        return render_event_header(self.event, conference_layout=True).encode('utf-8')
+    def get_extra_js_files(self):
+        theme_url = self._kwargs.get('js_url_override', get_js_url(self.event))
+        return [theme_url] if theme_url else []
+
+    def _get_header(self):
+        return render_event_header(self.event, conference_layout=True)
 
     @cached_property
     def sidemenu_entry(self):
@@ -267,16 +306,19 @@ class WPConferenceDisplayBase(WPJinjaMixin, MathjaxMixin, WPEventBase):
         entry = self.sidemenu_entry
         return entry.localized_title if entry else ''
 
-    def _getHeadContent(self):
+    def _get_head_content(self):
         return '\n'.join([
-            MathjaxMixin._getHeadContent(self),
-            WPEventBase._getHeadContent(self)
+            MathjaxMixin._get_head_content(self),
+            WPEventBase._get_head_content(self)
         ])
 
-    def _getBody(self, params):
-        return WPJinjaMixin._getPageContent(self, params)
+    def _get_body(self, params):
+        return WPJinjaMixin._get_page_content(self, params)
 
-    def _applyDecoration(self, body):
+    def _get_footer(self):
+        return render_event_footer(self.event)
+
+    def _apply_decoration(self, body):
         self.logo_url = self.event.logo_url if self.event.has_logo else None
         css_override_form = self._kwargs.get('css_override_form')
         if css_override_form:
@@ -284,21 +326,24 @@ class WPConferenceDisplayBase(WPJinjaMixin, MathjaxMixin, WPEventBase):
                                             event=self.event, form=css_override_form,
                                             download_url=self._kwargs['css_url_override'])
             body = override_html + body
-        return WPEventBase._applyDecoration(self, to_unicode(body))
+        return WPEventBase._apply_decoration(self, body)
 
 
 class WPConferenceDisplay(WPConferenceDisplayBase):
     menu_entry_name = 'overview'
 
-    def _getBody(self, params):
+    def _get_body(self, params):
         return render_template('events/display/conference.html', **self._kwargs)
 
-    def _getFooter(self):
-        return render_event_footer(self.event).encode('utf-8')
+
+class WPConferencePrivacyDisplay(WPConferenceDisplayBase):
+    template_prefix = 'events/display/'
+    menu_entry_name = 'privacy'
+    ALLOW_JSON = True
 
 
 class WPAccessKey(WPJinjaMixin, WPDecorated):
     template_prefix = 'events/'
 
-    def _getBody(self, params):
-        return self._getPageContent(params)
+    def _get_body(self, params):
+        return self._get_page_content(params)

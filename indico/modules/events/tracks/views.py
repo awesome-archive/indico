@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.modules.events.management.views import WPEventManagement
 from indico.modules.events.views import WPConferenceDisplayBase
@@ -26,8 +15,8 @@ class WPManageTracks(MathjaxMixin, WPEventManagement):
     sidemenu_option = 'program'
     bundles = ('markdown.js', 'module_events.tracks.js')
 
-    def _getHeadContent(self):
-        return WPEventManagement._getHeadContent(self) + MathjaxMixin._getHeadContent(self)
+    def _get_head_content(self):
+        return WPEventManagement._get_head_content(self) + MathjaxMixin._get_head_content(self)
 
 
 class WPDisplayTracks(WPConferenceDisplayBase):

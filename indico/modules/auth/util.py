@@ -1,34 +1,26 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from datetime import datetime
 
 from flask import redirect, request, session
 from werkzeug.datastructures import MultiDict
 
 from indico.core.config import config
 from indico.modules.auth import Identity
+from indico.modules.logs.models.entries import LogKind, UserLogRealm
 from indico.modules.users.operations import create_user
+from indico.util.signals import make_interceptable
 from indico.util.signing import secure_serializer
-from indico.util.string import to_unicode
 from indico.web.flask.util import url_for
 
 
 def save_identity_info(identity_info, user):
-    """Saves information from IdentityInfo in the session"""
+    """Save information from IdentityInfo in the session."""
     trusted_email = identity_info.provider.settings.get('trusted_email', False)
     session['login_identity_info'] = {
         'provider': identity_info.provider.name,
@@ -43,7 +35,7 @@ def save_identity_info(identity_info, user):
 
 
 def load_identity_info():
-    """Retrieves identity information from the session"""
+    """Retrieve identity information from the session."""
     try:
         info = session['login_identity_info'].copy()
     except KeyError:
@@ -57,7 +49,7 @@ def load_identity_info():
 
 def register_user(email, extra_emails, user_data, identity_data, settings, from_moderation=False):
     """
-    Create a user based on the registration data provided during te
+    Create a user based on the registration data provided during the
     user registration process (via `RHRegister` and `RegistrationHandler`).
 
     This method is not meant to be used for generic user creation, the
@@ -65,30 +57,34 @@ def register_user(email, extra_emails, user_data, identity_data, settings, from_
     is handled by the `users` module.
     """
     identity = Identity(**identity_data)
+    if (accepted_terms_dt := user_data.get('accepted_terms_dt')) and isinstance(accepted_terms_dt, str):
+        # if we come from a registration request, the timestamp is a string since it had to be jsonified
+        user_data['accepted_terms_dt'] = datetime.fromisoformat(accepted_terms_dt)
     user = create_user(email, user_data, identity=identity, settings=settings, other_emails=extra_emails,
                        from_moderation=from_moderation)
     return user, identity
 
 
 def impersonate_user(user):
-    """Impersonate another user as an admin"""
-    from indico.modules.auth import login_user, logger
+    """Impersonate another user as an admin."""
+    from indico.modules.auth import logger, login_user
 
     current_user = session.user
     # We don't overwrite a previous entry - the original (admin) user should be kept there
     # XXX: Don't change this to setdefault - building `session_data` pops stuff from the session
     if 'login_as_orig_user' not in session:
         session['login_as_orig_user'] = {
-            'session_data': {k: session.pop(k) for k in session.keys() if k[0] != '_' or k in ('_timezone', '_lang')},
+            'session_data': {k: session.pop(k) for k in list(session) if k[0] != '_' or k in ('_timezone', '_lang')},
             'user_id': session.user.id,
             'user_name': session.user.get_full_name(last_name_first=False, last_name_upper=False)
         }
     login_user(user, admin_impersonation=True)
+    user.log(UserLogRealm.management, LogKind.other, 'Impersonation', 'Impersonated by admin', current_user)
     logger.info('Admin %r is impersonating user %r', current_user, user)
 
 
 def undo_impersonate_user():
-    """Undo an admin impersonation login and revert to the old user"""
+    """Undo an admin impersonation login and revert to the old user."""
     from indico.modules.auth import logger
     from indico.modules.users import User
 
@@ -97,14 +93,14 @@ def undo_impersonate_user():
     except KeyError:
         # The user probably already switched back from another tab
         return
-    user = User.get_one(entry['user_id'])
+    user = User.get_or_404(entry['user_id'])
     logger.info('Admin %r stopped impersonating user %r', user, session.user)
-    session.user = user
+    session.set_session_user(user)
     session.update(entry['session_data'])
 
 
 def redirect_to_login(next_url=None, reason=None):
-    """Redirects to the login page.
+    """Redirect to the login page.
 
     :param next_url: URL to be redirected upon successful login. If not
                      specified, it will be set to ``request.relative_url``.
@@ -113,8 +109,17 @@ def redirect_to_login(next_url=None, reason=None):
     if not next_url:
         next_url = request.relative_url
     if reason:
-        session['login_reason'] = to_unicode(reason)
+        session['login_reason'] = reason
     return redirect(url_for_login(next_url))
+
+
+@make_interceptable
+def should_skip_redirect_on_insecure_password(endpoint):
+    return (
+        endpoint.startswith('assets.') or
+        endpoint.endswith('.static') or
+        endpoint in ('auth.logout', 'auth.accounts', 'core.contact', 'core.change_lang')
+    )
 
 
 def url_for_login(next_url=None):
@@ -128,7 +133,7 @@ def url_for_logout(next_url=None):
 
 
 def url_for_register(next_url=None, email=None):
-    """Returns the URL to register
+    """Returns the URL to register.
 
     :param next_url: The URL to redirect to afterwards.
     :param email: A pre-validated email address to use when creating

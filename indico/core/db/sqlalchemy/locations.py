@@ -1,29 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.event import listens_for
 from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.orm.base import NEVER_SET, NO_VALUE
 
 from indico.core.db import db
 from indico.util.decorators import strict_classproperty
 
 
-class LocationMixin(object):
+class LocationMixin:
     """Mixin to store location information in a model.
 
     A location in this context can be either a reference to a room in
@@ -48,10 +38,10 @@ class LocationMixin(object):
                                      'no_custom_location_if_room'),
                   db.CheckConstraint("(venue_id IS NULL) OR (venue_name = '')",
                                      'no_venue_name_if_venue_id'),
-                  db.CheckConstraint("(room_id IS NULL) OR (venue_id IS NOT NULL)",
+                  db.CheckConstraint('(room_id IS NULL) OR (venue_id IS NOT NULL)',
                                      'venue_id_if_room_id')]
         if cls.allow_location_inheritance:
-            checks.append(db.CheckConstraint("NOT inherit_location OR (venue_id IS NULL AND room_id IS NULL AND "
+            checks.append(db.CheckConstraint('NOT inherit_location OR (venue_id IS NULL AND room_id IS NULL AND '
                                              "venue_name = '' AND room_name = '' AND address = '')",
                                              'inherited_location'))
         fkeys = [db.ForeignKeyConstraint(['venue_id', 'room_id'],
@@ -60,7 +50,7 @@ class LocationMixin(object):
 
     @classmethod
     def register_location_events(cls):
-        """Registers sqlalchemy events needed by this mixin.
+        """Register sqlalchemy events needed by this mixin.
 
         Call this method after the definition of a model which uses
         this mixin class.
@@ -76,6 +66,19 @@ class LocationMixin(object):
             if value is not None:
                 target.own_room_name = ''
                 target.own_venue = value.location
+
+        cols = ('own_room_id', 'own_room_name', 'own_venue_id', 'own_venue_name', 'own_address', 'inherit_location')
+        for col in cols:
+            if col == 'inherit_location' and not cls.allow_location_inheritance:
+                continue
+
+            @listens_for(getattr(cls, col), 'set')
+            def _set_col(target, value, oldvalue, *unused):
+                from indico.modules.events.util import register_location_change
+                if oldvalue in (NEVER_SET, NO_VALUE):
+                    return
+                if value != oldvalue:
+                    register_location_change(target)
 
     @property
     def location_parent(self):
@@ -208,20 +211,30 @@ class LocationMixin(object):
     def venue_name(self, venue_name):
         self.own_venue_name = venue_name
 
-    def get_room_name(self, full=True):
+    def get_room_name(self, full=True, verbose=False):
         """The name of the room where this item is located.
 
-        :param full: by default, if the room has a "friendly name" too
-                     (e.g. 'Main Amphitheatre'), a composite name will be
-                     returned. If ``full`` is set to ``False``, only the
-                     "friendly name" will be returned in that case.
+        If both ``full`` and ``verbose`` are set to ``False``, the
+        "friendly name" will be returned in that case. Both ``full`` and
+        ``verbose`` cannot be set to ``True``.
+
+        :param full: If the room has a "friendly name" (e.g. 'Main
+                     Amphitheatre'), a composite name will be returned.
+        :param verbose: The `verbose_name` of the room will be returned.
         """
+        assert sum([full, verbose]) <= 1
         if self.inherit_location and self.location_parent is None:
             return ''
         room = self.room
         if room is not None:
-            return room.full_name if full else room.name
-        return self.own_room_name if not self.inherit_location else self.location_parent.room_name
+            if full:
+                return room.full_name
+            elif verbose and room.verbose_name:
+                return room.verbose_name
+            else:
+                return room.name
+        return (self.own_room_name if not self.inherit_location
+                else self.location_parent.get_room_name(full=full, verbose=verbose))
 
     @property
     def room_name(self):
@@ -234,7 +247,7 @@ class LocationMixin(object):
 
     @property
     def has_location_info(self):
-        """Whether the object has basic location information set"""
+        """Whether the object has basic location information set."""
         return bool(self.venue_name or self.room_name)
 
     @property

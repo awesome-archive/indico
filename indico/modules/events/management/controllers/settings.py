@@ -1,40 +1,49 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import redirect, session
 from werkzeug.exceptions import Forbidden
 
 from indico.core import signals
+from indico.core.config import config
+from indico.core.db import db
+from indico.core.db.sqlalchemy.util.queries import db_dates_overlap
+from indico.modules.categories.models.categories import InheritableConfigMode
 from indico.modules.events.management.controllers.base import RHManageEventBase
 from indico.modules.events.management.forms import (EventClassificationForm, EventContactInfoForm, EventDataForm,
-                                                    EventDatesForm, EventLocationForm, EventPersonsForm)
+                                                    EventDatesForm, EventLanguagesForm, EventLocationForm,
+                                                    EventPersonsForm)
 from indico.modules.events.management.util import flash_if_unregistered
 from indico.modules.events.management.views import WPEventSettings, render_event_management_header_right
+from indico.modules.events.models.labels import EventLabel
+from indico.modules.events.models.references import ReferenceType
 from indico.modules.events.operations import update_event
-from indico.modules.events.util import track_time_changes
+from indico.modules.events.registration.models.forms import RegistrationForm
+from indico.modules.events.util import should_show_draft_warning, track_location_changes, track_time_changes
+from indico.modules.rb.models.reservation_occurrences import ReservationOccurrence
+from indico.modules.rb.models.reservations import Reservation
+from indico.modules.rb.models.rooms import Room
+from indico.modules.rb.util import rb_check_if_visible
 from indico.util.signals import values_from_signal
 from indico.web.flask.templating import get_template_module
 from indico.web.forms.base import FormDefaults
+from indico.web.forms.fields.simple import make_keywords_field
 from indico.web.util import jsonify_data, jsonify_form, jsonify_template
 
 
+def _show_google_wallet_location_warning(event):
+    if bool(event.address) == event.has_location_info:
+        return False
+    return (RegistrationForm.query.with_parent(event).filter(RegistrationForm.ticket_google_wallet).has_rows()
+            and event.category.google_wallet_mode == InheritableConfigMode.enabled)
+
+
 class RHEventSettings(RHManageEventBase):
-    """Event settings dashboard"""
+    """Event settings dashboard."""
 
     def _check_access(self):
         if not session.user:
@@ -50,7 +59,33 @@ class RHEventSettings(RHManageEventBase):
         RHManageEventBase._check_access(self)  # mainly to trigger the legacy "event locked" check
 
     def _process(self):
-        return WPEventSettings.render_template('settings.html', self.event, 'settings')
+        show_booking_warning = False
+        if (config.ENABLE_ROOMBOOKING and rb_check_if_visible(session.user)
+                and not self.event.has_ended and self.event.room and not self.event.room_reservation_occurrence_links):
+            # Check if any of the managers of the event already have a booking that overlaps with the event datetime
+            manager_ids = [p.user.id for p in self.event.acl_entries if p.user]
+            has_overlap = (ReservationOccurrence.query
+                           .filter(ReservationOccurrence.is_valid,
+                                   db.or_(Reservation.booked_for_id.in_(manager_ids),
+                                          Reservation.created_by_id.in_(manager_ids)),
+                                   db_dates_overlap(ReservationOccurrence,
+                                                    'start_dt', self.event.start_dt_local,
+                                                    'end_dt', self.event.end_dt_local),
+                                   Reservation.room_id == self.event.room.id,
+                                   ~Room.is_deleted)
+                           .join(Reservation)
+                           .join(Room)
+                           .has_rows())
+            show_booking_warning = not has_overlap
+        has_reference_types = ReferenceType.query.has_rows()
+        has_event_labels = EventLabel.query.has_rows()
+        return WPEventSettings.render_template('settings.html', self.event, 'settings',
+                                               show_booking_warning=show_booking_warning,
+                                               show_draft_warning=should_show_draft_warning(self.event),
+                                               has_reference_types=has_reference_types,
+                                               has_event_labels=has_event_labels,
+                                               google_wallet_location_warning=_show_google_wallet_location_warning(
+                                                   self.event))
 
 
 class RHEditEventDataBase(RHManageEventBase):
@@ -63,17 +98,25 @@ class RHEditEventDataBase(RHManageEventBase):
     def render_settings_box(self):
         tpl = get_template_module('events/management/_settings.html')
         assert self.section_name
-        return tpl.render_event_settings(self.event, section=self.section_name, with_container=False)
+        has_reference_types = ReferenceType.query.has_rows()
+        has_event_labels = EventLabel.query.has_rows()
+        google_wallet_location_warning = _show_google_wallet_location_warning(self.event)
+        return tpl.render_event_settings(self.event, has_reference_types, has_event_labels,
+                                         google_wallet_location_warning,
+                                         section=self.section_name, with_container=False)
 
     def jsonify_success(self):
         return jsonify_data(settings_box=self.render_settings_box(),
                             right_header=render_event_management_header_right(self.event))
 
+    def _update(self, form_data):
+        update_event(self.event, **form_data)
+
     def _process(self):
         form = self.form_class(obj=self.event, event=self.event)
         if form.validate_on_submit():
             with flash_if_unregistered(self.event, lambda: self.event.person_links):
-                update_event(self.event, **form.data)
+                self._update(form.data)
             return self.jsonify_success()
         self.commit = False
         return self.render_form(form)
@@ -87,6 +130,10 @@ class RHEditEventData(RHEditEventDataBase):
 class RHEditEventLocation(RHEditEventDataBase):
     form_class = EventLocationForm
     section_name = 'location'
+
+    def _update(self, form_data):
+        with track_location_changes():
+            return super()._update(form_data)
 
 
 class RHEditEventPersons(RHEditEventDataBase):
@@ -103,8 +150,20 @@ class RHEditEventContactInfo(RHEditEventDataBase):
 
 
 class RHEditEventClassification(RHEditEventDataBase):
-    form_class = EventClassificationForm
     section_name = 'classification'
+
+    def render_form(self, form):
+        return jsonify_form(form, fields=form._field_order, footer_align_right=True)
+
+    @property
+    def form_class(self):
+        keywords = make_keywords_field('event', self.event.keywords)
+        return type('_EventClassificationForm', (EventClassificationForm,), {'keywords': keywords})
+
+
+class RHEditEventLanguages(RHEditEventDataBase):
+    form_class = EventLanguagesForm
+    section_name = 'languages'
 
 
 class RHEditEventDates(RHEditEventDataBase):

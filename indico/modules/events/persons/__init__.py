@@ -1,25 +1,17 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
 from indico.core import signals
 from indico.core.logger import Logger
+from indico.modules.events.settings import EventSettingsProxy
+from indico.modules.users import EnumConverter
+from indico.util.enum import RichIntEnum
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
@@ -35,15 +27,49 @@ def _sidemenu_items(sender, event, **kwargs):
                             section='organization')
 
 
-@signals.get_placeholders.connect_via('event-persons-email')
-def _get_placeholders(sender, person, event, register_link=False, **kwargs):
-    from indico.modules.events.persons.placeholders import (FirstNamePlaceholder, LastNamePlaceholder, EmailPlaceholder,
-                                                            EventTitlePlaceholder, EventLinkPlaceholder,
-                                                            RegisterLinkPlaceholder)
-    yield FirstNamePlaceholder
-    yield LastNamePlaceholder
-    yield EmailPlaceholder
-    yield EventTitlePlaceholder
-    yield EventLinkPlaceholder
+@signals.core.get_placeholders.connect_via('event-persons-email')
+def _get_placeholders(sender, person, event, contribution=None, abstract=None, register_link=False, object_context=None,
+                      **kwargs):
+    from indico.modules.events import placeholders as event_placeholders
+    from indico.modules.events.persons import placeholders as person_placeholders
+
+    yield person_placeholders.FirstNamePlaceholder
+    yield person_placeholders.LastNamePlaceholder
+    yield person_placeholders.EmailPlaceholder
+    yield event_placeholders.EventTitlePlaceholder
+    yield event_placeholders.EventLinkPlaceholder
     if register_link:
-        yield RegisterLinkPlaceholder
+        yield person_placeholders.RegisterLinkPlaceholder
+    if object_context == 'abstracts':
+        yield person_placeholders.AbstractIDPlaceholder
+        yield person_placeholders.AbstractTitlePlaceholder
+        yield person_placeholders.AbstractContributionLinkPlaceholder
+    elif object_context == 'contributions':
+        yield person_placeholders.ContributionIDPlaceholder
+        yield person_placeholders.ContributionTitlePlaceholder
+        yield person_placeholders.ContributionCodePlaceholder
+        yield person_placeholders.ContributionBoardNumberPlaceholder
+        yield person_placeholders.ContributionLinkPlaceholder
+        yield person_placeholders.ContributionDurationPlaceholder
+        yield person_placeholders.ContributionSchedulePlaceholder
+    else:
+        yield person_placeholders.ContributionsPlaceholder
+
+
+class CustomPersonsMode(RichIntEnum):
+    __titles__ = [None, _('Always'), _('After search'), _('Never')]
+    always = 1  # Allow submitters to add people manually
+    after_search = 2  # Prevent submitters from adding people manually before searching
+    never = 3  # Disallow submitters from adding people manually
+
+
+persons_settings = EventSettingsProxy('persons', {
+    'custom_persons_mode': CustomPersonsMode.always,
+    'default_search_external': False,  # Enable "Users with no Indico account" by default
+    'show_titles': True,  # Whether to show titles for people in the event
+}, converters={'custom_persons_mode': EnumConverter(CustomPersonsMode)})
+
+
+@signals.event.cloned.connect
+def _event_cloned(old_event, new_event, **kwargs):
+    persons_settings.set_multi(new_event, persons_settings.get_all(old_event, no_defaults=True))

@@ -1,11 +1,12 @@
 {% extends 'layout/admin_page.html' %}
 {% from 'forms/_form.html' import form_header, form_rows, form_footer, simple_form %}
+{% from 'users/_labels.html' import labels %}
 
 {% block title %}{% trans %}Users{% endtrans %}{% endblock %}
 
 {% block title_actions %}
-    <a class="i-button borderless icon-settings arrow js-dropdown" data-toggle="dropdown"></a>
-    <ul class="dropdown">
+    <button class="i-button borderless icon-settings arrow js-dropdown" data-toggle="dropdown"></button>
+    <ul class="i-dropdown">
         <li>
             <a href="#"
                data-title="{% trans %}User settings{% endtrans %}"
@@ -27,7 +28,10 @@
                 </div>
                 <div class="i-box-buttons toolbar right">
                     <div class="group">
-                        <a class="i-button icon-users" href="{{ url_for('.users_merge') }}">{% trans %}Merge users{% endtrans %}</a>
+                        <a class="i-button icon-users"
+                           href="{{ url_for('.users_merge') }}">
+                            {% trans %}Merge users{% endtrans %}
+                        </a>
                     </div>
                     <div class="group">
                         <a href="#"
@@ -38,7 +42,7 @@
                             {% trans %}Create new account{% endtrans %}
                         </a>
                     </div>
-                    {% if num_reg_requests or indico_config.LOCAL_MODERATION %}
+                    {% if num_reg_requests or has_moderation %}
                         <div class="group">
                             <a class="i-button icon-info" href="{{ url_for('.registration_request_list') }}">
                                 {% trans %}Registration requests{% endtrans %}
@@ -48,9 +52,13 @@
                     {% endif %}
                 </div>
             </div>
-            <div class="i-box-content">
+            <span class="i-box-content">
                 <div class="info-message-box">
-                    <div class="message-text">{% trans num_of_users=num_of_users %}There are {{ num_of_users }} users, {{ num_deleted_users }} of which are deleted{% endtrans %}</div>
+                    <div class="message-text">
+                        {%- trans -%}
+                            There are {{ num_of_users }} users, {{ num_deleted_users }} of which are deleted
+                        {%- endtrans -%}
+                    </div>
                 </div>
                 <h2>{% trans %}Search users{% endtrans %}</h2>
                 {{ form_header(form) }}
@@ -71,7 +79,8 @@
                         </h3>
                         <ul class="group-list">
                             {% for user_entry in search_results -%}
-                                <li>
+                                <li class="flexrow f-a-center">
+                                    <img src="{{ user_entry.avatar_url }}" class="ui image circular profile-picture" alt="">
                                     <span>
                                         {%- if user_entry.profile_url -%}
                                             <a href="{{ user_entry.profile_url }}">{{ user_entry.full_name }}</a>
@@ -79,11 +88,16 @@
                                             {{ user_entry.full_name }}
                                         {%- endif -%}
                                     </span>
-                                    <span class="right">
+                                    {% if user_entry.user %}
+                                        <span>
+                                            {{ labels(user_entry.user) }}
+                                        </span>
+                                    {% endif %}
+                                    <span class="right text-right">
                                         {% if user_entry.user and user_entry.user.is_system %}
-                                            <em title="{% trans %}This is the system user.{% endtrans %}">
+                                            <span class="ui tiny label">
                                                 {%- trans %}System{% endtrans -%}
-                                            </em>
+                                            </span>
                                         {% else %}
                                             {{ user_entry.email }}
                                         {% endif %}

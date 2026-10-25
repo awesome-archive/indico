@@ -1,37 +1,24 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db.sqlalchemy.descriptions import RENDER_MODE_WRAPPER_MAP
 from indico.modules.events.abstracts.settings import abstracts_reviewing_settings, abstracts_settings
 from indico.modules.events.settings import EventSettingProperty
 from indico.util.date_time import now_utc
-from indico.util.string import return_ascii
 
 
-class CallForAbstracts(object):
-    """Proxy class to facilitate access to the call for abstracts settings"""
+class CallForAbstracts:
+    """Proxy class to facilitate access to the call for abstracts settings."""
 
     def __init__(self, event):
         self.event = event
 
-    @return_ascii
     def __repr__(self):
-        return '<CallForAbstracts({}, start_dt={}, end_dt={})>'.format(self.event.id, self.start_dt, self.end_dt)
+        return f'<CallForAbstracts({self.event.id}, start_dt={self.start_dt}, end_dt={self.end_dt})>'
 
     start_dt = EventSettingProperty(abstracts_settings, 'start_dt')
     end_dt = EventSettingProperty(abstracts_settings, 'end_dt')
@@ -41,6 +28,10 @@ class CallForAbstracts(object):
     allow_contributors_in_comments = EventSettingProperty(abstracts_reviewing_settings,
                                                           'allow_contributors_in_comments')
     allow_convener_judgment = EventSettingProperty(abstracts_reviewing_settings, 'allow_convener_judgment')
+    allow_convener_track_change = EventSettingProperty(abstracts_reviewing_settings, 'allow_convener_track_change')
+    force_track_selection = EventSettingProperty(abstracts_reviewing_settings, 'force_track_selection')
+    allow_editing = EventSettingProperty(abstracts_settings, 'allow_editing')
+    contribution_submitters = EventSettingProperty(abstracts_settings, 'contribution_submitters')
     submission_instructions = EventSettingProperty(abstracts_settings, 'submission_instructions')
     reviewing_instructions = EventSettingProperty(abstracts_reviewing_settings, 'reviewing_instructions')
     judgment_instructions = EventSettingProperty(abstracts_reviewing_settings, 'judgment_instructions')
@@ -52,6 +43,10 @@ class CallForAbstracts(object):
     @property
     def has_ended(self):
         return self.end_dt is not None and self.end_dt <= now_utc()
+
+    @property
+    def is_scheduled(self):
+        return self.start_dt is not None
 
     @property
     def is_open(self):

@@ -1,69 +1,79 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+@use 'base' as *;
+@use 'design_system';
 
 .footer {
-    color: $light-black;
-    padding: 10px 5px 10px 10px;
+  padding: 10px 5px 10px 10px;
 
-    &.dark {
-        color: $gray;
+  &.dark {
+    @extend %dark-mode;
+
+    color: $gray;
+  }
+
+  img {
+    vertical-align: middle;
+  }
+
+  span {
+    @extend %secondary-text-normal;
+  }
+
+  a {
+    @extend %link;
+  }
+
+  .footer-logo {
+    height: 40px;
+  }
+
+  * {
+    line-height: 40px;
+  }
+
+  .footer-links-heading {
+    @extend %visually-hidden;
+  }
+
+  .footer-links {
+    list-style-type: none;
+    padding: 0;
+    color: $gray;
+
+    li {
+      display: inline-block;
     }
 
-    img {
-        vertical-align: middle;
+    li:not(:first-child)::before {
+      content: '|';
     }
+  }
 
-    .footer-logo {
-        height: 40px;
-    }
+  .footer-extra {
+    text-align: right;
+  }
 
-    * {
-        line-height: 40px;
-    }
-
-    .footer-links {
-        list-style-type: none;
-        padding: 0;
-        color: $gray;
-
-        li {
-            display: inline-block;
-        }
-
-        li:not(:first-child)::before {
-            content: '|';
-        }
-    }
-
-    .footer-extra {
-        text-align: right;
-    }
+  .version {
+    @extend %secondary-text-normal;
+  }
 }
 
 .social-share {
-    display: none;
+  display: none;
 }
 
 .social-button-container {
-    display: none;
-    border-radius: 10px;
-    opacity: 0.5;
+  display: none;
+  border-radius: 10px;
+  opacity: 0.5;
 
-    .social-button:hover {
-        cursor: pointer;
-    }
+  .social-button:hover {
+    cursor: pointer;
+  }
 }

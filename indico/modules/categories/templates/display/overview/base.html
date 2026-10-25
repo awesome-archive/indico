@@ -43,9 +43,11 @@
                         </select>
                     </div>
                 </div>
+                {% block category_filter_extra %}{% endblock %}
             </div>
             <span id="applyButtonWrapper">
-                <input class="i-button" type="submit" value="{% trans %}Apply{% endtrans %}">
+                {# i18n: A button that applies filtering options to some items #}
+                <input class="i-button" type="submit" value="{% trans 'Filters' %}Apply{% endtrans %}">
             </span>
         </form>
         {% if subcategories %}
@@ -105,14 +107,20 @@
 {% block content %}
     <div class="category-overview">
         <div class="title flexrow f-j-center f-a-center">
-            <div class="navigation">
-                {% block overview_navigation_left %}{% endblock %}
-            </div>
+            {% if session.user %}
+                <div class="navigation">
+                    {% block overview_navigation_left %}{% endblock %}
+                </div>
+            {% endif %}
             <div class="text">{% block overview_title %}{% endblock %}</div>
-            <div class="navigation">
-                {% block overview_navigation_right %}{% endblock %}
-            </div>
+            {% if session.user %}
+                <div class="navigation">
+                    {% block overview_navigation_right %}{% endblock %}
+                </div>
+            {% endif %}
         </div>
-        {% block overview %}{% endblock %}
+        <div class="category-table">
+            {% block overview %}{% endblock %}
+        </div>
     </div>
 {% endblock %}

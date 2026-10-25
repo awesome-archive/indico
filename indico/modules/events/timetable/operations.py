@@ -1,21 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+from datetime import datetime
 from operator import attrgetter
 
 from flask import session
@@ -23,12 +13,13 @@ from flask import session
 from indico.core import signals
 from indico.core.db import db
 from indico.core.errors import UserValueError
-from indico.modules.events import EventLogKind, EventLogRealm
+from indico.modules.events import EventLogRealm
 from indico.modules.events.sessions.operations import update_session_block
 from indico.modules.events.timetable import logger
 from indico.modules.events.timetable.models.breaks import Break
 from indico.modules.events.timetable.models.entries import TimetableEntry, TimetableEntryType
 from indico.modules.events.timetable.util import find_latest_entry_end_dt
+from indico.modules.logs import LogKind
 from indico.util.date_time import format_datetime
 from indico.util.i18n import _
 
@@ -52,7 +43,9 @@ def create_break_entry(event, data, session_block=None):
     break_ = Break()
     entry_data = {'object': break_,
                   'start_dt': data.pop('start_dt')}
-    break_.populate_from_dict(data)
+    # XXX: disable change tracking since `location_data` cannot be read back at this point
+    #      due to the break having no valid `location_parent`
+    break_.populate_from_dict(data, track_changes=False)
     parent = session_block.timetable_entry if session_block else None
     return create_timetable_entry(event, entry_data, parent=parent, extend_parent=True)
 
@@ -62,6 +55,7 @@ def update_break_entry(break_, data):
     if start_dt is not None:
         update_timetable_entry(break_.timetable_entry, {'start_dt': start_dt})
     break_.populate_from_dict(data)
+    db.session.flush()
 
 
 def create_session_block_entry(session_, data):
@@ -81,8 +75,8 @@ def create_timetable_entry(event, data, parent=None, extend_parent=False):
     db.session.flush()
     signals.event.timetable_entry_created.send(entry)
     logger.info('Timetable entry %s created by %s', entry, user)
-    entry.event.log(EventLogRealm.management, EventLogKind.positive, 'Timetable',
-                    "Entry for {} '{}' created".format(object_type, object_title), user,
+    entry.event.log(EventLogRealm.management, LogKind.positive, 'Timetable',
+                    f"Entry for {object_type} '{object_title}' created", user,
                     data={'Time': format_datetime(entry.start_dt, timezone=event.tzinfo)})
     if extend_parent:
         entry.extend_parent()
@@ -96,8 +90,7 @@ def schedule_contribution(contribution, start_dt, session_block=None, extend_par
         contribution.session = session_block.session
         contribution.session_block = session_block
         parent = session_block.timetable_entry
-    entry = create_timetable_entry(contribution.event, data, parent=parent, extend_parent=extend_parent)
-    return entry
+    return create_timetable_entry(contribution.event, data, parent=parent, extend_parent=extend_parent)
 
 
 def update_timetable_entry(entry, data):
@@ -107,8 +100,8 @@ def update_timetable_entry(entry, data):
     if changes:
         signals.event.timetable_entry_updated.send(entry, changes=changes)
         logger.info('Timetable entry %s updated by %s', entry, session.user)
-        entry.event.log(EventLogRealm.management, EventLogKind.change, 'Timetable',
-                        "Entry for {} '{}' modified".format(object_type, object_title), session.user,
+        entry.event.log(EventLogRealm.management, LogKind.change, 'Timetable',
+                        f"Entry for {object_type} '{object_title}' modified", session.user,
                         data={'Time': format_datetime(entry.start_dt)})
 
 
@@ -116,11 +109,12 @@ def delete_timetable_entry(entry, log=True):
     object_type, object_title = _get_object_info(entry)
     signals.event.timetable_entry_deleted.send(entry)
     entry.object = None
+    entry.parent = None
     db.session.flush()
     if log:
         logger.info('Timetable entry %s deleted by %s', entry, session.user)
-        entry.event.log(EventLogRealm.management, EventLogKind.negative, 'Timetable',
-                        "Entry for {} '{}' deleted".format(object_type, object_title), session.user,
+        entry.event.log(EventLogRealm.management, LogKind.negative, 'Timetable',
+                        f"Entry for {object_type} '{object_title}' deleted", session.user,
                         data={'Time': format_datetime(entry.start_dt)})
 
 
@@ -134,13 +128,13 @@ def fit_session_block_entry(entry, log=True):
     entry.session_block.duration = end_dt - entry.start_dt
     db.session.flush()
     if log:
-        entry.event.log(EventLogRealm.management, EventLogKind.change, 'Timetable',
-                        "Session block fitted to contents", session.user,
+        entry.event.log(EventLogRealm.management, LogKind.change, 'Timetable',
+                        'Session block fitted to contents', session.user,
                         data={'Session block': entry.session_block.full_title})
 
 
-def move_timetable_entry(entry, parent=None, day=None):
-    """Move the `entry` to another session or top-level timetable
+def move_timetable_entry(entry: TimetableEntry, parent: TimetableEntry | None = None, day: datetime | None = None):
+    """Move the `entry` to another session or top-level timetable.
 
     :param entry: `TimetableEntry` to be moved
     :param parent: If specified then the entry will be set as a child
@@ -149,17 +143,17 @@ def move_timetable_entry(entry, parent=None, day=None):
                         top-level timetable on this day
     """
     if bool(parent) + bool(day) != 1:
-        raise TypeError("Wrong number of arguments")
+        raise TypeError('Wrong number of arguments')
 
     from indico.modules.events.contributions.operations import update_contribution
 
     updates = {}
     contrib_update_data = {}
     if day:
-        new_start_dt = entry.start_dt.replace(day=day.day, month=day.month)
+        new_start_dt = entry.start_dt.replace(day=day.day, month=day.month, year=day.year)
         updates['start_dt'] = new_start_dt
         updates['parent'] = None
-        contrib_update_data = {'session_id': None, 'session_block_id': None}
+        contrib_update_data = {'session_block': None, 'session': None}
     elif parent:
         new_start_dt = find_latest_entry_end_dt(parent.object) or parent.start_dt
         tz = entry.event.tzinfo
@@ -178,7 +172,7 @@ def move_timetable_entry(entry, parent=None, day=None):
 
 
 def update_timetable_entry_object(entry, data):
-    """Update the `object` of a timetable entry according to its type"""
+    """Update the `object` of a timetable entry according to its type."""
     from indico.modules.events.contributions.operations import update_contribution
     obj = entry.object
     if entry.type == TimetableEntryType.CONTRIBUTION:
@@ -191,7 +185,7 @@ def update_timetable_entry_object(entry, data):
 
 
 def swap_timetable_entry(entry, direction, session_=None):
-    """Swap entry with closest gap or non-parallel sibling"""
+    """Swap entry with closest gap or non-parallel sibling."""
     in_session = session_ is not None
     sibling = get_sibling_entry(entry, direction=direction, in_session=in_session)
     if not sibling:

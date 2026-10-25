@@ -1,41 +1,51 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-import React from 'react';
 import PropTypes from 'prop-types';
+import React, {useRef} from 'react';
 
+/*
+ * Show a tooltip if the contents were truncated/ellipsized via CSS.
+ *
+ * By default the check will act on the immediate child of this component,
+ * but in case of React components which do not forward refs, this will not
+ * work. In this case, ``useEventTarget`` can be used to apply the check and
+ * tooltip to the element triggering the mouseenter event. This generally only
+ * works well if there is exactly one element inside.
+ */
+export default function TooltipIfTruncated({children, useEventTarget, tooltip}) {
+  const ref = useRef();
 
-export default class TooltipIfTruncated extends React.Component {
-    static propTypes = {
-        children: PropTypes.any.isRequired
-    };
+  const handleMouseEnter = event => {
+    const element = useEventTarget ? event.target : ref.current;
+    const overflows =
+      element.offsetWidth < element.scrollWidth || element.offsetHeight < element.scrollHeight;
 
-    mouseEnter(event) {
-        const element = event.target;
-        const overflows = element.offsetWidth < element.scrollWidth || element.offsetHeight < element.scrollHeight;
-
-        if (overflows && !element.getAttribute('title')) {
-            element.setAttribute('title', element.innerText);
-        }
+    if (overflows && !element.getAttribute('title')) {
+      element.setAttribute('title', tooltip || element.innerText);
+      element.classList.add('ui-qtip');
     }
+  };
 
-    render() {
-        const {children} = this.props;
-        const child = React.Children.only(children);
-        return React.cloneElement(child, {onMouseEnter: (event) => this.mouseEnter(event)});
-    }
+  const child = React.Children.only(children);
+  const cloneProps = {onMouseEnter: handleMouseEnter};
+  if (!useEventTarget) {
+    cloneProps.ref = ref;
+  }
+  return React.cloneElement(child, cloneProps);
 }
+
+TooltipIfTruncated.propTypes = {
+  children: PropTypes.any.isRequired,
+  useEventTarget: PropTypes.bool,
+  tooltip: PropTypes.string,
+};
+
+TooltipIfTruncated.defaultProps = {
+  tooltip: null,
+  useEventTarget: false,
+};

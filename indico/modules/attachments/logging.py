@@ -1,29 +1,20 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from functools import wraps
 
+from flask import g
 from jinja2.filters import do_filesizeformat
 
 from indico.core import signals
 from indico.core.db.sqlalchemy.links import LinkType
 from indico.modules.attachments.models.attachments import AttachmentType
-from indico.modules.events.logs import EventLogKind, EventLogRealm
+from indico.modules.logs import EventLogRealm, LogKind
+from indico.modules.logs.models.entries import CategoryLogRealm
 
 
 def connect_log_signals():
@@ -37,13 +28,12 @@ def connect_log_signals():
 
 def _ignore_non_loggable(f):
     """
-    Only calls the decorated function the attachment/folder is not
-    linked to a category.
+    Only call the decorated function if the attachment/folder change
+    should be logged.
     """
     @wraps(f)
     def wrapper(sender, **kwargs):
-        folder = getattr(sender, 'folder', sender)  # sender may be a folder or attachment here
-        if folder.link_type != LinkType.category and not kwargs.get('internal'):
+        if not kwargs.get('internal'):
             f(sender, **kwargs)
 
     return wrapper
@@ -53,12 +43,16 @@ def _get_folder_data(folder, for_attachment=False):
     data = folder.link_event_log_data
     if for_attachment and not folder.is_default:
         data['Folder'] = folder.title
+        data['Folder ID'] = folder.id
+    elif not folder.is_default:
+        data['ID'] = folder.id
     return data
 
 
 def _get_attachment_data(attachment):
     data = _get_folder_data(attachment.folder, True)
-    data['Type'] = unicode(attachment.type.title)
+    data['ID'] = attachment.id
+    data['Type'] = str(attachment.type.title)
     data['Title'] = attachment.title
     if attachment.type == AttachmentType.link:
         data['URL'] = attachment.link_url
@@ -69,44 +63,46 @@ def _get_attachment_data(attachment):
     return data
 
 
-def _log(event, kind, msg, user, data):
-    event.log(EventLogRealm.management, kind, 'Materials', msg, user, data=data)
+def _log(folder, kind, msg, user, data, meta=None):
+    if folder.link_type == LinkType.category:
+        folder.category.log(CategoryLogRealm.category, kind, 'Materials', msg, user, data=data, meta=meta)
+    else:
+        folder.event.log(EventLogRealm.management, kind, 'Materials', msg, user, data=data, meta=meta)
 
 
 @_ignore_non_loggable
 def _log_folder_created(folder, user, **kwargs):
-    event = folder.object.event
-    _log(event, EventLogKind.positive, 'Created folder "{}"'.format(folder.title), user, _get_folder_data(folder))
+    _log(folder, LogKind.positive, f'Created folder "{folder.title}"', user, _get_folder_data(folder),
+         meta={'folder_id': folder.id})
 
 
 @_ignore_non_loggable
 def _log_folder_deleted(folder, user, **kwargs):
-    event = folder.object.event
-    _log(event, EventLogKind.negative, 'Deleted folder "{}"'.format(folder.title), user, _get_folder_data(folder))
+    _log(folder, LogKind.negative, f'Deleted folder "{folder.title}"', user, _get_folder_data(folder),
+         meta={'folder_id': folder.id})
 
 
 @_ignore_non_loggable
 def _log_folder_updated(folder, user, **kwargs):
-    event = folder.object.event
-    _log(event, EventLogKind.change, 'Updated folder "{}"'.format(folder.title), user, _get_folder_data(folder))
+    _log(folder, LogKind.change, f'Updated folder "{folder.title}"', user, _get_folder_data(folder),
+         meta={'folder_id': folder.id})
 
 
 @_ignore_non_loggable
 def _log_attachment_created(attachment, user, **kwargs):
-    event = attachment.folder.object.event
-    _log(event, EventLogKind.positive, 'Added material "{}"'.format(attachment.title), user,
-         _get_attachment_data(attachment))
+    if g.get('importing_event'):
+        return
+    _log(attachment.folder, LogKind.positive, f'Added material "{attachment.title}"', user,
+         _get_attachment_data(attachment), meta={'attachment_id': attachment.id})
 
 
 @_ignore_non_loggable
 def _log_attachment_deleted(attachment, user, **kwargs):
-    event = attachment.folder.object.event
-    _log(event, EventLogKind.negative, 'Deleted material "{}"'.format(attachment.title), user,
-         _get_attachment_data(attachment))
+    _log(attachment.folder, LogKind.negative, f'Deleted material "{attachment.title}"', user,
+         _get_attachment_data(attachment), meta={'attachment_id': attachment.id})
 
 
 @_ignore_non_loggable
 def _log_attachment_updated(attachment, user, **kwargs):
-    event = attachment.folder.object.event
-    _log(event, EventLogKind.change, 'Updated material "{}"'.format(attachment.title), user,
-         _get_attachment_data(attachment))
+    _log(attachment.folder, LogKind.change, f'Updated material "{attachment.title}"', user,
+         _get_attachment_data(attachment), meta={'attachment_id': attachment.id})

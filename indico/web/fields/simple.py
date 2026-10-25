@@ -1,23 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import division, unicode_literals
-
-from wtforms.fields import BooleanField, StringField, TextAreaField
-from wtforms.fields.html5 import IntegerField
+from wtforms.fields import BooleanField, IntegerField, StringField, TextAreaField
 from wtforms.validators import InputRequired, Length, NumberRange, Optional, ValidationError
 
 from indico.util.i18n import _
@@ -26,15 +14,15 @@ from indico.web.forms.validators import WordCount
 from indico.web.forms.widgets import SwitchWidget
 
 
-class TextConfigForm(object):
+class TextConfigForm:
     max_length = IntegerField(_('Max length'), [Optional(), NumberRange(min=1)])
     max_words = IntegerField(_('Max words'), [Optional(), NumberRange(min=1)])
     multiline = BooleanField(_('Multiline'), widget=SwitchWidget(),
-                             description=_("If the field should be rendered as a textarea instead of a single-line "
-                                           "text field."))
+                             description=_('If the field should be rendered as a textarea instead of a single-line '
+                                           'text field.'))
 
 
-class TextField(object):
+class TextField:
     name = 'text'
     friendly_name = _('Text')
     config_form = TextConfigForm
@@ -62,7 +50,7 @@ class TextField(object):
         return not value.data
 
 
-class NumberConfigForm(object):
+class NumberConfigForm:
     min_value = IntegerField(_('Min value'), [Optional()])
     max_value = IntegerField(_('Max value'), [Optional()])
 
@@ -75,7 +63,7 @@ class NumberConfigForm(object):
     validate_max_value = _validate_min_max_value
 
 
-class NumberField(object):
+class NumberField:
     name = 'number'
     friendly_name = _('Number')
     config_form = NumberConfigForm
@@ -91,7 +79,7 @@ class NumberField(object):
         return [NumberRange(min=min_value, max=max_value)]
 
 
-class BoolField(object):
+class BoolField:
     name = 'bool'
     friendly_name = _('Yes/No')
     wtf_field_class = IndicoRadioField

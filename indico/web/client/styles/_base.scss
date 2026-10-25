@@ -1,30 +1,22 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-@import "base/palette";
-@import "base/defaults";
+@forward 'base/palette';
+@forward 'base/defaults';
 
-@import "base/animation";
-@import "base/borders";
-@import "base/flex";
-@import "base/indicators";
-@import "base/layout";
-@import "base/pages";
-@import "base/reset";
-@import "base/theme";
-@import "base/typography";
-@import "base/utilities";
+@forward 'base/animation';
+@forward 'base/borders';
+@forward 'base/flex';
+@forward 'base/indicators';
+@forward 'base/layout';
+@forward 'base/pages';
+@forward 'base/reset';
+@forward 'base/theme';
+@forward 'base/typography';
+@forward 'base/typography_elements'; // css rules that are not just mixins extracted from typography
+@forward 'base/utilities';
+@forward 'base/sui_fixes';

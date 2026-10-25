@@ -1,39 +1,31 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import request
+from flask import request, session
 from sqlalchemy.orm import contains_eager, defaultload
+from werkzeug.exceptions import Forbidden
 
 from indico.modules.events.management.controllers import RHManageEventBase
 from indico.modules.events.registration.controllers import RegistrationFormMixin
 from indico.modules.events.registration.lists import RegistrationListGenerator
+from indico.modules.events.registration.models.form_fields import RegistrationFormField
 from indico.modules.events.registration.models.forms import RegistrationForm
 from indico.modules.events.registration.models.registrations import Registration
+from indico.util.i18n import _
 
 
 class RHManageRegFormsBase(RHManageEventBase):
-    """Base class for all registration management RHs"""
+    """Base class for all registration management RHs."""
 
     PERMISSION = 'registration'
 
 
 class RHManageRegFormBase(RegistrationFormMixin, RHManageRegFormsBase):
-    """Base class for a specific registration form"""
+    """Base class for a specific registration form."""
 
     def _process_args(self):
         RHManageRegFormsBase._process_args(self)
@@ -42,7 +34,7 @@ class RHManageRegFormBase(RegistrationFormMixin, RHManageRegFormsBase):
 
 
 class RHManageRegistrationBase(RHManageRegFormBase):
-    """Base class for a specific registration"""
+    """Base class for a specific registration."""
 
     normalize_url_spec = {
         'locators': {
@@ -52,10 +44,10 @@ class RHManageRegistrationBase(RHManageRegFormBase):
 
     def _process_args(self):
         RHManageRegFormBase._process_args(self)
-        self.registration = (Registration
-                             .find(Registration.id == request.view_args['registration_id'],
-                                   ~Registration.is_deleted,
-                                   ~RegistrationForm.is_deleted)
+        self.registration = (Registration.query
+                             .filter(Registration.id == request.view_args['registration_id'],
+                                     ~Registration.is_deleted,
+                                     ~RegistrationForm.is_deleted)
                              .join(Registration.registration_form)
                              .options(contains_eager(Registration.registration_form)
                                       .defaultload('form_items')
@@ -63,3 +55,35 @@ class RHManageRegistrationBase(RHManageRegFormBase):
                              .options(defaultload(Registration.data)
                                       .joinedload('field_data'))
                              .one())
+
+    def _check_access(self):
+        RHManageRegFormBase._check_access(self)
+        permissions = self.PERMISSION if isinstance(self.PERMISSION, (tuple, set, list)) else (self.PERMISSION,)
+        if not any(self.registration.can_manage(session.user, p) for p in permissions):
+            raise Forbidden(_('You are not authorized to manage this registration.'))
+
+
+class RHManageRegistrationModerationBase(RHManageRegistrationBase):
+    """Base class for moderating registrations."""
+
+    PERMISSION = ('registration', 'registration_moderation')
+
+
+class RHManageRegistrationFieldActionBase(RHManageRegFormBase):
+    """Base class for a specific registration field."""
+
+    normalize_url_spec = {
+        'locators': {
+            lambda self: self.field
+        },
+        'skipped_args': {'section_id'}
+    }
+
+    def _process_args(self):
+        RHManageRegFormBase._process_args(self)
+        self.field = (RegistrationFormField.query
+                      .filter(RegistrationFormField.id == request.view_args['field_id'],
+                              RegistrationFormField.registration_form == self.regform,
+                              RegistrationFormField.is_enabled,
+                              ~RegistrationFormField.is_deleted)
+                      .one())

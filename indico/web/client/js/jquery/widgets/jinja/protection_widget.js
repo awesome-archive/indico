@@ -1,71 +1,70 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+/* global handleAjaxError:true */
+
+import _ from 'lodash';
 
 (function(global) {
-    'use strict';
+  global.setupProtectionWidget = function setupProtectionWidget(options) {
+    options = $.extend(
+      true,
+      {
+        fieldId: null,
+        fieldName: null,
+        parentProtected: false,
+        aclMessageUrl: null,
+        hasInheritedAcl: false,
+        permissionsFieldId: null,
+        isUnlistedEvent: false,
+      },
+      options
+    );
 
-    global.setupProtectionWidget = function setupProtectionWidget(options) {
-        options = $.extend(true, {
-            fieldId: null,
-            fieldName: null,
-            parentProtected: false,
-            aclMessageUrl: null,
-            hasInheritedAcl: false,
-            permissionsFieldId: null
-        }, options);
+    const inputs = $(`input[name=${options.fieldName}][id^=${options.fieldId}]`);
 
-        var inputs = $('input[name=' + options.fieldName + '][id^=' + options.fieldId + ']');
-        var $enableAclLink = $('.enable-acl-link');
-        var $aclListField = $('.acl-list-field');
+    if (options.isUnlistedEvent) {
+      inputs.prop('disabled', true);
+      $(`#form-group-protected-${options.fieldId} .protection-message`).hide();
+      $(`#form-group-protected-${options.fieldId} .unlisted-event-protection-message`).show();
+    }
 
-        inputs.on('change', function() {
-            var $this = $(this);
-            var isProtected = $this.val() === 'protected' || ($this.val() === 'inheriting' && options.parentProtected);
+    inputs.on('change', function() {
+      const $this = $(this);
+      const isProtected =
+        $this.val() === 'protected' || ($this.val() === 'inheriting' && options.parentProtected);
 
-            if (this.checked) {
-                $('#form-group-protected-{0} .protection-message'.format(options.fieldId)).hide();
-                $('#form-group-protected-{0} .{1}-protection-message'.format(options.fieldId, $this.val())).show();
+      if (this.checked) {
+        $(`#form-group-protected-${options.fieldId} .protection-message`).hide();
+        $(`#form-group-protected-${options.fieldId} .${$this.val()}-protection-message`).show();
 
-                if (options.aclMessageUrl && options.hasInheritedAcl) {
-                    $.ajax({
-                        url: options.aclMessageUrl,
-                        data: {mode: $this.val()},
-                        error: handleAjaxError,
-                        success: function(data) {
-                            $this.closest('form').find('.inheriting-acl-message').html(data.html);
-                        }
-                    });
-                }
-                $aclListField.toggleClass('hidden', !isProtected);
-                $enableAclLink.toggleClass('hidden', isProtected);
-                if (options.permissionsFieldId) {
-                    $('#permissions-widget-{0}'.format(options.permissionsFieldId))
-                        .trigger('indico:protectionModeChanged', [isProtected]);
-                }
-            }
-        });
+        if (options.aclMessageUrl && options.hasInheritedAcl) {
+          $.ajax({
+            url: options.aclMessageUrl,
+            data: {mode: $this.val()},
+            error: handleAjaxError,
+            success(data) {
+              $this.closest('form').find('.inheriting-acl-message').html(data.html);
+            },
+          });
+        }
+        if (options.permissionsFieldId) {
+          $(`#permissions-widget-${options.permissionsFieldId}`).trigger(
+            'indico:protectionModeChanged',
+            [isProtected]
+          );
+        }
+      }
+    });
 
-        $enableAclLink.on('click', function(evt) {
-            evt.preventDefault();
-            $('input[name=' + options.fieldName + '][value="protected"]').trigger('click');
-        });
-
-        _.defer(function() {
-            inputs.trigger('change');
-        });
-    };
+    _.defer(() => {
+      if (!options.isUnlistedEvent) {
+        inputs.trigger('change');
+      }
+    });
+  };
 })(window);

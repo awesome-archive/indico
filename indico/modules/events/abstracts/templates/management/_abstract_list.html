@@ -1,5 +1,7 @@
 {% from 'message_box.html' import message_box %}
 {% from 'attachments/_management_info_column.html' import render_attachment_info %}
+{% from 'events/management/_lists.html' import render_num_reviews_tooltip %}
+{% from 'events/_affiliation.html' import render_person_affiliation %}
 
 {% macro _get_track_full_title(track, searchable=false) -%}
     {% if track.code -%}
@@ -31,7 +33,8 @@
 
 {% macro _render_abstract_state(abstract) %}
     {% set abstract_css_class = abstract.reviewing_state.css_class if abstract.can_convene(session.user) else abstract.public_state.css_class %}
-    <div class="i-tag outline semantic-text state-badge {{ abstract_css_class }}">
+    <div class="i-tag outline semantic-text state-badge {{ abstract_css_class }}"
+         data-qbubble="{{ render_num_reviews_tooltip(abstract, _render_proposed_contrib_types)|trim|forceescape }}">
         {% if abstract.public_state.name == 'under_review' and abstract.can_judge(session.user) %}
             {% trans count=abstract.reviews|length -%}
                 {{- count }} review
@@ -51,7 +54,15 @@
     </div>
 {% endmacro %}
 
-{% macro render_abstract_list(abstracts, dynamic_columns, static_columns, total_abstracts, context_track=none, reviewed_abstracts=none) %}
+{% macro _render_proposed_contrib_types(review_list) %}
+    {%- for type, reviews in review_list|selectattr('proposed_contribution_type')|groupby('proposed_contribution_type.name') %}
+        {{- reviews|selectattr('proposed_contribution_type.name', 'equalto', type)|list|length }}
+        {{ type -}}
+        {{- ", " if not loop.last -}}
+    {% endfor -%}
+{% endmacro %}
+
+{% macro render_abstract_list(abstracts, dynamic_columns, static_columns, total_abstracts, context_track=none, reviewed_abstracts=none, can_create_invited_abstracts=false) %}
     {% if abstracts %}
         <form method="POST">
             <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
@@ -72,7 +83,7 @@
                             <th class="i-table thin-column" data-sorter="false"></th>
                             <th class="i-table id-column">{% trans %}ID{% endtrans %}</th>
                             <th class="i-table">{% trans %}Title{% endtrans %}</th>
-                            {% for item in static_columns %}
+                            {% for item in static_columns if item.id != 'description' %}
                                 <th class="i-table" data-sorter="text">{{ item.caption }}</th>
                             {% endfor %}
                             {% for item in dynamic_columns %}
@@ -83,7 +94,7 @@
                                     {%- trans %}Reviewed{% endtrans -%}
                                 </th>
                             {% endif %}
-                            <th class="i-table thin-column" data-sorter="false"></th>
+                            <th class="i-table actions-column" data-sorter="false"></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -92,9 +103,15 @@
                                    abstract.accepted_track != context_track) %}
                                 {% set accepted_other = true %}
                                 {% set accepted_other_msg -%}
-                                    {%- trans other_track=abstract.accepted_track.full_title -%}
-                                        This abstract has already been accepted for the track "{{ other_track }}"
-                                    {%- endtrans -%}
+                                    {% if abstract.accepted_track %}
+                                        {%- trans other_track=abstract.accepted_track.full_title -%}
+                                            This abstract has already been accepted for the track "{{ other_track }}"
+                                        {%- endtrans -%}
+                                    {% else %}
+                                        {%- trans -%}
+                                            This abstract has already been accepted
+                                        {%- endtrans -%}
+                                    {% endif %}
                                 {%- endset %}
                             {% else %}
                                 {% set accepted_other = false %}
@@ -104,21 +121,23 @@
                                 title="{{ accepted_other_msg | forceescape }}"
                                 data-friendly-id="{{ abstract.friendly_id }}"
                                 data-title="{{ abstract.title }}">
-                                <td class="i-table id-column">
+                                <td class="i-table thin-column">
                                     <input type="checkbox" class="select-row" name="abstract_id"
                                            value="{{ abstract.id }}">
                                 </td>
                                 <td class="i-table id-column">
                                     {{- abstract.friendly_id -}}
                                 </td>
-                                <td class="i-table" data-searchable="{{ abstract.title | lower }}">
+                                <td class="i-table title-column" data-searchable="{{ abstract.title | lower }}">
                                     <a class="js-mathjax" href="{{ url_for('.display_abstract', abstract) }}">
                                         {{- abstract.title -}}
                                     </a>
                                 </td>
                                 {% for item in static_columns %}
                                     {% if item.id == 'state' %}
-                                        <td class="i-table" data-searchable="{{ abstract.public_state.title | lower }}">
+                                        {% set acceptances = abstract.reviews|selectattr('proposed_action.name', 'equalto', 'accept')|list|length %}
+                                        {% set sort_text = '{}-{}-{}'.format('1' if abstract.is_in_final_state else '0', abstract.state.name, acceptances) %}
+                                        <td class="i-table" data-searchable="{{ abstract.public_state.title|lower }}" data-text="{{ sort_text }}">
                                             {{ _render_abstract_state(abstract) }}
                                             {% if context_track is not none and abstract.state.name == 'accepted' and abstract.accepted_track != context_track  %}
                                                 <span class="icon-warning"></span>
@@ -126,13 +145,45 @@
                                         </td>
                                     {% elif item.id == 'submitter' %}
                                         <td class="i-table" data-searchable="{{ abstract.submitter.display_full_name }}">
-                                            {{- abstract.submitter.display_full_name -}}
+                                            {{- abstract.submitter.display_full_name }}
+                                            {% if abstract.submitter.affiliation %}
+                                                <span class="text-superfluous">({{ render_person_affiliation(abstract.submitter, compact=true) }})</span>
+                                            {% endif %}
+                                        </td>
+                                    {% elif item.id == 'speakers' %}
+                                        <td class="i-table person-row-cell"
+                                            data-searchable="{{ abstract.speakers | join(', ', attribute='display_full_name') | lower }}">
+                                            {% for speaker in abstract.speakers | sort(attribute='display_order_key_lastname') -%}
+                                                <div class="person-row icon-user">
+                                                    {{- speaker.display_full_name }}
+                                                    {% if speaker.affiliation %}
+                                                        <span class="text-superfluous">({{ render_person_affiliation(speaker, compact=true) }})</span>
+                                                    {% endif %}
+                                                </div>
+                                            {%- endfor %}
                                         </td>
                                     {% elif item.id == 'authors' %}
                                         <td class="i-table person-row-cell"
                                             data-searchable="{{ abstract.primary_authors | join(', ', attribute='display_full_name') | lower }}">
                                             {% for author in abstract.primary_authors | sort(attribute='display_order_key_lastname') -%}
-                                                <div class="person-row icon-user">{{ author.display_full_name }}</div>
+                                                <div class="person-row icon-user">
+                                                    {{- author.display_full_name }}
+                                                    {% if author.affiliation %}
+                                                        <span class="text-superfluous">({{ render_person_affiliation(author, compact=true) }})</span>
+                                                    {% endif %}
+                                                </div>
+                                            {%- endfor %}
+                                        </td>
+                                    {% elif item.id == 'coauthors' %}
+                                        <td class="i-table person-row-cell"
+                                            data-searchable="{{ abstract.secondary_authors | join(', ', attribute='display_full_name') | lower }}">
+                                            {% for author in abstract.secondary_authors | sort(attribute='display_order_key_lastname') -%}
+                                                <div class="person-row icon-user">
+                                                    {{- author.display_full_name }}
+                                                    {% if author.affiliation %}
+                                                        <span class="text-superfluous">({{ render_person_affiliation(author, compact=true) }})</span>
+                                                    {% endif %}
+                                                </div>
                                             {%- endfor %}
                                         </td>
                                     {% elif item.id == 'submitted_contrib_type' %}
@@ -178,21 +229,38 @@
                                                 {%- trans %}No track{% endtrans %}
                                             {%- endif -%}
                                         </td>
+                                    {% elif item.id == 'review_count' %}
+                                        <td class="i-table">
+                                            {{- abstract.reviews | length -}}
+                                        </td>
                                     {% elif item.id == 'score' %}
                                         <td class="i-table">
                                             {{- abstract.score | round(1) if abstract.score is not none else '-' }}
                                         </td>
+                                    {% elif item.id == 'score_std' %}
+                                        <td class="i-table">
+                                            {{- abstract.score_std | round(1) if abstract.score_std is not none else '-' }}
+                                        </td>
                                     {% elif item.id == 'submitted_dt' %}
-                                        {% set dt = abstract.submitted_dt | format_datetime('short', timezone=abstract.event.timezone) %}
-                                        <td class="i-table" data-text="{{ dt }}">{{- dt -}}</td>
+                                        <td class="i-table" data-text="{{ abstract.submitted_dt }}">
+                                            {{- abstract.submitted_dt | format_datetime('short', timezone=abstract.event.timezone) -}}
+                                        </td>
                                     {% elif item.id == 'modified_dt' %}
-                                        {% set dt = abstract.modified_dt | format_datetime('short', timezone=abstract.event.timezone) if abstract.modified_dt else '' %}
-                                        <td class="i-table" data-text="{{ dt }}">{{ dt if dt else '-' }}</td>
+                                        <td class="i-table" data-text="{{ abstract.modified_dt }}">
+                                            {{ abstract.modified_dt | format_datetime('short', timezone=abstract.event.timezone) if abstract.modified_dt else '-' }}
+                                        </td>
+                                    {% elif item.id == 'submission_comment' %}
+                                        <td class="i-table" data-searchable="{{ abstract.submission_comment | lower }}">
+                                            {{ abstract.submission_comment }}
+                                        </td>
                                     {% endif %}
                                 {% endfor %}
                                 {% set data = abstract.data_by_field %}
                                 {% for item in dynamic_columns %}
                                     {% set friendly_data = data[item.id].friendly_data if item.id in data else '' %}
+                                    {% if friendly_data is sequence and friendly_data is not string %}
+                                        {% set friendly_data = friendly_data | join(', ') %}
+                                    {% endif %}
                                     <td class="i-table" data-text="{{ friendly_data }}"
                                         data-searchable="{{ friendly_data | lower }}">
                                         {{- friendly_data if friendly_data else '-' -}}
@@ -208,14 +276,62 @@
                                         {% endif %}
                                     </td>
                                 {% endif %}
-                                <td class="i-table">
-                                    {% if abstract.state.name == 'accepted' and abstract.contribution %}
-                                        <a class="icon-arrow-right-sparse"
-                                           href="{{ url_for('contributions.display_contribution', abstract.contribution) }}"
-                                           title="{% trans %}Go to contribution{% endtrans %}"></a>
-                                    {% endif %}
+                                <td class="i-table actions-column">
+                                    <div class="group right">
+                                        {% if abstract.state.name == 'accepted' and abstract.contribution %}
+                                            <a class="icon-arrow-right-sparse"
+                                               href="{{ url_for('contributions.display_contribution', abstract.contribution) }}"
+                                               title="{% trans %}Go to contribution{% endtrans %}"></a>
+                                        {% endif %}
+                                        {% if g.rh.management %}
+                                            <div class="group hide-if-locked">
+                                                <a class="icon-copy hide-if-locked"
+                                                   data-toggle="dropdown"
+                                                   title="{% trans %}Clone{% endtrans %}"></a>
+                                                <ul class="i-dropdown">
+                                                    <li>
+                                                        <a class="js-dialog-action"
+                                                           title="{% trans %}Add new abstract{% endtrans %}"
+                                                           data-title="{% trans %}Add new abstract{% endtrans %}"
+                                                           data-href="{{ url_for('.manage_create_abstract', abstract) }}"
+                                                           data-params-selector="#abstract-list input[name=abstract_id]:checked"
+                                                           data-update='{"html": "#abstract-list", "filter_statistics": "#filter-statistics"}'
+                                                           data-confirm-close-unsaved
+                                                           data-ajax-dialog>
+                                                            {% trans %}Abstract{% endtrans %}
+                                                        </a>
+                                                    </li>
+                                                    <li>
+                                                        {%- if can_create_invited_abstracts -%}
+                                                            {%- set message = _("Add new invited abstract") %}
+                                                        {%- else -%}
+                                                            {%- set message = _("You first need to create a notification template for invited abstracts") %}
+                                                        {%- endif -%}
+                                                        <a class="js-dialog-action {{ 'disabled' if not can_create_invited_abstracts }}"
+                                                           title="{{ message }}"
+                                                           data-title="{% trans %}Add new invited abstract{% endtrans %}"
+                                                           data-href="{{ url_for('.manage_create_abstract', abstract, invited=true) }}"
+                                                           data-params-selector="#abstract-list input[name=abstract_id]:checked"
+                                                           data-update='{"html": "#abstract-list", "filter_statistics": "#filter-statistics"}'
+                                                           data-confirm-close-unsaved
+                                                           data-ajax-dialog>
+                                                            {% trans %}Invited abstract{% endtrans %}
+                                                        </a>
+                                                    </li>
+                                                </ul>
+                                            </div>
+                                        {% endif %}
+                                    </div>
                                 </td>
                             </tr>
+                            {% for item in static_columns if item.id == 'description' %}
+                                <tr class="details-row">
+                                    <td></td>
+                                    <td colspan="{{ 3 + static_columns|length + dynamic_columns|length - 1 }}">
+                                        {{ abstract.description }}
+                                    </td>
+                                </tr>
+                            {% endfor %}
                         {% endfor %}
                     </tbody>
                 </table>
@@ -232,4 +348,8 @@
             {%- endif %}
         {%- endcall %}
     {%- endif %}
+
+    <script>
+        $('.abstract-row').dropdown({selector: "a[data-toggle='dropdown']"});
+    </script>
 {% endmacro %}

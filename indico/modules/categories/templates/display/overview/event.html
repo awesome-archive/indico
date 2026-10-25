@@ -11,14 +11,17 @@
                         Ongoing from {{ start }} until {{ end }}.
                     {%- endtrans %}
                 {% endset %}
-                <span title="{{ ongoing_message }}">ongoing</span>
+                <span title="{{ ongoing_message }}">
+                    {% trans %}ongoing{% endtrans %}
+                </span>
             {% else %}
                 {{ event.start_dt|format_time(format='HH:mm', timezone=timezone) }}
             {% endif %}
+            {{ template_hook('event-overview-extras', event=event) }}
         <td class="title">
             <a class="js-mathjax" href="{{ event.url }}">{{ event.title }}</a>
             <span class="details">
-                {% if show_chairpersons and event.person_links %}
+                {% if event.type == 'lecture' and event.person_links %}
                     ({{ event.person_links|map(attribute='full_name')|sort|join('; ') }})
                 {% endif %}
                 {% if event.effective_protection_mode.name == 'protected' %}
@@ -31,6 +34,12 @@
                     {{ render_location(event, class='right') }}
                 {% endif %}
             </span>
+            {% if event.label %}
+                <span class="ui label basic mini {{ event.label.color }}"
+                      title="{{ event.label_message }}">
+                    {{- event.label.title -}}
+                </span>
+            {% endif %}
         </td>
     </tr>
     <tr>

@@ -1,24 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
 from indico.core import signals
+from indico.core.db.sqlalchemy.protection import make_acl_log_fn
 from indico.core.logger import Logger
 from indico.modules.attachments.logging import connect_log_signals
 from indico.modules.attachments.models.attachments import Attachment
@@ -29,16 +19,22 @@ from indico.web.flask.util import url_for
 from indico.web.menu import SideMenuItem
 
 
+__all__ = ('logger', 'Attachment', 'AttachmentFolder')
+
 logger = Logger.get('attachments')
 connect_log_signals()
+
+# Log ACL changes
+signals.acl.entry_changed.connect(make_acl_log_fn(Attachment), sender=Attachment, weak=False)
+signals.acl.entry_changed.connect(make_acl_log_fn(AttachmentFolder), sender=AttachmentFolder, weak=False)
 
 
 @signals.users.merged.connect
 def _merge_users(target, source, **kwargs):
     from indico.modules.attachments.models.attachments import Attachment, AttachmentFile
-    from indico.modules.attachments.models.principals import AttachmentPrincipal, AttachmentFolderPrincipal
-    Attachment.find(user_id=source.id).update({Attachment.user_id: target.id})
-    AttachmentFile.find(user_id=source.id).update({AttachmentFile.user_id: target.id})
+    from indico.modules.attachments.models.principals import AttachmentFolderPrincipal, AttachmentPrincipal
+    Attachment.query.filter_by(user_id=source.id).update({Attachment.user_id: target.id})
+    AttachmentFile.query.filter_by(user_id=source.id).update({AttachmentFile.user_id: target.id})
     AttachmentPrincipal.merge_users(target, source, 'attachment')
     AttachmentFolderPrincipal.merge_users(target, source, 'folder')
 
@@ -59,10 +55,16 @@ def _get_event_management_url(event, **kwargs):
 
 @signals.menu.items.connect_via('category-management-sidemenu')
 def _extend_category_management_menu(sender, category, **kwargs):
-    return SideMenuItem('attachments', _('Materials'), url_for('attachments.management', category), icon='upload')
+    return SideMenuItem('attachments', _('Materials'), url_for('attachments.management', category), icon='upload',
+                        weight=40)
 
 
 @signals.event_management.get_cloners.connect
 def _get_attachment_cloner(sender, **kwargs):
     from indico.modules.attachments.clone import AttachmentCloner
     return AttachmentCloner
+
+
+@signals.core.import_tasks.connect
+def _import_tasks(sender, **kwargs):
+    import indico.modules.attachments.tasks  # noqa: F401

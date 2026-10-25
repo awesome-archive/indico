@@ -1,26 +1,18 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.orm import joinedload, noload
 
 from indico.core.db import db
+from indico.modules.events.settings import autolinker_settings
 from indico.modules.events.timetable.models.entries import TimetableEntry, TimetableEntryType
+from indico.util.string import AutoLinkExtension, HTMLLinker, render_markdown
 from indico.web.flask.util import url_for
+from indico.web.util import ExpectedError
 
 
 def build_note_api_data(note):
@@ -51,7 +43,7 @@ def build_note_legacy_api_data(note):
 
 
 def get_scheduled_notes(event):
-    """Gets all notes of scheduled items inside an event"""
+    """Get all notes of scheduled items inside an event."""
     def _sort_note_by(note):
         obj = note.object
         if hasattr(obj, 'start_dt'):
@@ -82,7 +74,7 @@ def get_scheduled_notes(event):
 
 
 def can_edit_note(obj, user):
-    """Checks if a user can edit the object's note"""
+    """Check if a user can edit the object's note."""
     if not user:
         return False
     if obj.can_manage(user):
@@ -92,5 +84,35 @@ def can_edit_note(obj, user):
     if isinstance(obj, db.m.Contribution) and obj.can_manage(user, 'submit'):
         return True
     if isinstance(obj, db.m.SubContribution):
+        subcontrib_speakers_can_submit = obj.contribution.event.subcontrib_speakers_can_submit
+        if subcontrib_speakers_can_submit and any(speaker.person.user == user for speaker in obj.speakers):
+            return True
         return can_edit_note(obj.contribution, user)
     return False
+
+
+def check_note_revision(note, previous_revision_id, render_mode, source):
+    """Compare revision IDs to check if the note has been modified."""
+    from indico.modules.events.notes.schemas import EventNoteSchema
+    if previous_revision_id is None:
+        if note.current_revision_id and not note.is_deleted:
+            conflicting_note = EventNoteSchema().dump(note.current_revision)
+            raise ExpectedError('The note has been modified in the meantime', conflict=conflicting_note,
+                                html=render_note(source, render_mode))
+        return
+
+    if note.current_revision_id != previous_revision_id:
+        conflicting_note = EventNoteSchema().dump(note.current_revision)
+        raise ExpectedError('The note has been modified in the meantime', conflict=conflicting_note,
+                            html=render_note(source, render_mode))
+
+
+def render_note(source, mode):
+    """Render a note from source using the specified render mode."""
+    from indico.core.db.sqlalchemy.descriptions import RenderMode
+    autolinker_rules = autolinker_settings.get('rules')
+    if mode == RenderMode.html:
+        return HTMLLinker(autolinker_rules).process(source)
+    if mode == RenderMode.markdown:
+        return render_markdown(source, extensions=('nl2br', AutoLinkExtension(autolinker_rules)))
+    raise ValueError(f'Invalid render mode: {mode}')

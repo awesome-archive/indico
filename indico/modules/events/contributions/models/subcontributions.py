@@ -1,28 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from flask import session
+from sqlalchemy.ext.declarative import declared_attr
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.attachments import AttachedItemsMixin
-from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
+from indico.core.db.sqlalchemy.descriptions import RenderMode, SearchableDescriptionMixin
 from indico.core.db.sqlalchemy.notes import AttachedNotesMixin
+from indico.core.db.sqlalchemy.searchable import SearchableTitleMixin
+from indico.core.db.sqlalchemy.util.models import auto_table_args
 from indico.core.db.sqlalchemy.util.queries import increment_and_get
+from indico.util.iterables import materialize_iterable
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr, slugify
 
 
 def _get_next_friendly_id(context):
@@ -36,20 +31,29 @@ def _get_next_friendly_id(context):
 def _get_next_position(context):
     """Get the next menu entry position for the event."""
     contribution_id = context.current_parameters['contribution_id']
-    res = db.session.query(db.func.max(SubContribution.position)).filter_by(contribution_id=contribution_id).one()
+    res = (db.session.query(db.func.max(SubContribution.position))
+           .filter(SubContribution.contribution_id == contribution_id)
+           .one())
     return (res[0] or 0) + 1
 
 
-class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, db.Model):
+class SubContribution(SearchableTitleMixin, SearchableDescriptionMixin, AttachedItemsMixin, AttachedNotesMixin,
+                      db.Model):
     __tablename__ = 'subcontributions'
-    __table_args__ = (db.Index(None, 'friendly_id', 'contribution_id', unique=True),
-                      {'schema': 'events'})
+    __auto_table_args = (db.Index(None, 'friendly_id', 'contribution_id', unique=True),
+                         db.CheckConstraint("date_trunc('minute', duration) = duration", 'duration_no_seconds'),
+                         db.CheckConstraint("duration >= '0'", 'nonnegative_duration'),
+                         {'schema': 'events'})
 
     PRELOAD_EVENT_ATTACHED_ITEMS = True
     PRELOAD_EVENT_NOTES = True
     ATTACHMENT_FOLDER_ID_COLUMN = 'subcontribution_id'
     possible_render_modes = {RenderMode.html, RenderMode.markdown}
     default_render_mode = RenderMode.markdown
+
+    @declared_attr
+    def __table_args__(cls):
+        return auto_table_args(cls)
 
     id = db.Column(
         db.Integer,
@@ -72,9 +76,10 @@ class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, 
         nullable=False,
         default=_get_next_position
     )
-    title = db.Column(
+    code = db.Column(
         db.String,
-        nullable=False
+        nullable=False,
+        default=''
     )
     duration = db.Column(
         db.Interval,
@@ -118,7 +123,7 @@ class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, 
         # an extra query to check whether there is an object associated
         # when assigning a new one (e.g. during cloning)
         kwargs.setdefault('note', None)
-        super(SubContribution, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     @property
     def event(self):
@@ -134,12 +139,12 @@ class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, 
 
     @property
     def session(self):
-        """Convenience property so all event entities have it"""
+        """Convenience property so all event entities have it."""
         return self.contribution.session if self.contribution.session_id is not None else None
 
     @property
     def timetable_entry(self):
-        """Convenience property so all event entities have it"""
+        """Convenience property so all event entities have it."""
         return self.contribution.timetable_entry
 
     @property
@@ -148,19 +153,30 @@ class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, 
 
     @speakers.setter
     def speakers(self, value):
-        self.person_links = value.keys()
+        self.person_links = list(value.keys())
+
+    @property
+    def slug(self):
+        return slugify('sc', self.contribution.friendly_id, self.friendly_id, self.title, maxlen=30)
 
     @property
     def location_parent(self):
         return self.contribution
 
+    @property
+    def venue_name(self):
+        return self.location_parent.venue_name
+
+    @property
+    def room_name(self):
+        return self.location_parent.room_name
+
     def get_access_list(self):
         return self.contribution.get_access_list()
 
-    def get_manager_list(self, recursive=False):
-        return self.contribution.get_manager_list(recursive=recursive)
+    def get_manager_list(self, recursive=False, include_groups=True):
+        return self.contribution.get_manager_list(recursive=recursive, include_groups=include_groups)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', is_deleted=False, _text=self.title)
 
@@ -169,3 +185,24 @@ class SubContribution(DescriptionMixin, AttachedItemsMixin, AttachedNotesMixin, 
 
     def can_manage(self, user, permission=None, **kwargs):
         return self.contribution.can_manage(user, permission=permission, **kwargs)
+
+    def can_edit(self, user):
+        return self.contribution.can_edit(user)
+
+    @materialize_iterable()
+    def get_manage_button_options(self, *, note_may_exist=False):
+        if self.event.is_locked:
+            return
+        if self.can_edit_note(session.user) and (note_may_exist or not self.has_note):
+            yield 'notes_edit'
+        if self.can_edit(session.user):
+            yield 'subcontribution_edit'
+        if self.can_manage_attachments(session.user):
+            yield 'attachments_edit'
+
+    def is_user_associated(self, user):
+        if user is None:
+            return False
+        if self.contribution.is_user_associated(user):
+            return True
+        return any(pl.person.user == user for pl in self.person_links if pl.person.user)

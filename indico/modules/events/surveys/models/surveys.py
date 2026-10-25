@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from uuid import uuid4
 
@@ -31,9 +20,8 @@ from indico.core.notifications import make_email, send_email
 from indico.modules.events.registration.models.registrations import Registration
 from indico.modules.events.surveys import logger
 from indico.util.date_time import now_utc
+from indico.util.enum import IndicoEnum
 from indico.util.locators import locator_property
-from indico.util.string import return_ascii
-from indico.util.struct.enum import IndicoEnum
 from indico.web.flask.templating import get_template_module
 
 
@@ -43,11 +31,12 @@ class SurveyState(IndicoEnum):
     active_and_clean = 3
     active_and_answered = 4
     finished = 5
+    limit_reached = 6
 
 
 class Survey(db.Model):
     __tablename__ = 'surveys'
-    __table_args__ = (db.CheckConstraint("anonymous OR require_user", 'valid_anonymous_user'),
+    __table_args__ = (db.CheckConstraint('anonymous OR require_user', 'valid_anonymous_user'),
                       {'schema': 'event_surveys'})
 
     #: The ID of the survey
@@ -71,7 +60,7 @@ class Survey(db.Model):
         UUID,
         unique=True,
         nullable=False,
-        default=lambda: unicode(uuid4())
+        default=lambda: str(uuid4())
     )
     # An introduction text for users of the survey
     introduction = db.Column(
@@ -206,13 +195,16 @@ class Survey(db.Model):
         )
     )
 
+    # relationship backrefs:
+    # - anonymous_submissions (AnonymousSurveySubmission.survey)
+
     @hybrid_property
     def has_ended(self):
         return self.end_dt is not None and self.end_dt <= now_utc()
 
     @has_ended.expression
     def has_ended(cls):
-        return (cls.end_dt != None) & (cls.end_dt <= now_utc())  # noqa
+        return cls.end_dt.isnot(None) & (cls.end_dt <= now_utc())
 
     @hybrid_property
     def has_started(self):
@@ -220,16 +212,16 @@ class Survey(db.Model):
 
     @has_started.expression
     def has_started(cls):
-        return (cls.start_dt != None) & (cls.start_dt <= now_utc())  # noqa
+        return cls.start_dt.isnot(None) & (cls.start_dt <= now_utc())
 
     @locator_property
     def locator(self):
-        return {'confId': self.event_id,
+        return {'event_id': self.event_id,
                 'survey_id': self.id}
 
     @locator.token
     def locator(self):
-        """A locator that adds the UUID if the survey is private"""
+        """A locator that adds the UUID if the survey is private."""
         token = self.uuid if self.private else None
         return dict(self.locator, token=token)
 
@@ -239,15 +231,19 @@ class Survey(db.Model):
             return SurveyState.not_ready
         if not self.has_started:
             return SurveyState.ready_to_open
+        if self.limit_reached:
+            return SurveyState.limit_reached
         if not self.has_ended:
-            if not self.submissions:
-                return SurveyState.active_and_clean
-            return SurveyState.active_and_answered
+            return SurveyState.active_and_answered if self.submissions else SurveyState.active_and_clean
         return SurveyState.finished
 
     @property
+    def limit_reached(self):
+        return self.submission_limit is not None and len(self.submissions) >= self.submission_limit
+
+    @property
     def start_notification_recipients(self):
-        """Returns all recipients of the notifications.
+        """All recipients of the notifications.
 
         This includes both explicit recipients and, if enabled,
         participants of the event.
@@ -264,20 +260,26 @@ class Survey(db.Model):
 
     @is_active.expression
     def is_active(cls):
-        return ~cls.is_deleted & cls.questions.any() & cls.has_started & ~cls.has_ended
+        submissions = (db.session.query(db.func.count(db.m.SurveySubmission.id))
+                       .filter(db.m.SurveySubmission.survey_id == cls.id)
+                       .correlate(Survey)
+                       .scalar_subquery())
+        limit_criterion = db.case([(cls.submission_limit.is_(None), True)],
+                                  else_=(submissions < cls.submission_limit))
+        return ~cls.is_deleted & cls.questions.any() & cls.has_started & ~cls.has_ended & limit_criterion
 
     @hybrid_property
     def is_visible(self):
         return (not self.is_deleted and
-                self.state in {SurveyState.active_and_answered, SurveyState.active_and_clean, SurveyState.finished})
+                self.state in {SurveyState.active_and_answered, SurveyState.active_and_clean, SurveyState.finished,
+                               SurveyState.limit_reached})
 
     @is_visible.expression
     def is_visible(cls):
         return ~cls.is_deleted & cls.questions.any() & cls.has_started
 
-    @return_ascii
     def __repr__(self):
-        return '<Survey({}, {}): {}>'.format(self.id, self.event_id, self.title)
+        return f'<Survey({self.id}, {self.event_id}): {self.title}>'
 
     def can_submit(self, user):
         return self.is_active and (not self.require_user or user)
@@ -288,25 +290,32 @@ class Survey(db.Model):
         self.start_dt = now_utc()
 
     def close(self):
-        if self.state not in (SurveyState.active_and_clean, SurveyState.active_and_answered):
+        if self.state not in (SurveyState.active_and_clean, SurveyState.active_and_answered, SurveyState.limit_reached):
             raise IndicoError("Survey can't be closed")
         self.end_dt = now_utc()
 
     def send_start_notification(self):
         if not self.notifications_enabled or self.start_notification_sent or not self.event.has_feature('surveys'):
             return
-        template_module = get_template_module('events/surveys/emails/start_notification_email.txt', survey=self)
-        email = make_email(bcc_list=self.start_notification_recipients, template=template_module)
-        send_email(email, event=self.event, module='Surveys')
+        if not (recipients := self.start_notification_recipients):
+            # no recipients -> just mark as sent and not log an empty email...
+            self.start_notification_sent = True
+            return
+        with self.event.force_event_locale():
+            template_module = get_template_module('events/surveys/emails/start_notification_email.txt', survey=self)
+            email = make_email(bcc_list=recipients, template=template_module)
+        send_email(email, obj=self.event, module='Surveys')
         logger.info('Sending start notification for survey %s', self)
         self.start_notification_sent = True
 
     def send_submission_notification(self, submission):
         if not self.notifications_enabled:
             return
-        template_module = get_template_module('events/surveys/emails/new_submission_email.txt', submission=submission)
-        email = make_email(bcc_list=self.new_submission_emails, template=template_module)
-        send_email(email, event=self.event, module='Surveys')
+        with self.event.force_event_locale():
+            template_module = get_template_module('events/surveys/emails/new_submission_email.txt',
+                                                  submission=submission)
+            email = make_email(bcc_list=self.new_submission_emails, template=template_module)
+        send_email(email, obj=self.event, module='Surveys')
         logger.info('Sending submission notification for survey %s', self)
 
 

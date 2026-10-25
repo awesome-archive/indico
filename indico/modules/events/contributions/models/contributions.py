@@ -1,45 +1,40 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import g
+from flask import g, session
 from sqlalchemy import DDL
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.event import listens_for
 from sqlalchemy.ext.declarative import declared_attr
-from sqlalchemy.orm import mapper
+from sqlalchemy.orm import column_property, mapper
 from sqlalchemy.orm.base import NEVER_SET, NO_VALUE
+from sqlalchemy.sql import select
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy.attachments import AttachedItemsMixin
-from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
+from indico.core.db.sqlalchemy.descriptions import RenderMode, SearchableDescriptionMixin
 from indico.core.db.sqlalchemy.locations import LocationMixin
 from indico.core.db.sqlalchemy.notes import AttachedNotesMixin
-from indico.core.db.sqlalchemy.protection import ProtectionManagersMixin
+from indico.core.db.sqlalchemy.protection import ProtectionManagersMixin, ProtectionMode
+from indico.core.db.sqlalchemy.searchable import SearchableTitleMixin
 from indico.core.db.sqlalchemy.util.models import auto_table_args
 from indico.core.db.sqlalchemy.util.queries import increment_and_get
 from indico.core.db.sqlalchemy.util.session import no_autoflush
+from indico.modules.events.editing.models.editable import EditableType
 from indico.modules.events.management.util import get_non_inheriting_objects
-from indico.modules.events.models.persons import AuthorsSpeakersMixin, PersonLinkDataMixin
+from indico.modules.events.models.events import Event
+from indico.modules.events.models.persons import AuthorsSpeakersMixin, PersonLinkMixin
 from indico.modules.events.papers.models.papers import Paper
 from indico.modules.events.papers.models.revisions import PaperRevision, PaperRevisionState
+from indico.modules.events.sessions.models.sessions import Session
 from indico.modules.events.sessions.util import session_coordinator_priv_enabled
+from indico.util.iterables import materialize_iterable
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii
+from indico.util.string import format_repr, slugify
 from indico.web.flask.util import url_for
 
 
@@ -58,7 +53,7 @@ def _get_next_friendly_id(context):
     return increment_and_get(Event._last_friendly_contribution_id, Event.id == event_id)
 
 
-class CustomFieldsMixin(object):
+class CustomFieldsMixin:
     """Methods to process custom field data."""
 
     def get_field_value(self, field_id, raw=False):
@@ -68,6 +63,7 @@ class CustomFieldsMixin(object):
         else:
             return fv.friendly_data if fv else ''
 
+    @no_autoflush
     def set_custom_field(self, field_id, field_value):
         fv = self.get_field_value(field_id, raw=True)
         if not fv:
@@ -79,19 +75,24 @@ class CustomFieldsMixin(object):
         return old_value
 
 
-class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, AttachedItemsMixin, AttachedNotesMixin,
-                   PersonLinkDataMixin, AuthorsSpeakersMixin, CustomFieldsMixin, db.Model):
+class Contribution(SearchableTitleMixin, SearchableDescriptionMixin, ProtectionManagersMixin, LocationMixin,
+                   AttachedItemsMixin, AttachedNotesMixin, PersonLinkMixin, AuthorsSpeakersMixin, CustomFieldsMixin,
+                   db.Model):
     __tablename__ = 'contributions'
     __auto_table_args = (db.Index(None, 'friendly_id', 'event_id', unique=True,
                                   postgresql_where=db.text('NOT is_deleted')),
                          db.Index(None, 'event_id', 'track_id'),
                          db.Index(None, 'event_id', 'abstract_id'),
                          db.Index(None, 'abstract_id', unique=True, postgresql_where=db.text('NOT is_deleted')),
-                         db.CheckConstraint("session_block_id IS NULL OR session_id IS NOT NULL",
+                         db.CheckConstraint('session_block_id IS NULL OR session_id IS NOT NULL',
                                             'session_block_if_session'),
+                         db.CheckConstraint("date_trunc('minute', duration) = duration", 'duration_no_seconds'),
+                         db.CheckConstraint("duration > '0'", 'positive_duration'),
                          db.ForeignKeyConstraint(['session_block_id', 'session_id'],
                                                  ['events.session_blocks.id', 'events.session_blocks.session_id']),
                          {'schema': 'events'})
+    person_link_relation_name = 'ContributionPersonLink'
+    person_link_backref_name = 'contribution'
     location_backref_name = 'contributions'
     disallowed_protection_modes = frozenset()
     inheriting_have_acl = True
@@ -117,7 +118,7 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         from indico.modules.events import Event
         fid = increment_and_get(Event._last_friendly_contribution_id, Event.id == event.id, n)
         friendly_ids = g.setdefault('friendly_ids', {})
-        friendly_ids.setdefault(cls, {})[event.id] = range(fid - n + 1, fid + 1)
+        friendly_ids.setdefault(cls, {})[event.id] = list(range(fid - n + 1, fid + 1))
 
     @declared_attr
     def __table_args__(cls):
@@ -169,9 +170,10 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         index=True,
         nullable=True
     )
-    title = db.Column(
+    code = db.Column(
         db.String,
-        nullable=False
+        nullable=False,
+        default=''
     )
     duration = db.Column(
         db.Interval,
@@ -286,16 +288,6 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
             lazy=True
         )
     )
-    #: Persons associated with this contribution
-    person_links = db.relationship(
-        'ContributionPersonLink',
-        lazy=True,
-        cascade='all, delete-orphan',
-        backref=db.backref(
-            'contribution',
-            lazy=True
-        )
-    )
     #: Data stored in abstract/contribution fields
     field_values = db.relationship(
         'ContributionFieldValue',
@@ -312,8 +304,8 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         lazy=True,
         viewonly=True,
         uselist=False,
-        primaryjoin=('(PaperRevision._contribution_id == Contribution.id) & (PaperRevision.state == {})'
-                     .format(PaperRevisionState.accepted)),
+        primaryjoin=lambda: db.and_(PaperRevision._contribution_id == Contribution.id,
+                                    PaperRevision.state == PaperRevisionState.accepted),
     )
     #: Paper files not submitted for reviewing
     pending_paper_files = db.relationship(
@@ -365,7 +357,7 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         subquery = (db.select([db.func.max(PaperRevision.submitted_dt)])
                     .where(PaperRevision._contribution_id == cls.id)
                     .correlate_except(PaperRevision)
-                    .as_scalar())
+                    .scalar_subquery())
         return db.relationship(
             'PaperRevision',
             uselist=False,
@@ -378,9 +370,11 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
     # - _paper_files (PaperFile._contribution)
     # - _paper_revisions (PaperRevision._contribution)
     # - attachment_folders (AttachmentFolder.contribution)
+    # - editables (Editable.contribution)
+    # - favorite_of (User.favorite_contributions)
     # - legacy_mapping (LegacyContributionMapping.contribution)
     # - note (EventNote.contribution)
-    # - room_reservation_links (ReservationLink.contribution)
+    # - room_reservation_occurrence_links (ReservationOccurrenceLink.contribution)
     # - timetable_entry (TimetableEntry.contribution)
     # - vc_room_associations (VCRoomEventAssociation.linked_contrib)
 
@@ -397,14 +391,25 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         from indico.modules.events.contributions.models.subcontributions import SubContribution
         query = (db.select([db.func.count(SubContribution.id)])
                  .where((SubContribution.contribution_id == cls.id) & ~SubContribution.is_deleted)
-                 .correlate_except(SubContribution))
+                 .correlate_except(SubContribution)
+                 .scalar_subquery())
+        return db.column_property(query, deferred=True)
+
+    @declared_attr
+    def favorite_count(cls):
+        from indico.modules.users.models.favorites import favorite_contribution_table
+        query = (db.select([db.func.count(favorite_contribution_table.c.user_id)])
+                 .where(favorite_contribution_table.c.target_id == cls.id)
+                 .correlate_except(favorite_contribution_table)
+                 .scalar_subquery())
         return db.column_property(query, deferred=True)
 
     @declared_attr
     def _paper_revision_count(cls):
         query = (db.select([db.func.count(PaperRevision.id)])
                  .where(PaperRevision._contribution_id == cls.id)
-                 .correlate_except(PaperRevision))
+                 .correlate_except(PaperRevision)
+                 .scalar_subquery())
         return db.column_property(query, deferred=True)
 
     def __init__(self, **kwargs):
@@ -413,7 +418,7 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
         # when assigning a new one (e.g. during cloning)
         kwargs.setdefault('note', None)
         kwargs.setdefault('timetable_entry', None)
-        super(Contribution, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     @classmethod
     def preload_acl_entries(cls, event):
@@ -486,28 +491,75 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
     def submitters(self):
         return {person_link for person_link in self.person_links if person_link.is_submitter}
 
+    @property
+    def data_by_field(self):
+        return {value.contribution_field_id: value for value in self.field_values}
+
     @locator_property
     def locator(self):
         return dict(self.event.locator, contrib_id=self.id)
 
     @property
     def verbose_title(self):
-        return '#{} ({})'.format(self.friendly_id, self.title)
+        if self.code:
+            return f'#{self.friendly_id} ({self.code} - {self.title})'
+        else:
+            return f'#{self.friendly_id} ({self.title})'
 
     @property
     def paper(self):
         return Paper(self) if self._paper_last_revision else None
 
+    @property
+    def allowed_types_for_editable(self):
+        from indico.modules.events.editing.settings import editable_type_settings
+        if not self.event.has_feature('editing'):
+            return []
+
+        submitted_for = {editable.type.name for editable in self.editables}
+        return [
+            editable_type
+            for editable_type in self.event.editable_types
+            if editable_type not in submitted_for
+            and editable_type_settings[EditableType[editable_type]].get(self.event, 'submission_enabled')
+        ]
+
+    @property
+    def enabled_editables(self):
+        """All submitted editables with enabled types."""
+        from indico.modules.events.editing.settings import editing_settings
+        if not self.event.has_feature('editing'):
+            return []
+
+        enabled_editable_types = editing_settings.get(self.event, 'editable_types')
+        enabled_editables = [editable for editable in self.editables if editable.type.name in enabled_editable_types]
+        order = list(EditableType)
+        return sorted(enabled_editables, key=lambda editable: order.index(editable.type))
+
+    @property
+    def has_published_editables(self):
+        return any(e.published_revision_id is not None for e in self.enabled_editables)
+
+    def can_see_any_editables(self, user):
+        if not user:
+            return False
+        return any(e.can_see_timeline(user) for e in self.enabled_editables)
+
+    @property
+    def slug(self):
+        return slugify(self.friendly_id, self.title, maxlen=30)
+
     def is_paper_reviewer(self, user):
         return user in self.paper_content_reviewers or user in self.paper_layout_reviewers
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', is_deleted=False, _text=self.title)
 
     def can_manage(self, user, permission=None, allow_admin=True, check_parent=True, explicit_permission=False):
-        if super(Contribution, self).can_manage(user, permission, allow_admin=allow_admin, check_parent=check_parent,
-                                                explicit_permission=explicit_permission):
+        if super().can_manage(user, permission, allow_admin=allow_admin, check_parent=check_parent,
+                              explicit_permission=explicit_permission):
+            return True
+        if check_parent and self.event.can_manage(user, permission='contributions'):
             return True
         if (check_parent and self.session_id is not None and
                 self.session.can_manage(user, 'coordinate', allow_admin=allow_admin,
@@ -515,6 +567,35 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
                 session_coordinator_priv_enabled(self.event, 'manage-contributions')):
             return True
         return False
+
+    @property
+    def url(self):
+        return url_for('contributions.display_contribution', self)
+
+    @property
+    def external_url(self):
+        return url_for('contributions.display_contribution', self, _external=True)
+
+    def can_edit(self, user):
+        # Submitters can edit their own contributions if configured
+        from indico.modules.events.contributions import contribution_settings
+        submitters_can_edit = contribution_settings.get(self.event, 'submitters_can_edit')
+        return self.can_manage(user, permission=('submit' if submitters_can_edit else None))
+
+    @materialize_iterable()
+    def get_manage_button_options(self, *, note_may_exist=False):
+        if self.event.is_locked:
+            return
+        if self.can_edit_note(session.user) and (note_may_exist or not self.has_note):
+            yield 'notes_edit'
+        if self.can_edit(session.user):
+            yield 'contribution_edit'
+        if self.can_manage(session.user):
+            yield 'contribution_protection_edit'
+        if self.can_manage_attachments(session.user):
+            yield 'attachments_edit'
+        if self.can_manage(session.user):
+            yield 'contribution_subcontributions_edit'
 
     def get_non_inheriting_objects(self):
         """Get a set of child objects that do not inherit protection."""
@@ -527,12 +608,50 @@ class Contribution(DescriptionMixin, ProtectionManagersMixin, LocationMixin, Att
             return True
         return any(pl.person.user == user for pl in self.person_links if pl.person.user)
 
+    def can_submit_proceedings(self, user):
+        """Whether the user can submit editables/papers."""
+        if user is None:
+            return False
+        # The submitter of the original abstract is always authorized
+        if self.abstract and self.abstract.submitter == user:
+            return True
+        # Otherwise only users with submission rights are authorized
+        return self.can_manage(user, 'submit', allow_admin=False, check_parent=False)
+
+    def get_editable(self, editable_type):
+        """Get the editable of the given type."""
+        return next((e for e in self.editables if e.type == editable_type), None)
+
+    def log(self, *args, **kwargs):
+        """Log with prefilled metadata for the contribution."""
+        return self.event.log(*args, meta={'contribution_id': self.id}, **kwargs)
+
 
 Contribution.register_protection_events()
 
 
 @listens_for(mapper, 'after_configured', once=True)
 def _mapper_configured():
+    # Contribution.effective_protection_mode -- the effective protection mode
+    # (public/protected) of the contribution, even if it's inheriting it from
+    # its event or session
+    protection_mode_case = db.case([
+        ((Contribution.protection_mode == ProtectionMode.inheriting) & Contribution.session_id.is_(None),
+         Event.effective_protection_mode),
+        ((Contribution.protection_mode == ProtectionMode.inheriting) & Contribution.session_id.isnot(None),
+         select([Session.effective_protection_mode])
+         .where(Session.id == Contribution.session_id)
+         .correlate(Contribution)
+         .scalar_subquery())
+    ], else_=Contribution.protection_mode)
+    query = (
+        select([protection_mode_case])
+        .where(Event.id == Contribution.event_id)
+        .correlate(Contribution)
+        .scalar_subquery()
+    )
+    Contribution.effective_protection_mode = column_property(query, deferred=True)
+
     Contribution.register_location_events()
 
     @listens_for(Contribution.session, 'set')
@@ -545,9 +664,8 @@ def _mapper_configured():
     def _set_timetable_entry(target, value, *unused):
         if value is None:
             target.session_block = None
-        else:
-            if target.session is not None:
-                target.session_block = value.parent.session_block
+        elif target.session is not None:
+            target.session_block = value.parent.session_block
 
     @listens_for(Contribution.duration, 'set')
     def _set_duration(target, value, oldvalue, *unused):
@@ -560,12 +678,12 @@ def _mapper_configured():
 
 @listens_for(Contribution.__table__, 'after_create')
 def _add_timetable_consistency_trigger(target, conn, **kw):
-    sql = """
+    sql = f'''
         CREATE CONSTRAINT TRIGGER consistent_timetable
         AFTER INSERT OR UPDATE OF event_id, session_id, session_block_id, duration
-        ON {}
+        ON {target.fullname}
         DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW
         EXECUTE PROCEDURE events.check_timetable_consistency('contribution');
-    """.format(target.fullname)
+    '''
     DDL(sql).execute(conn)

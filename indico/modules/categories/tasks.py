@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
@@ -45,7 +34,7 @@ def category_suggestions():
     for user in users:
         existing = {x.category: x for x in user.suggested_categories}
         related = set(get_related_categories(user, detailed=False))
-        for category, score in get_category_scores(user).iteritems():
+        for category, score in get_category_scores(user).items():
             if score < SUGGESTION_MIN_SCORE:
                 continue
             if (category in related or category.is_deleted or category.suggestions_disabled or
@@ -63,12 +52,12 @@ def category_cleanup():
     from indico.modules.events import Event
     janitor_user = User.get_system_user()
 
-    logger.debug("Checking whether any categories should be cleaned up")
-    for categ_id, days in config.CATEGORY_CLEANUP.iteritems():
+    logger.debug('Checking whether any categories should be cleaned up')
+    for categ_id, days in config.CATEGORY_CLEANUP.items():
         try:
             category = Category.get(int(categ_id), is_deleted=False)
         except KeyError:
-            logger.warning("Category %s does not exist!", categ_id)
+            logger.warning('Category %s does not exist!', categ_id)
             continue
 
         now = now_utc()
@@ -76,10 +65,10 @@ def category_cleanup():
         if not to_delete:
             continue
 
-        logger.info("Category %s: %s events were created more than %s days ago and will be deleted", categ_id,
+        logger.info('Category %s: %s events were created more than %s days ago and will be deleted', categ_id,
                     len(to_delete), days)
         for i, event in enumerate(to_delete, 1):
-            logger.info("Deleting %s", event)
+            logger.info('Deleting %s', event)
             event.delete('Cleaning up category', janitor_user)
             if i % 100 == 0:
                 db.session.commit()

@@ -1,24 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import mimetypes
 from collections import defaultdict
 from operator import attrgetter
+from uuid import uuid4
 
 from flask import session
 
@@ -33,11 +23,11 @@ from indico.modules.events.abstracts.models.review_ratings import AbstractReview
 from indico.modules.events.abstracts.models.reviews import AbstractAction, AbstractReview
 from indico.modules.events.abstracts.notifications import send_abstract_notifications
 from indico.modules.events.contributions.operations import create_contribution_from_abstract, delete_contribution
-from indico.modules.events.logs.models.entries import EventLogKind, EventLogRealm
-from indico.modules.events.logs.util import make_diff_log
 from indico.modules.events.util import set_custom_fields
+from indico.modules.logs.models.entries import EventLogRealm, LogKind
+from indico.modules.logs.util import make_diff_log
 from indico.util.date_time import now_utc
-from indico.util.fs import secure_filename
+from indico.util.fs import secure_client_filename
 from indico.util.i18n import orig_string
 
 
@@ -69,7 +59,7 @@ def add_abstract_files(abstract, files, log_action=True):
     if not files:
         return
     for f in files:
-        filename = secure_filename(f.filename, 'attachment')
+        filename = secure_client_filename(f.filename)
         content_type = mimetypes.guess_type(f.filename)[0] or f.mimetype or 'application/octet-stream'
         abstract_file = AbstractFile(filename=filename, content_type=content_type, abstract=abstract)
         abstract_file.save(f.stream)
@@ -78,11 +68,11 @@ def add_abstract_files(abstract, files, log_action=True):
         logger.info('%d abstract file(s) added to %s by %s', len(files), abstract, session.user)
         num = len(files)
         if num == 1:
-            msg = 'Added file to abstract {}'.format(abstract.verbose_title)
+            msg = f'Added file to abstract {abstract.verbose_title}'
         else:
-            msg = 'Added {} files to abstract {}'.format(num, abstract.verbose_title)
-        abstract.event.log(EventLogRealm.reviewing, EventLogKind.positive, 'Abstracts', msg, session.user,
-                           data={'Files': ', '.join(f.filename for f in abstract.files)})
+            msg = f'Added {num} files to abstract {abstract.verbose_title}'
+        abstract.log(EventLogRealm.reviewing, LogKind.positive, 'Abstracts', msg, session.user,
+                     data={'Files': ', '.join(f.filename for f in abstract.files)})
 
 
 def delete_abstract_files(abstract, files):
@@ -93,15 +83,19 @@ def delete_abstract_files(abstract, files):
         db.session.delete(file_)
     logger.info('%d abstract files deleted from %s by %s', num, abstract, session.user)
     if num == 1:
-        msg = 'Deleted file from abstract {}'.format(abstract.verbose_title)
+        msg = f'Deleted file from abstract {abstract.verbose_title}'
     else:
-        msg = 'Deleted {} files from abstract {}'.format(num, abstract.verbose_title)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.negative, 'Abstracts', msg, session.user,
-                       data={'Files': ', '.join(f.filename for f in files)})
+        msg = f'Deleted {num} files from abstract {abstract.verbose_title}'
+    abstract.log(EventLogRealm.reviewing, LogKind.negative, 'Abstracts', msg, session.user,
+                 data={'Files': ', '.join(f.filename for f in files)})
 
 
-def create_abstract(event, abstract_data, custom_fields_data=None, send_notifications=False):
-    abstract = Abstract(event=event, submitter=session.user)
+def create_abstract(event, abstract_data, custom_fields_data=None, send_notifications=False, submitter=None,
+                    is_invited=False):
+    abstract = Abstract(event=event, submitter=submitter or session.user)
+    if is_invited:
+        abstract.uuid = str(uuid4())
+        abstract.state = AbstractState.invited
     tracks = abstract_data.pop('submitted_for_tracks', None)
     attachments = abstract_data.pop('attachments', None)
     abstract.populate_from_dict(abstract_data)
@@ -116,11 +110,13 @@ def create_abstract(event, abstract_data, custom_fields_data=None, send_notifica
     signals.event.abstract_created.send(abstract)
 
     if send_notifications:
-        send_abstract_notifications(abstract)
+        notifications_sent = send_abstract_notifications(abstract)
+    else:
+        notifications_sent = False
     logger.info('Abstract %s created by %s', abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.positive, 'Abstracts',
-                       'Abstract {} created'.format(abstract.verbose_title), session.user)
-    return abstract
+    abstract.log(EventLogRealm.reviewing, LogKind.positive, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} created', session.user)
+    return abstract, notifications_sent
 
 
 def update_abstract(abstract, abstract_data, custom_fields_data=None):
@@ -140,7 +136,9 @@ def update_abstract(abstract, abstract_data, custom_fields_data=None):
     changes.update(abstract.populate_from_dict(abstract_data))
     if custom_fields_data:
         changes.update(set_custom_fields(abstract, custom_fields_data))
+    abstract.modified_dt = now_utc()
     db.session.flush()
+    signals.event.abstract_updated.send(abstract)
     logger.info('Abstract %s modified by %s', abstract, session.user)
     log_fields = {
         'title': 'Title',
@@ -156,7 +154,7 @@ def update_abstract(abstract, abstract_data, custom_fields_data=None):
             'convert': lambda change: [t.name if t else None for t in change]
         }
     }
-    for field_name, change in changes.iteritems():
+    for field_name in changes:
         # we skip skip None -> '' changes (editing an abstract that
         # did not have a value for a new field yet without filling
         # it out)
@@ -168,11 +166,11 @@ def update_abstract(abstract, abstract_data, custom_fields_data=None):
         log_fields[field_name] = {
             'title': field.title,
             'type': field_impl.log_type,
-            'convert': lambda change, field_impl=field_impl: map(field_impl.get_friendly_value, change)
+            'convert': lambda change, field_impl=field_impl: list(map(field_impl.get_friendly_value, change))
         }
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-                       'Abstract {} modified'.format(abstract.verbose_title), session.user,
-                       data={'Changes': make_diff_log(changes, log_fields)})
+    abstract.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} modified', session.user,
+                 data={'Changes': make_diff_log(changes, log_fields)})
 
 
 def withdraw_abstract(abstract):
@@ -184,9 +182,10 @@ def withdraw_abstract(abstract):
         delete_contribution(contrib)
     db.session.flush()
     signals.event.abstract_state_changed.send(abstract)
+    send_abstract_notifications(abstract)
     logger.info('Abstract %s withdrawn by %s', abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.negative, 'Abstracts',
-                       'Abstract {} withdrawn'.format(abstract.verbose_title), session.user)
+    abstract.log(EventLogRealm.reviewing, LogKind.negative, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} withdrawn', session.user)
 
 
 def delete_abstract(abstract, delete_contrib=False):
@@ -198,25 +197,31 @@ def delete_abstract(abstract, delete_contrib=False):
     db.session.flush()
     signals.event.abstract_deleted.send(abstract)
     logger.info('Abstract %s deleted by %s', abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.negative, 'Abstracts',
-                       'Abstract {} deleted'.format(abstract.verbose_title), session.user)
+    abstract.log(EventLogRealm.reviewing, LogKind.negative, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} deleted', session.user)
 
 
 def judge_abstract(abstract, abstract_data, judgment, judge, contrib_session=None, merge_persons=False,
                    send_notifications=False):
+    if abstract_data.get('use_review_track') and len(abstract.reviewed_for_tracks) > 1:
+        return False
     abstract.judge = judge
     abstract.judgment_dt = now_utc()
     abstract.judgment_comment = abstract_data['judgment_comment']
     log_data = {'Judgment': orig_string(judgment.title)}
     if judgment == AbstractAction.accept:
         abstract.state = AbstractState.accepted
-        abstract.accepted_track = abstract_data.get('accepted_track')
+        if abstract_data.get('use_review_track') and abstract.reviewed_for_tracks:
+            abstract.accepted_track = next(iter(abstract.reviewed_for_tracks))
+        else:
+            abstract.accepted_track = abstract_data.get('accepted_track')
         if abstract_data.get('override_contrib_type') or abstract_data.get('accepted_contrib_type'):
             abstract.accepted_contrib_type = abstract_data.get('accepted_contrib_type')
         else:
             abstract.accepted_contrib_type = abstract.submitted_contrib_type
         if not abstract.contribution:
             abstract.contribution = create_contribution_from_abstract(abstract, contrib_session)
+            signals.event.abstract_accepted.send(abstract, contribution=abstract.contribution)
         if abstract.accepted_track:
             log_data['Track'] = abstract.accepted_track.title
         if abstract.accepted_contrib_type:
@@ -238,13 +243,13 @@ def judge_abstract(abstract, abstract_data, judgment, judge, contrib_session=Non
     if send_notifications:
         log_data['Notifications sent'] = send_abstract_notifications(abstract)
     logger.info('Abstract %s judged by %s', abstract, judge)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-                       'Abstract {} judged'.format(abstract.verbose_title), judge, data=log_data)
+    abstract.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} judged', judge, data=log_data)
+    return True
 
 
 def _merge_person_links(target_abstract, source_abstract):
-    """
-    Merge `person_links` of different abstracts.
+    """Merge `person_links` of different abstracts.
 
     Add to `target_abstract` new `AbstractPersonLink`s whose `EventPerson`
     exists in the `source_abstract` but is not yet in the `target_abstract`.
@@ -273,7 +278,8 @@ def _merge_person_links(target_abstract, source_abstract):
             else:
                 link.display_order = 0
             new_links.add(link)
-            for column_name in {'_title', '_affiliation', '_address', '_phone', '_first_name', '_last_name'}:
+            for column_name in ('_title', '_affiliation', '_affiliation_id', '_address', '_phone', '_first_name',
+                                '_last_name'):
                 setattr(link, column_name, getattr(source_link, column_name))
 
     # Add new links in order
@@ -285,18 +291,16 @@ def update_reviewed_for_tracks(abstract, tracks):
     _update_tracks(abstract, tracks, only_reviewed_for=True)
     db.session.flush()
     logger.info('Reviewed tracks of abstract %s updated by %s', abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-                       'Reviewed tracks of abstract {} updated'.format(abstract.verbose_title),
-                       session.user)
+    abstract.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+                 f'Reviewed tracks of abstract {abstract.verbose_title} updated', session.user)
 
 
 def reset_abstract_state(abstract):
     abstract.reset_state()
     db.session.flush()
     logger.info('Abstract %s state reset by %s', abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-                       'State of abstract {} reset'.format(abstract.verbose_title),
-                       session.user)
+    abstract.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+                 f'State of abstract {abstract.verbose_title} reset', session.user)
 
 
 def create_abstract_comment(abstract, comment_data):
@@ -304,10 +308,9 @@ def create_abstract_comment(abstract, comment_data):
     comment.populate_from_dict(comment_data)
     comment.abstract = abstract
     db.session.flush()
-    logger.info("Abstract %s received a comment from %s", abstract, session.user)
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.positive, 'Abstracts',
-                       'Abstract {} received a comment'.format(abstract.verbose_title),
-                       session.user)
+    logger.info('Abstract %s received a comment from %s', abstract, session.user)
+    abstract.log(EventLogRealm.reviewing, LogKind.positive, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} received a comment', session.user)
 
 
 def update_abstract_comment(comment, comment_data):
@@ -315,20 +318,19 @@ def update_abstract_comment(comment, comment_data):
     comment.modified_by = session.user
     comment.modified_dt = now_utc()
     db.session.flush()
-    logger.info("Abstract comment %s modified by %s", comment, session.user)
-    comment.abstract.event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-                               'Comment on abstract {} modified'.format(comment.abstract.verbose_title),
-                               session.user,
-                               data={'Changes': make_diff_log(changes, {'text': 'Text', 'visibility': 'Visibility'})})
+    logger.info('Abstract comment %s modified by %s', comment, session.user)
+    comment.abstract.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+                         f'Comment on abstract {comment.abstract.verbose_title} modified',
+                         session.user,
+                         data={'Changes': make_diff_log(changes, {'text': 'Text', 'visibility': 'Visibility'})})
 
 
 def delete_abstract_comment(comment):
     comment.is_deleted = True
     db.session.flush()
-    logger.info("Abstract comment %s deleted by %s", comment, session.user)
-    comment.abstract.event.log(EventLogRealm.reviewing, EventLogKind.negative, 'Abstracts',
-                               'Comment on abstract {} removed'.format(comment.abstract.verbose_title),
-                               session.user)
+    logger.info('Abstract comment %s deleted by %s', comment, session.user)
+    comment.abstract.log(EventLogRealm.reviewing, LogKind.negative, 'Abstracts',
+                         f'Comment on abstract {comment.abstract.verbose_title} removed', session.user)
 
 
 def create_abstract_review(abstract, track, user, review_data, questions_data):
@@ -336,11 +338,11 @@ def create_abstract_review(abstract, track, user, review_data, questions_data):
     review.populate_from_dict(review_data)
     log_data = {}
     for question in abstract.event.abstract_review_questions:
-        value = questions_data['question_{}'.format(question.id)]
+        value = questions_data[f'question_{question.id}']
         review.ratings.append(AbstractReviewRating(question=question, value=value))
         log_data[question.title] = question.field.get_friendly_value(value)
     db.session.flush()
-    logger.info("Abstract %s received a review by %s for track %s", abstract, user, track)
+    logger.info('Abstract %s received a review by %s for track %s', abstract, user, track)
     log_data.update({
         'Track': track.title,
         'Action': orig_string(review.proposed_action.title),
@@ -353,8 +355,8 @@ def create_abstract_review(abstract, track, user, review_data, questions_data):
         log_data['Other tracks'] = sorted(t.title for t in review.proposed_tracks)
     elif review.proposed_action in {AbstractAction.mark_as_duplicate, AbstractAction.merge}:
         log_data['Other abstract'] = review.proposed_related_abstract.verbose_title
-    abstract.event.log(EventLogRealm.reviewing, EventLogKind.positive, 'Abstracts',
-                       'Abstract {} reviewed'.format(abstract.verbose_title), user, data=log_data)
+    abstract.log(EventLogRealm.reviewing, LogKind.positive, 'Abstracts',
+                 f'Abstract {abstract.verbose_title} reviewed', user, data=log_data)
     return review
 
 
@@ -364,7 +366,7 @@ def update_abstract_review(review, review_data, questions_data):
     review.modified_dt = now_utc()
     log_fields = {}
     for question in event.abstract_review_questions:
-        field_name = 'question_{}'.format(question.id)
+        field_name = f'question_{question.id}'
         rating = question.get_review_rating(review, allow_create=True)
         old_value = rating.value
         rating.value = questions_data[field_name]
@@ -378,7 +380,7 @@ def update_abstract_review(review, review_data, questions_data):
             }
 
     db.session.flush()
-    logger.info("Abstract review %s modified", review)
+    logger.info('Abstract review %s modified', review)
     log_fields.update({
         'proposed_action': 'Action',
         'comment': 'Comment'
@@ -400,14 +402,14 @@ def update_abstract_review(review, review_data, questions_data):
             'title': 'Other tracks',
             'convert': lambda change: [sorted(t.title for t in x) for x in change]
         }
-    event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts',
-              'Review for abstract {} modified'.format(review.abstract.verbose_title),
+    event.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts',
+              f'Review for abstract {review.abstract.verbose_title} modified',
               session.user, data={'Track': review.track.title, 'Changes': make_diff_log(changes, log_fields)})
 
 
 def schedule_cfa(event, start_dt, end_dt, modification_end_dt):
     event.cfa.schedule(start_dt, end_dt, modification_end_dt)
-    logger.info("Call for abstracts for %s scheduled by %s", event, session.user)
+    logger.info('Call for abstracts for %s scheduled by %s', event, session.user)
     log_data = {}
     if start_dt:
         log_data['Start'] = start_dt.isoformat()
@@ -415,17 +417,17 @@ def schedule_cfa(event, start_dt, end_dt, modification_end_dt):
         log_data['End'] = end_dt.isoformat()
     if modification_end_dt:
         log_data['Modification deadline'] = modification_end_dt.isoformat()
-    event.log(EventLogRealm.reviewing, EventLogKind.change, 'Abstracts', 'Call for abstracts scheduled', session.user,
+    event.log(EventLogRealm.reviewing, LogKind.change, 'Abstracts', 'Call for abstracts scheduled', session.user,
               data=log_data)
 
 
 def open_cfa(event):
     event.cfa.open()
-    logger.info("Call for abstracts for %s opened by %s", event, session.user)
-    event.log(EventLogRealm.reviewing, EventLogKind.positive, 'Abstracts', 'Call for abstracts opened', session.user)
+    logger.info('Call for abstracts for %s opened by %s', event, session.user)
+    event.log(EventLogRealm.reviewing, LogKind.positive, 'Abstracts', 'Call for abstracts opened', session.user)
 
 
 def close_cfa(event):
     event.cfa.close()
-    logger.info("Call for abstracts for %s closed by %s", event, session.user)
-    event.log(EventLogRealm.reviewing, EventLogKind.negative, 'Abstracts', 'Call for abstracts closed', session.user)
+    logger.info('Call for abstracts for %s closed by %s', event, session.user)
+    event.log(EventLogRealm.reviewing, LogKind.negative, 'Abstracts', 'Call for abstracts closed', session.user)

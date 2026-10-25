@@ -1,22 +1,11 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from flask import request
+from flask import flash, request
 from werkzeug.exceptions import BadRequest
 
 from indico.core.db import db
@@ -26,7 +15,9 @@ from indico.modules.events.abstracts.forms import (CreateEmailTemplateForm, Edit
 from indico.modules.events.abstracts.models.abstracts import AbstractState
 from indico.modules.events.abstracts.models.email_templates import AbstractEmailTemplate
 from indico.modules.events.abstracts.notifications import get_abstract_notification_tpl_module
-from indico.modules.events.abstracts.util import build_default_email_template, create_mock_abstract
+from indico.modules.events.abstracts.util import (build_default_email_template, create_mock_abstract,
+                                                  get_configured_notification_states)
+from indico.util.i18n import _
 from indico.web.flask.templating import get_template_module
 from indico.web.util import jsonify_data, jsonify_template
 
@@ -50,7 +41,7 @@ class RHAddEmailTemplate(RHManageAbstractsBase):
             self.event.abstract_email_templates.append(new_tpl)
             db.session.flush()
             return _render_notification_list(self.event)
-        return jsonify_template('events/abstracts/management/notification_tpl_form.html', form=form)
+        return jsonify_template('events/abstracts/management/notification_tpl_form.html', form=form, is_edit=False)
 
 
 class RHSortEmailTemplates(RHManageAbstractsBase):
@@ -75,7 +66,7 @@ class RHEditEmailTemplateBase(RHManageAbstractsBase):
 
     def _process_args(self):
         RHManageAbstractsBase._process_args(self)
-        self.email_tpl = AbstractEmailTemplate.get_one(request.view_args['email_tpl_id'])
+        self.email_tpl = AbstractEmailTemplate.get_or_404(request.view_args['email_tpl_id'])
 
 
 class RHEditEmailTemplateRules(RHEditEmailTemplateBase):
@@ -115,13 +106,39 @@ class RHEmailTemplateREST(RHEditEmailTemplateBase):
         if request.json is None:
             raise BadRequest('Expected JSON payload')
 
-        invalid_fields = request.json.viewkeys() - {'stop_on_match'}
+        invalid_fields = request.json.keys() - {'stop_on_match'}
         if invalid_fields:
-            raise BadRequest("Invalid fields: {}".format(', '.join(invalid_fields)))
+            raise BadRequest('Invalid fields: {}'.format(', '.join(invalid_fields)))
 
         if 'stop_on_match' in request.json:
             self.email_tpl.stop_on_match = request.json['stop_on_match']
 
+        return jsonify_data(flash=False)
+
+
+class RHQuickSetupEmailTemplates(RHManageAbstractsBase):
+    """Add all missing notification templates."""
+
+    def _process(self):
+        configured_states = get_configured_notification_states(self.event)
+        notified_states = {
+            AbstractState.submitted.value: ('submit', 'Submitted'),
+            AbstractState.withdrawn.value: ('withdrawn', 'Withdrawn'),
+            AbstractState.accepted.value: ('accept', 'Accepted'),
+            AbstractState.rejected.value: ('reject', 'Rejected'),
+            AbstractState.merged.value: ('merge', 'Merged'),
+            AbstractState.invited.value: ('invite', 'Invited'),
+        }
+        for state, (tpl_name, title) in notified_states.items():
+            if state in configured_states:
+                continue
+            new_tpl = build_default_email_template(self.event, tpl_name)
+            new_tpl.title = title
+            new_tpl.rules = [{'state': [state]}]
+            self.event.abstract_email_templates.append(new_tpl)
+            db.session.flush()
+        flash(_('Default notification templates added. You may customize them using the "Notifications" button.'),
+              'success')
         return jsonify_data(flash=False)
 
 

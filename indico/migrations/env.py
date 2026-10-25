@@ -1,3 +1,10 @@
+# This file is part of Indico.
+# Copyright (C) 2002 - 2026 CERN
+#
+# Indico is free software; you can redistribute it and/or
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
+
 import logging.config
 
 from alembic import context
@@ -19,11 +26,12 @@ config.set_main_option('sqlalchemy.url', current_app.config.get('SQLALCHEMY_DATA
 target_metadata = current_app.extensions['migrate'].db.metadata
 
 
-def _include_symbol(tablename, schema):
-    # We ignore plugin tables in migrations
-    if schema and schema.startswith('plugin_'):
+def _include_object(object_, name, type_, reflected, compare_to):
+    if type_ != 'table':
+        return True
+    if object_.schema and object_.schema.startswith('plugin_'):
         return False
-    return tablename != 'alembic_version' and not tablename.startswith('alembic_version_')
+    return name != 'alembic_version' and not name.startswith('alembic_version_')
 
 
 def _render_item(type_, obj, autogen_context):
@@ -32,7 +40,7 @@ def _render_item(type_, obj, autogen_context):
     func = getattr(obj, 'alembic_render_' + type_, None)
     if func is None:
         return False
-    return func(autogen_context)
+    return func(autogen_context, autogen_context.opts['template_args']['toplevel_code'])
 
 
 def run_migrations_offline():
@@ -45,11 +53,11 @@ def run_migrations_offline():
 
     Calls to context.execute() here emit the given string to the
     script output.
-
     """
     url = config.get_main_option('sqlalchemy.url')
     context.configure(url=url, target_metadata=target_metadata, include_schemas=True,
-                      version_table_schema='public', include_symbol=_include_symbol, render_item=_render_item)
+                      version_table_schema='public', include_object=_include_object, render_item=_render_item,
+                      template_args={'toplevel_code': set()})
 
     with context.begin_transaction():
         context.run_migrations()
@@ -60,7 +68,6 @@ def run_migrations_online():
 
     In this scenario we need to create an Engine
     and associate a connection with the context.
-
     """
     engine = engine_from_config(config.get_section(config.config_ini_section),
                                 prefix='sqlalchemy.',
@@ -68,7 +75,8 @@ def run_migrations_online():
 
     connection = engine.connect()
     context.configure(connection=connection, target_metadata=target_metadata, include_schemas=True,
-                      version_table_schema='public', include_symbol=_include_symbol, render_item=_render_item)
+                      version_table_schema='public', include_object=_include_object, render_item=_render_item,
+                      template_args={'toplevel_code': set()})
 
     try:
         with context.begin_transaction():

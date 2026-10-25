@@ -1,80 +1,76 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+import categorySearchURL from 'indico-url:search.category_search';
+import searchURL from 'indico-url:search.search';
+
+import React from 'react';
+import ReactDOM from 'react-dom';
 
 import './display';
+import './base';
+import './favorite';
+
+import SearchBox from 'indico/modules/search/components/SearchBox';
+
+import CategoryModeration from './components/CategoryModeration';
+import CategoryStatistics from './components/CategoryStatistics';
+import {LocaleContext} from './context.js';
 
 (function(global) {
-    global.setupCategoryStats = function setupCategoryStats() {
-        $(document).ready(() => {
-            $('.plot-container .plot').each((__, element) => {
-                const $this = $(element);
-                const xMin = $this.data('min-x');
-                const xMax = $this.data('max-x');
-                const yMin = $this.data('min-y');
-                const yMax = $this.data('max-y');
+  document.addEventListener('DOMContentLoaded', () => {
+    const domContainer = document.querySelector('#search-box');
 
-                var data = $this.data('values') || {};
+    if (domContainer) {
+      const category = JSON.parse(domContainer.dataset.category);
+      const isAdmin = domContainer.dataset.isAdmin !== undefined;
 
-                const currentYear = new Date().getFullYear();
-                const current = [[currentYear, data[currentYear]]];
-
-                const options = {
-                    axes: {
-                        xaxis: {
-                            label: $this.data('label-xaxis'),
-                            max: xMax,
-                            min: xMin,
-                            tickOptions: { showGridline: false }
-                        },
-                        yaxis: {
-                            label: $this.data('label-yaxis'),
-                            max: yMax,
-                            min: yMin
-                        }
-                    },
-                    height: 400,
-                    highlighter: {
-                        location: 'n',
-                        tooltipAxes: 'yx',
-                        tooltipSeparator: $this.data('tooltip')
-                    },
-                    series: [
-                        {
-                            fillAlpha: 0.9,
-                            fill: true,
-                            fillAndStroke: true
-                        }, {
-                            markerOptions: {
-                                color: '#005272',
-                                style: 'circle'
-                            }
-                        }
-                    ],
-                    width: 400
-                };
-                data = [
-                    _.pairs(data).map((datum) => [parseInt(datum[0], 10), datum[1]]),
-                    current
-                ];
-                const plot = global.$.jqplot(element.id, data, global.processJqPlotOptions(options));
-                $(window).resize(() => {
-                    plot.replot({ resetAxes: true });
-                });
-            });
-        });
-    };
+      ReactDOM.render(
+        React.createElement(SearchBox, {
+          onSearch: (keyword, isGlobal, adminOverrideEnabled) => {
+            const params = {q: keyword};
+            if (isAdmin && adminOverrideEnabled) {
+              params.admin_override_enabled = true;
+            }
+            if (isGlobal) {
+              window.location = searchURL(params);
+            } else {
+              params.category_id = category.id;
+              window.location = categorySearchURL(params);
+            }
+          },
+          category,
+          isAdmin,
+        }),
+        domContainer
+      );
+    }
+  });
+  document.addEventListener('DOMContentLoaded', () => {
+    const rootElement = document.querySelector('#category-moderation');
+    if (rootElement) {
+      const categoryId = parseInt(rootElement.dataset.categoryId, 10);
+      ReactDOM.render(<CategoryModeration categoryId={categoryId} />, rootElement);
+    }
+  });
+  global.setupCategoryStats = function setupCategoryStats() {
+    document.addEventListener('DOMContentLoaded', () => {
+      const rootElement = document.querySelector('#category-stats-root');
+      if (!rootElement) {
+        return;
+      }
+      const categoryId = parseInt(rootElement.dataset.categoryId, 10);
+      const lang = rootElement.dataset.lang;
+      ReactDOM.render(
+        <LocaleContext.Provider value={lang}>
+          <CategoryStatistics categoryId={categoryId} />
+        </LocaleContext.Provider>,
+        rootElement
+      );
+    });
+  };
 })(window);

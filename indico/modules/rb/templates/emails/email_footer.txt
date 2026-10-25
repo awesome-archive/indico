@@ -1,6 +1,6 @@
 
 
 --
-Best regards,
-Indico :: Room Booking
-{{ url_for('rooms.roomBooking', _external=true) }}
+{% trans %}Best regards,{% endtrans %}
+Indico :: {% trans %}Room Booking{% endtrans %}
+{{ url_for('rb.roombooking', _external=true) }}

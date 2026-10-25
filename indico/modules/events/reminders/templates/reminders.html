@@ -1,5 +1,7 @@
 {% extends 'events/management/base.html' %}
 
+{% from 'message_box.html' import message_box %}
+
 {% set pending_reminders = reminders|rejectattr('is_sent')|list %}
 {% set sent_reminders = reminders|selectattr('is_sent')|list %}
 {% set tzinfo = event.tzinfo %}
@@ -17,8 +19,10 @@
                        data-title="{{ _("Reminder details") if reminder.is_sent else _("Edit reminder")}}"
                        data-ajax-dialog
                        data-reload-after>
-                        {%- if reminder.is_relative -%}
+                        {%- if reminder.is_start_time_relative -%}
                             {{ reminder.event_start_delta|format_human_timedelta('hours') }} before the event
+                        {%- elif reminder.is_end_time_relative -%}
+                            {{ reminder.event_end_delta|format_human_timedelta('hours') }} after the event
                         {%- else -%}
                             {{ reminder.scheduled_dt|format_datetime(timezone=tzinfo) }} <small>({{ tzinfo }})</small>
                         {%- endif -%}
@@ -43,17 +47,37 @@
 {% endmacro %}
 
 {% block content %}
+    {% if event.is_not_happening %}
+        {% call message_box('info') %}
+            {% trans label=event.get_label_markup() %}
+                Since this event has the {{ label }} label, no reminders will be sent for it.
+            {% endtrans %}
+        {% endcall %}
+    {% endif %}
+
     <div class="i-box-group vert fixed-width reminders">
         <div class="i-box">
             <div class="i-box-header">
-                <div class="i-box-title">{%- trans %}Pending Reminders{% endtrans -%}</div>
-                <div class="i-box-buttons hide-if-locked">
-                    <a class="i-button icon-plus" data-href="{{ url_for('.add', event) }}"
-                        data-title="{%- trans %}Add Reminder{% endtrans -%}"
-                        data-ajax-dialog
-                        data-reload-after>
-                        {%- trans %}Add Reminder{% endtrans -%}
-                    </a>
+                <div class="i-box-title">{%- trans %}Pending reminders{% endtrans -%}</div>
+                <div class="i-box-buttons toolbar right hide-if-locked">
+                    <div class="group">
+                        <button class="i-button icon-plus"
+                                data-href="{{ url_for('.add', event, reminder_type='custom') }}"
+                                data-title="{%- trans %}Add custom reminder{% endtrans -%}"
+                                data-ajax-dialog
+                                data-reload-after>
+                            {%- trans %}Add custom reminder{% endtrans -%}
+                        </button>
+                    </div>
+                    <div class="group">
+                        <button class="i-button icon-plus"
+                                data-href="{{ url_for('.add', event, reminder_type='standard') }}"
+                                data-title="{%- trans %}Add standard reminder{% endtrans -%}"
+                                data-ajax-dialog
+                                data-reload-after>
+                            {%- trans %}Add standard reminder{% endtrans -%}
+                        </button>
+                    </div>
                 </div>
             </div>
             <div class="i-box-content">
@@ -67,7 +91,7 @@
         {% if sent_reminders %}
             <div class="i-box">
                 <div class="i-box-header">
-                    <div class="i-box-title">{%- trans %}Sent Reminders{% endtrans -%}</div>
+                    <div class="i-box-title">{%- trans %}Sent reminders{% endtrans -%}</div>
                 </div>
                 <div class="i-box-content">
                     {{ render_reminders(sent_reminders) }}

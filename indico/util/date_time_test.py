@@ -1,25 +1,17 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import datetime, timedelta
 
 import pytest
 from pytz import timezone
 
-from indico.util.date_time import as_utc, format_human_timedelta, iterdays, strftime_all_years
+from indico.util.date_time import (_adjust_skeleton, as_utc, convert_py_weekdays_to_js, format_human_timedelta,
+                                   format_interval, format_skeleton, iterdays, strftime_all_years)
 
 
 @pytest.mark.parametrize(('delta', 'granularity', 'expected'), (
@@ -40,10 +32,23 @@ from indico.util.date_time import as_utc, format_human_timedelta, iterdays, strf
     (timedelta(days=1, hours=1,  minutes=0,  seconds=0), 'days',    '1 day'),
     (timedelta(days=1, hours=12, minutes=0,  seconds=0), 'days',    '1 day'),
     (timedelta(days=2, hours=0,  minutes=0,  seconds=0), 'days',    '2 days'),
-    (timedelta(days=7, hours=0,  minutes=0,  seconds=0), 'days',    '7 days')
+    (timedelta(days=7, hours=0,  minutes=0,  seconds=0), 'days',    '7 days'),
+    (timedelta(days=9, hours=0,  minutes=0,  seconds=0), 'days',    '9 days'),
 ))
 def test_format_human_timedelta(delta, granularity, expected):
     assert format_human_timedelta(delta, granularity) == expected
+
+
+@pytest.mark.parametrize(('delta', 'granularity', 'expected'), (
+    (timedelta(days=2, hours=0,  minutes=0,  seconds=0),  'days',    '2 days'),
+    (timedelta(days=7, hours=0,  minutes=0,  seconds=0),  'days',    '1 week'),
+    (timedelta(days=9, hours=0,  minutes=0,  seconds=0),  'days',    '1w 2d'),
+    (timedelta(days=9, hours=0,  minutes=0,  seconds=0),  'weeks',   '1 week'),
+    (timedelta(days=14, hours=0,  minutes=0,  seconds=0), 'weeks',   '2 weeks'),
+    (timedelta(days=20, hours=0,  minutes=0,  seconds=0), 'weeks',   '2 weeks'),
+))
+def test_format_human_timedelta_weeks(delta, granularity, expected):
+    assert format_human_timedelta(delta, granularity, weeks=True) == expected
 
 
 @pytest.mark.parametrize(('dt', 'fmt', 'expected'), (
@@ -77,3 +82,46 @@ iterdays_test_data = (
                          iterdays_test_data)
 def test_iterdays(from_, to, skip_weekends, day_whitelist, day_blacklist, expected):
     assert len(list(iterdays(from_, to, skip_weekends, day_whitelist, day_blacklist))) == expected
+
+
+@pytest.mark.parametrize(('skeleton', 'format', 'expected'), (
+    ('MMM', 'M', 'M'),  # Cannot expand numeric fields to alphabetic ones
+    ('ss', 's', 's'),  # Hours, minutes and seconds should never be expanded
+    ('MMdd', 'Md', 'MMdd'),  # Expand numeric fields
+    ('MMMMdddd', 'MMMddd', 'MMMMdddd'),  # Expand alphabetic fields
+    ('ddMMM', "d 'de' MMM", "dd 'de 'MMM"),  # Cannot expand string literals
+    ('ddMMM', 'M月d日', 'M月dd日'),
+    ('EEEEdMMMM', "E, d 'de' MMM", "E, d 'de 'MMMM"),
+))
+def test__adjust_skeleton_skeleton(skeleton, format, expected):
+    assert _adjust_skeleton(format, skeleton) == expected
+
+
+@pytest.mark.parametrize(('skeleton', 'expected'), (
+    ('EEEEdMMMM', 'Monday 8 February'),
+    ('EEEdMMM', 'Mon 8 Feb'),
+))
+def test_format_skeleton(skeleton, expected):
+    dt = as_utc(datetime(2021, 2, 8)).astimezone(timezone('Europe/Zurich'))
+    assert format_skeleton(dt, skeleton, 'en_GB', 'Europe/Zurich') == expected
+
+
+@pytest.mark.parametrize(('py_weekdays', 'expected_js_weekdays'), (
+    ([0], [1]),
+    ([6], [0]),
+    ([0, 1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 0]),
+    ([5, 6], [6, 0]),
+    ([], []),
+))
+def test_convert_py_weekdays_to_js(py_weekdays, expected_js_weekdays):
+    assert convert_py_weekdays_to_js(py_weekdays) == expected_js_weekdays
+
+
+@pytest.mark.parametrize(('skeleton', 'expected'), (
+    ('HHmm', '13:30–14:30'),  # noqa: RUF001
+    ('short', '13:30–14:30'),  # noqa: RUF001
+))
+def test_format_interval(skeleton, expected):
+    start_dt = as_utc(datetime(2021, 2, 8, 12, 30)).astimezone(timezone('Europe/Zurich'))
+    end_dt = as_utc(datetime(2021, 2, 8, 13, 30)).astimezone(timezone('Europe/Zurich'))
+    assert format_interval(start_dt, end_dt, skeleton, locale='en_GB') == expected

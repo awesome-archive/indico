@@ -31,7 +31,7 @@ needed for the given provider.
 The following keys are available in the provider data:
 
 - ``type`` -- **Required.** The type of the provider. Valid values
-  are e.g. ``ldap``, ``oauth``, ``shibboleth``, and whatever custom
+  are e.g. ``ldap``, ``authlib``, ``shibboleth``, and whatever custom
   providers you have installed.
 - ``title`` -- The title of the provider (shown on the login page).
   If omitted, the provider name is used.
@@ -39,6 +39,11 @@ The following keys are available in the provider data:
   provider in case more than one such provider is used.  The login
   form of the default provider is displayed when opening the login
   page so it should be the provider that most people use.
+- ``logo_url`` -- If set, the referenced image will be used as the
+  background image of this provider's login button (on the login page).
+- ``display_order`` -- Controls the order of the provider login buttons
+  on the login page. Providers are sorted by this value in ascending
+  order.
 - Any provider-specific settings.
 
 
@@ -60,15 +65,10 @@ provider has been used, its name must not be changed.
 The following keys are available in the provider data:
 
 - ``type`` -- **Required.** The type of the provider. Valid values
-  are e.g. ``ldap``, ``oauth``, ``shibboleth``, and whatever custom
+  are e.g. ``ldap``, ``authlib``, ``shibboleth``, and whatever custom
   providers you have installed.
 - ``title`` -- The title of the provider (shown in the account list
   of the user profile).  If omitted, the provider name is used.
-- ``default_group_provider`` -- If you have any providers which have
-  group support (usually the case for LDAP), you should enable this
-  for exactly one provider.  This is used by legacy parts of Indico
-  such as the room booking module which support groups but only take
-  a group name and no information from which provider to get them.
 - ``trusted_email`` -- Set this to ``True`` if all email addresses
   received from the provider are trustworthy, i.e. if it is guaranteed
   that an email address actually belongs to the user (either because
@@ -79,16 +79,42 @@ The following keys are available in the provider data:
   verification email is sent to prove that the user has access to the
   email address, which is less user-friendly but extremely important
   to prevent malicious takeovers of Indico accounts.
+- ``group_cache_ttl`` -- Set this to the number in seconds for which
+  group membership check results should be cached, or 0 to disable the
+  cache. You may also set it to a list where the first element is the
+  cache duration for positive checks and the second element the duration
+  for negative checks. Note that you usually do NOT need to set this at
+  all, the default of 1800 seconds is reasonable in most cases, and unless
+  you use a custom multipass backend that has its own cache or is very
+  fast when checking membership on the fly it is best to not touch this at
+  all.
 - ``moderated`` -- Set this to ``True`` if you want to require manual
   approval of the registration by an Indico admin.  This results in
   the same workflow as :data:`LOCAL_MODERATION` in case of local
   accounts.
-- ``synced_fields`` -- This may be set in no more than once identity
+- ``synced_fields`` -- This may be set in no more than one identity
   provider and enables user data synchronization.  Its value should
   be a set of user attributes that can be synchronized during login.
-  Indico does not support synchronizing email addresses; only the
-  following attributes can be synchronized:
-  ``first_name``, ``last_name``, ``affiliation``, ``phone``, ``address``
+  The following attributes can be synchronized:
+  ``email``, ``first_name``, ``last_name``, ``affiliation``, ``phone``,
+  ``address``
+  Due to the unique nature of email addresses, synchronizing them may
+  fail; in that case a warning is displayed and the old email address
+  remains - an Indico admin could merge the users if they are indeed
+  the same person, but this needs to be done manually since merging
+  users is a potentially destructive operation that cannot be undone.
+  It is also strongly recommended to ONLY sync emails if the provider
+  has validated emails (ie ``trusted_email`` set to ``True``); otherwise
+  users would get unvalidated (possibly even invalid) emails set on their
+  account during sync.
+- ``locked_fields`` -- A set of fields which are always synchronized
+  with the identity provider. Its value must be a subset of the user
+  attributes listed in ``synced_fields``, and it it not possible to lock
+  the ``email`` field. The fields listed here can still be desynchronized
+  by an administrator.
+- ``locked_field_message`` -- A message displayed next to the fields
+  listed in ``locked_fields``. The purpose is to guide the user on
+  how they should proceed in order to change the locked field's data.
 - ``mapping`` -- A dictionary that maps between keys given by the
   identity provider and keys expected by Indico for user information.
   The key of each entry is the Indico-side attribute name; the value
@@ -193,7 +219,6 @@ for your own config and then adapt it to your own environment:
                 'phone': 'telephoneNumber'
             },
             'trusted_email': True,
-            'default_group_provider': True,
             'synced_fields': {'first_name', 'last_name', 'affiliation', 'phone', 'address'}
         }
     }
@@ -279,15 +304,147 @@ The LDAP-specific config uses the following keys:
   Default: ``False``
 
 
-SAML / Shibboleth
-^^^^^^^^^^^^^^^^^
+.. _saml:
+
+SAML
+^^^^
+
+The ``saml`` authentication/identity providers are available by default,
+but to use them you need to install the ``python3-saml`` library using
+``pip install python3-saml``.
+
+.. note::
+
+    ``python3-saml`` has some extra system dependencies (``xmlsec``).
+    How to install them (apt, yum, etc.) depends on your linux
+    distribution.  The package name is usually ``libxmlsec1-dev``
+    (or ``xmlsec1-devel`` on RPM-based distros). If this library is
+    missing, ``pip`` will fail when installing ``python3-saml``.
+    Simply re-run the command after installing the missing library.
+
+Once everything is installed, you can add the SAML-related settings to
+your ``indico.conf``. Below is an example you can copy to have a good
+starting point for your own config and then adapt it to your own
+environment:
+
+.. code-block:: python
+
+    _saml_config = {
+        'sp': {
+            'entityId': 'indico-saml',
+            # Depending on your security config below you may need to generate
+            # a certificate and private key.
+            # You can use https://www.samltool.com/self_signed_certs.php or
+            # use openssl for it (which is more secure as it ensures the
+            # key never leaves your machine)
+            'x509cert': '',
+            'privateKey': '',
+        },
+        'idp': {
+            # This metadata is provided by your SAML IdP. You can omit (or
+            # leave empty) the whole 'idp' section in case you need SP
+            # metadata to register your app and get the IdP metadata from
+            # https://indico.example.com/multipass/saml/{auth-provider-name}/metadata
+            # and then fill in the IdP metadata afterwards.
+            'entityId': 'https://my-idp.example.com',
+            'singleSignOnService': {
+                'url': 'https://my-idp.example.com/saml',
+                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
+            },
+            'singleLogoutService': {
+                'url': 'https://my-idp.example.com/saml',
+                'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
+            },
+            'x509cert': ''
+        },
+        # These advanced settings allow you to tune the SAML security options.
+        # Please see the documentation on https://github.com/onelogin/python3-saml
+        # for details on how they behave. Note that by requiring signatures,
+        # you usually need to set a cert and key on your SP config.
+        'security': {
+            'nameIdEncrypted': False,
+            'authnRequestsSigned': True,
+            'logoutRequestSigned': True,
+            'logoutResponseSigned': True,
+            'signMetadata': True,
+            'wantMessagesSigned': True,
+            'wantAssertionsSigned': True,
+            'wantNameId' : True,
+            'wantNameIdEncrypted': False,
+            'wantAssertionsEncrypted': False,
+            'allowSingleLabelDomains': False,
+            'signatureAlgorithm': 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+            'digestAlgorithm': 'http://www.w3.org/2001/04/xmlenc#sha256'
+        }
+    }
+
+    AUTH_PROVIDERS = {
+        'saml': {
+            'type': 'saml',
+            'title': 'SAML SSO',
+            'saml_config': _saml_config,
+            # If your IdP is using ADFS you may need to uncomment this. For details, see
+            # https://github.com/onelogin/python-saml/pull/144
+            # 'lowercase_urlencoding': True
+        }
+    }
+    IDENTITY_PROVIDERS = {
+        'saml': {
+            'type': 'saml',
+            'title': 'SSO',
+            'mapping': {
+                'first_name': 'Firstname',
+                'last_name': 'Lastname',
+                'email': 'EmailAddress',
+                'affiliation': 'HomeInstitute',
+            },
+            'trusted_email': True,
+            # You can use a different field as the unique identifier.
+            # By default the qualified NameID from SAML is used, but in
+            # case you want to use something else, any SAML attribute can
+            # be used.
+            # 'identifier_field': 'Username'
+        }
+    }
+
+
+If you also have an LDAP server, it may be a good idea to use the
+``saml`` authentication provider and connect it to an ``ldap``
+identity provider. This way the user information is retrieved from LDAP
+based on a unique identifier of the user that comes from SAML, and you
+can still use the search and group functionality provided by LDAP.
+
+To use this, use the ``AUTH_PROVIDERS`` config from above together with
+the ``IDENTITY_PROVIDERS`` config from the LDAP section on this page,
+and set up a ``PROVIDER_MAP`` that passes the identifier from SAML to
+LDAP. The example below assumes that the LDAP username is passed in a
+SAML attribute named ``UPN``.
+
+.. code-block:: python
+
+    PROVIDER_MAP = {
+        'saml': {'identity_provider': 'ldap', 'mapping': {'identifier': 'UPN'}},
+    }
+
+
+Shibboleth
+^^^^^^^^^^
+
+.. versionchanged:: 3.0
+   SAML is now supported without the need for Apache.
+
+.. note::
+
+    Note that since Indico 3.0 there is a new ``saml`` auth/identity provider
+    available which does not require Apache/shibd and is thus the recommended
+    option to use regardless of the web server in use.
 
 The ``shibboleth`` authentication/identity providers are available by
 default, but due to how the protocol works you need to use the Apache
 webserver to use SAML atuhentication provider.
 
-You can find guides on how to set it up for :ref:`CentOS <centos-apache-shib>`
-and :ref:`Debian <deb-apache-shib>`.
+You can find guides on how to set it up for :ref:`Alma/Rocky Linux <rpm-apache-shib>`
+and :ref:`Debian/Ubuntu <deb-apache-shib>`.
 
 If you also have an LDAP server, it may be a good idea to use the
 ``shibboleth`` authentication provider and connect it to an ``ldap``

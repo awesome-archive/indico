@@ -1,29 +1,17 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import session
 
 from indico.core import signals
 from indico.core.db import db
-from indico.core.db.sqlalchemy.util.models import get_simple_column_attrs
 from indico.core.logger import Logger
 from indico.modules.events import Event
-from indico.modules.events.cloning import EventCloner
+from indico.modules.events.cloning import EventCloner, get_attrs_to_clone
 from indico.util.date_time import now_utc
 from indico.util.i18n import _
 from indico.web.flask.util import url_for
@@ -33,9 +21,9 @@ from indico.web.menu import SideMenuItem
 logger = Logger.get('events.reminders')
 
 
-@signals.import_tasks.connect
+@signals.core.import_tasks.connect
 def _import_tasks(sender, **kwargs):
-    import indico.modules.events.reminders.tasks
+    import indico.modules.events.reminders.tasks  # noqa: F401
 
 
 @signals.menu.items.connect_via('event-management-sidemenu')
@@ -50,7 +38,10 @@ def _event_times_changed(sender, obj, **kwargs):
     from indico.modules.events.reminders.models.reminders import EventReminder
     event = obj
     for reminder in event.reminders.filter(EventReminder.is_relative, ~EventReminder.is_sent):
-        new_dt = event.start_dt - reminder.event_start_delta
+        if reminder.is_start_time_relative:
+            new_dt = event.start_dt - reminder.event_start_delta
+        else:
+            new_dt = event.end_dt + reminder.event_end_delta
         if reminder.scheduled_dt != new_dt:
             logger.info('Changing start time of %s to %s', reminder, new_dt)
             reminder.scheduled_dt = new_dt
@@ -59,7 +50,7 @@ def _event_times_changed(sender, obj, **kwargs):
 @signals.users.merged.connect
 def _merge_users(target, source, **kwargs):
     from indico.modules.events.reminders.models.reminders import EventReminder
-    EventReminder.find(creator_id=source.id).update({EventReminder.creator_id: target.id})
+    EventReminder.query.filter_by(creator_id=source.id).update({EventReminder.creator_id: target.id})
 
 
 @signals.event_management.get_cloners.connect
@@ -67,24 +58,53 @@ def _get_reminder_cloner(sender, **kwargs):
     return ReminderCloner
 
 
+@signals.core.get_placeholders.connect_via('event-reminder-email')
+def _get_event_reminder_placeholders(sender, recipient=None, event=None, **kwargs):
+    from indico.modules.events.placeholders import (EventLinkPlaceholder, EventStartDatePlaceholder,
+                                                    EventStartTimePlaceholder, EventTitlePlaceholder)
+    from indico.modules.events.reminders.placeholders import RecipientFirstNamePlaceholder, RecipientLastNamePlaceholder
+    yield RecipientFirstNamePlaceholder
+    yield RecipientLastNamePlaceholder
+    yield EventTitlePlaceholder
+    yield EventLinkPlaceholder
+    yield EventStartDatePlaceholder
+    yield EventStartTimePlaceholder
+
+
 class ReminderCloner(EventCloner):
     name = 'reminders'
     friendly_name = _('Reminders')
+    uses = {'registration_tags', 'registration_forms'}
     is_default = True
 
     @property
     def is_available(self):
-        return self._find_reminders().has_rows()
+        return self._find_reminders(self.old_event).has_rows()
 
-    def _find_reminders(self):
-        return self.old_event.reminders.filter(db.m.EventReminder.is_relative)
+    def get_conflicts(self, target_event):
+        if self._find_reminders(target_event).has_rows():
+            return [_('The target event already has reminders')]
 
-    def run(self, new_event, cloners, shared_data):
-        attrs = get_simple_column_attrs(db.m.EventReminder) - {'created_dt', 'scheduled_dt', 'is_sent'}
-        attrs |= {'creator_id'}
-        for old_reminder in self._find_reminders():
-            scheduled_dt = new_event.start_dt - old_reminder.event_start_delta
-            # Skip anything that's would have been sent on a past date.
+    def _find_reminders(self, event):
+        return event.reminders.filter(db.m.EventReminder.is_relative)
+
+    def run(self, new_event, cloners, shared_data, event_exists=False):
+        regform_map = tag_map = None
+        if 'registration_forms' in cloners:
+            regform_map = shared_data['registration_forms']['form_map']
+        if 'registration_tags' in cloners:
+            tag_map = shared_data['registration_tags']['tag_map']
+        attrs = get_attrs_to_clone(db.m.EventReminder, add={'creator_id'},
+                                   skip={'created_dt', 'scheduled_dt', 'is_sent'})
+        for old_reminder in self._find_reminders(self.old_event):
+            if (old_reminder.forms and regform_map is None) or (old_reminder.tags and tag_map is None):
+                logger.info('Not cloning reminder %s linked to registration forms/tags', old_reminder)
+                continue
+            if old_reminder.is_start_time_relative:
+                scheduled_dt = new_event.start_dt - old_reminder.event_start_delta
+            else:
+                scheduled_dt = new_event.end_dt + old_reminder.event_end_delta
+            # Skip anything that would have been sent on a past date.
             # We ignore the time on purpose so cloning an event shortly before will
             # still trigger a reminder that's just a few hours overdue.
             if scheduled_dt.date() < now_utc().date():
@@ -92,6 +112,8 @@ class ReminderCloner(EventCloner):
                 continue
             reminder = db.m.EventReminder(**{attr: getattr(old_reminder, attr) for attr in attrs})
             reminder.scheduled_dt = scheduled_dt
+            reminder.forms = {regform_map[x] for x in old_reminder.forms}
+            reminder.tags = {tag_map[x] for x in old_reminder.tags}
             new_event.reminders.append(reminder)
             db.session.flush()
             logger.info('Added reminder during event cloning: %s', reminder)

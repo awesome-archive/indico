@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import re
 from datetime import datetime
@@ -22,7 +13,6 @@ from lxml import etree
 from pytz import timezone, utc
 
 from indico.core.logger import Logger
-from indico.util.string import to_unicode
 from indico.web.http_api.metadata.serializer import Serializer
 
 
@@ -33,27 +23,23 @@ def _deserialize_date(date_dict):
 
 
 class XMLSerializer(Serializer):
-
-    """
-    Receives a fossil (or a collection of them) and converts them to XML
-    """
+    """Receive a fossil (or a collection of them) and converts them to XML."""
 
     _mime = 'text/xml'
 
     def __init__(self, query_params, pretty=False, **kwargs):
         self._typeMap = kwargs.pop('typeMap', {})
-        super(XMLSerializer, self).__init__(query_params, pretty, **kwargs)
+        super().__init__(query_params, pretty, **kwargs)
 
-    def _convert(self, value, _control_char_re=re.compile(ur'[\x00-\x08\x0b\x0c\x0e-\x1f]')):
+    def _convert(self, value, _control_char_re=re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')):
         if isinstance(value, datetime):
             return value.isoformat()
-        elif isinstance(value, (int, long, float, bool)):
+        elif isinstance(value, (int, float, bool)):
             return str(value)
+        elif isinstance(value, str):
+            # Get rid of control chars breaking XML conversion
+            return _control_char_re.sub('', value)
         else:
-            value = to_unicode(value) if isinstance(value, str) else value
-            if isinstance(value, basestring):
-                # Get rid of control chars breaking XML conversion
-                value = _control_char_re.sub(u'', value)
             return value
 
     def _xmlForFossil(self, fossil, doc=None):
@@ -73,23 +59,23 @@ class XMLSerializer(Serializer):
         if doc:
             doc.getroot().append(felement)
 
-        for k, v in fossil.iteritems():
+        for k, v in fossil.items():
             if k in ['_fossil', '_type', 'id']:
                 continue
-            if isinstance(k, (int, float)) or (isinstance(k, basestring) and k.isdigit()):
-                elem = etree.SubElement(felement, 'entry', {'key': unicode(k)})
+            if isinstance(k, (int, float)) or (isinstance(k, str) and k.isdigit()):
+                elem = etree.SubElement(felement, 'entry', {'key': str(k)})
             else:
                 elem = etree.SubElement(felement, k)
-            if isinstance(v, dict) and set(v.viewkeys()) == {'date', 'time', 'tz'}:
+            if isinstance(v, dict) and set(v.keys()) == {'date', 'time', 'tz'}:
                 v = _deserialize_date(v)
             if isinstance(v, (list, tuple)):
-                onlyDicts = all(type(subv) == dict for subv in v)
+                onlyDicts = all(isinstance(subv, dict) for subv in v)
                 if onlyDicts:
                     for subv in v:
                         elem.append(self._xmlForFossil(subv))
                 else:
                     for subv in v:
-                        if type(subv) == dict:
+                        if isinstance(subv, dict):
                             elem.append(self._xmlForFossil(subv))
                         else:
                             subelem = etree.SubElement(elem, 'item')
@@ -106,9 +92,9 @@ class XMLSerializer(Serializer):
         return felement
 
     def _execute(self, fossil, xml_declaration=True):
-        if type(fossil) == list:
+        if isinstance(fossil, list):
             # collection of fossils
-            doc = etree.ElementTree(etree.Element("collection"))
+            doc = etree.ElementTree(etree.Element('collection'))
             for elem in fossil:
                 self._xmlForFossil(elem, doc)
             result = doc

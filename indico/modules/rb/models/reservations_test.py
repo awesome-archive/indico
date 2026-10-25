@@ -1,31 +1,18 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from datetime import date
+from datetime import date, datetime, time
 
 import pytest
 from dateutil.relativedelta import relativedelta
 
-from indico.core.errors import IndicoError
 from indico.modules.rb.models.reservation_edit_logs import ReservationEditLog
 from indico.modules.rb.models.reservation_occurrences import ReservationOccurrence, ReservationOccurrenceState
 from indico.modules.rb.models.reservations import RepeatFrequency, RepeatMapping, Reservation, ReservationState
-
-
-pytest_plugins = 'indico.modules.rb.testing.fixtures'
 
 
 @pytest.fixture
@@ -43,20 +30,21 @@ def overlapping_reservation(create_reservation):
 
 
 @pytest.mark.parametrize(('repetition', 'message'), (
-    ((RepeatFrequency.NEVER, 0), 'single booking'),
-    ((RepeatFrequency.DAY,   1), 'daily booking'),
-    ((RepeatFrequency.WEEK,  1), 'weekly'),
-    ((RepeatFrequency.WEEK,  2), 'every 2 weeks'),
-    ((RepeatFrequency.MONTH, 1), 'monthly'),
-    ((RepeatFrequency.MONTH, 2), 'every 2 months'),
+    ((RepeatFrequency.NEVER, 0, None), 'single booking'),
+    ((RepeatFrequency.DAY,   1, None), 'daily booking'),
+    ((RepeatFrequency.WEEK,  1, None), 'weekly'),
+    ((RepeatFrequency.WEEK,  2, None), 'every 2 weeks'),
+    ((RepeatFrequency.MONTH, 1, None), 'monthly'),
+    ((RepeatFrequency.MONTH, 2, None), 'every 2 months'),
+    ((RepeatFrequency.WEEK, 1, ['mon']), 'weekly (Mon)'),
+    ((RepeatFrequency.WEEK, 1, ['mon', 'sun']), 'weekly (Mon, Sun)'),
+    ((RepeatFrequency.WEEK, 1, ['mon', 'sun', 'wed']), 'weekly (Mon, Wed, Sun)'),
+    ((RepeatFrequency.WEEK, 2, ['mon']), 'every 2 weeks (Mon)'),
+    ((RepeatFrequency.WEEK, 2, ['mon', 'sun']), 'every 2 weeks (Mon, Sun)'),
+    ((RepeatFrequency.WEEK, 2, ['mon', 'sun', 'wed']), 'every 2 weeks (Mon, Wed, Sun)'),
 ))
 def test_repeat_mapping(repetition, message):
     assert RepeatMapping.get_message(*repetition) == message
-
-
-def test_repeat_mapping_invalid_legacy():
-    with pytest.raises(IndicoError):
-        RepeatMapping.convert_legacy_repeatability(123)
 
 
 # ======================================================================================================================
@@ -124,8 +112,8 @@ def test_created_by_user_with_no_id(db, dummy_reservation):
     assert dummy_reservation.created_by_user is None
 
 
-def test_details_url(dummy_reservation):
-    assert dummy_reservation.details_url
+def test_external_details_url(dummy_reservation):
+    assert dummy_reservation.external_details_url
 
 
 def test_location_name(dummy_reservation, dummy_location):
@@ -133,7 +121,8 @@ def test_location_name(dummy_reservation, dummy_location):
 
 
 def test_repetition(dummy_reservation):
-    assert (dummy_reservation.repeat_frequency, dummy_reservation.repeat_interval) == dummy_reservation.repetition
+    assert (dummy_reservation.repeat_frequency, dummy_reservation.repeat_interval,
+            dummy_reservation.recurrence_weekdays) == dummy_reservation.repetition
 
 
 # ======================================================================================================================
@@ -147,7 +136,8 @@ def test_find_overlapping_with_different_room(overlapping_reservation, create_ro
     assert reservation not in Reservation.find_overlapping_with(room=create_room(), occurrences=[occurrence]).all()
 
 
-def test_find_overlapping_with_is_not_valid(overlapping_reservation, dummy_user):
+def test_find_overlapping_with_is_not_valid(overlapping_reservation, dummy_user, freeze_time):
+    freeze_time(datetime.combine(date.today(), time(1)))
     reservation, occurrence = overlapping_reservation
     assert reservation in Reservation.find_overlapping_with(room=reservation.room,
                                                             occurrences=[occurrence]).all()
@@ -170,10 +160,11 @@ def test_find_overlapping_with_skip_reservation(overlapping_reservation):
 
 
 @pytest.mark.parametrize('silent', (True, False))
-def test_cancel(smtp, create_reservation, dummy_user, silent):
+def test_cancel(smtp, create_reservation, dummy_user, silent, freeze_time):
     reservation = create_reservation(start_dt=date.today() + relativedelta(hour=8),
                                      end_dt=date.today() + relativedelta(days=10, hour=17),
                                      repeat_frequency=RepeatFrequency.DAY)
+    freeze_time(datetime.combine(date.today(), time(7, 30)))
     assert not reservation.is_cancelled
     assert not any(occ.is_cancelled for occ in reservation.occurrences)
     reservation.cancel(user=dummy_user, reason='cancelled', silent=silent)
@@ -207,6 +198,25 @@ def test_reject(smtp, create_reservation, dummy_user, silent):
         assert smtp.outbox
 
 
+@pytest.mark.parametrize('reason', ('My reason.', None))
+def test_accept(smtp, create_reservation, dummy_user, reason):
+    reservation = create_reservation(start_dt=date.today() + relativedelta(hour=8),
+                                     end_dt=date.today() + relativedelta(days=10, hour=17),
+                                     repeat_frequency=RepeatFrequency.DAY)
+    assert not reservation.is_rejected
+    assert not any(occ.is_rejected for occ in reservation.occurrences)
+    reservation.accept(user=dummy_user, reason=reason)
+    assert reservation.is_accepted
+    assert len(smtp.outbox) == 2
+
+    if reason:
+        assert ['My reason' in mail.as_string() for mail in smtp.outbox]
+        assert reservation.edit_logs.one().info == ['Reservation accepted: My reason.']
+    else:
+        assert ['My reason' not in mail.as_string() for mail in smtp.outbox]
+        assert reservation.edit_logs.one().info == ['Reservation accepted']
+
+
 def test_add_edit_log(dummy_reservation):
     dummy_reservation.add_edit_log(ReservationEditLog(user_name='user', info='Some change'))
     assert dummy_reservation.edit_logs.count() == 1
@@ -214,13 +224,14 @@ def test_add_edit_log(dummy_reservation):
 
 @pytest.mark.parametrize('can_moderate', (True, False))
 @pytest.mark.parametrize('is_pending', (True, False))
-def test_moderation(dummy_reservation, dummy_user, is_pending, can_moderate):
+def test_moderation(dummy_reservation, create_user, is_pending, can_moderate):
+    user = create_user(123)
     if is_pending:
         dummy_reservation.state = ReservationState.pending
     if can_moderate:
-        dummy_reservation.room.update_principal(dummy_user, permissions={'moderate'})
-    assert dummy_reservation.can_accept(dummy_user) == (is_pending and can_moderate)
-    assert dummy_reservation.can_reject(dummy_user) == can_moderate
+        dummy_reservation.room.update_principal(user, permissions={'moderate'})
+    assert dummy_reservation.can_accept(user) == (is_pending and can_moderate)
+    assert dummy_reservation.can_reject(user) == can_moderate
 
 
 @pytest.mark.parametrize('is_manager', (True, False))
@@ -285,10 +296,6 @@ def test_find_overlapping(create_reservation):
     assert not resv1.find_overlapping().count()
     resv2 = create_reservation(state=ReservationState.pending)
     assert resv1.find_overlapping().one() == resv2
-
-
-def test_locator(dummy_reservation, dummy_location):
-    assert dummy_reservation.locator == {'roomLocation': dummy_location.name, 'resvID': dummy_reservation.id}
 
 
 @pytest.mark.parametrize(('is_booked_for', 'expected'), (

@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import re
 from datetime import datetime, timedelta
@@ -24,9 +13,10 @@ from flask import request, session
 from markupsafe import escape
 from pytz import timezone
 from werkzeug.datastructures import ImmutableMultiDict
-from wtforms import BooleanField, FloatField, SelectField, StringField, TextAreaField
-from wtforms.fields.html5 import IntegerField
-from wtforms.validators import DataRequired, InputRequired, NumberRange, Optional, ValidationError
+from wtforms import BooleanField, EmailField, FloatField, SelectField, StringField, TextAreaField
+from wtforms.fields import HiddenField, IntegerField, URLField
+from wtforms.validators import URL, DataRequired, Email, InputRequired, NumberRange, Optional, ValidationError
+from wtforms_sqlalchemy.fields import QuerySelectField
 
 from indico.core.config import config
 from indico.core.db import db
@@ -39,22 +29,24 @@ from indico.modules.events import Event, LegacyEventMapping
 from indico.modules.events.cloning import EventCloner
 from indico.modules.events.fields import EventPersonLinkListField, ReferencesField
 from indico.modules.events.models.events import EventType
-from indico.modules.events.models.references import EventReference
+from indico.modules.events.models.labels import EventLabel
+from indico.modules.events.models.references import EventReference, ReferenceType
 from indico.modules.events.sessions import COORDINATOR_PRIV_DESCS, COORDINATOR_PRIV_TITLES
 from indico.modules.events.timetable.util import get_top_level_entries
 from indico.modules.events.util import check_permissions
 from indico.util.date_time import format_datetime, format_human_timedelta, now_utc, relativedelta
-from indico.util.i18n import _
-from indico.util.string import to_unicode, validate_email
+from indico.util.i18n import _, get_all_locales, pgettext
+from indico.util.string import validate_email
 from indico.web.flask.util import url_for
 from indico.web.forms.base import IndicoForm
 from indico.web.forms.fields import (IndicoDateField, IndicoDateTimeField, IndicoEnumSelectField, IndicoLocationField,
                                      IndicoPasswordField, IndicoProtectionField, IndicoRadioField,
-                                     IndicoSelectMultipleCheckboxField, IndicoTagListField, IndicoTimezoneSelectField,
+                                     IndicoSelectMultipleCheckboxField, IndicoTimezoneSelectField,
                                      IndicoWeekDayRepetitionField, MultiStringField, RelativeDeltaField)
 from indico.web.forms.fields.principals import PermissionsField
+from indico.web.forms.fields.simple import IndicoLinkListField, validate_keywords_field
 from indico.web.forms.validators import HiddenUnless, LinkedDateTime
-from indico.web.forms.widgets import CKEditorWidget, SwitchWidget
+from indico.web.forms.widgets import PrefixedTextWidget, SwitchWidget, TinyMCEWidget
 
 
 CLONE_REPEAT_CHOICES = (
@@ -66,40 +58,41 @@ CLONE_REPEAT_CHOICES = (
 
 class EventDataForm(IndicoForm):
     title = StringField(_('Event title'), [DataRequired()])
-    description = TextAreaField(_('Description'), widget=CKEditorWidget(simple=True, images=True, height=250))
+    description = TextAreaField(_('Description'), widget=TinyMCEWidget(images=True, height=350))
     url_shortcut = StringField(_('URL shortcut'), filters=[lambda x: (x or None)])
 
-    def __init__(self, *args, **kwargs):
-        self.event = kwargs.pop('event')
-        super(EventDataForm, self).__init__(*args, **kwargs)
-        # TODO: Add a custom widget showing the prefix right before the field
-        prefix = '{}/e/'.format(config.BASE_URL)
-        self.url_shortcut.description = _('<strong>{}SHORTCUT</strong> - the URL shortcut must be unique within '
-                                          'this Indico instance and is not case sensitive.').format(prefix)
+    def __init__(self, *args, event, **kwargs):
+        self.event = event
+        self.editor_upload_url = url_for('attachments.upload_editor', event)
+        super().__init__(*args, **kwargs)
+        prefix = f'{config.BASE_URL}/e/'
+        self.url_shortcut.description = _('The URL shortcut must be unique within this Indico instance and '
+                                          'is not case sensitive.').format(prefix)
+        self.url_shortcut.widget = PrefixedTextWidget(prefix=prefix)
 
     def validate_url_shortcut(self, field):
         shortcut = field.data
         if not shortcut:
             return
         if shortcut.isdigit():
-            raise ValidationError(_("The URL shortcut must contain at least one character that is not a digit."))
+            raise ValidationError(_('The URL shortcut must contain at least one character that is not a digit.'))
         if not re.match(r'^[a-zA-Z0-9/._-]+$', shortcut):
-            raise ValidationError(_("The URL shortcut contains an invalid character."))
+            raise ValidationError(_('The URL shortcut contains an invalid character.'))
         if '//' in shortcut:
-            raise ValidationError(_("The URL shortcut may not contain two consecutive slashes."))
+            raise ValidationError(_('The URL shortcut may not contain two consecutive slashes.'))
         if shortcut[0] == '/' or shortcut[-1] == '/':
-            raise ValidationError(_("The URL shortcut may not begin/end with a slash."))
+            raise ValidationError(_('The URL shortcut may not begin/end with a slash.'))
         conflict = (Event.query
                     .filter(db.func.lower(Event.url_shortcut) == shortcut.lower(),
                             ~Event.is_deleted,
                             Event.id != self.event.id)
                     .has_rows())
         if conflict:
-            raise ValidationError(_("The URL shortcut is already used in another event."))
+            raise ValidationError(_('The URL shortcut is already used in another event.'))
         if LegacyEventMapping.query.filter_by(legacy_event_id=shortcut).has_rows():
             # Reject existing event ids. It'd be EXTREMELY confusing and broken to allow such a shorturl
             # Non-legacy event IDs are already covered by the `isdigit` check above.
-            raise ValidationError(_("This URL shortcut is not available.") % shortcut)
+            raise ValidationError(_('This URL shortcut is not available.') % shortcut)
 
 
 class EventDatesForm(IndicoForm):
@@ -107,23 +100,23 @@ class EventDatesForm(IndicoForm):
     _override_date_fields = ('start_dt_override', 'end_dt_override')
 
     timezone = IndicoTimezoneSelectField(_('Timezone'), [DataRequired()])
-    start_dt = IndicoDateTimeField(_("Start"), [InputRequired()], allow_clear=False)
-    end_dt = IndicoDateTimeField(_("End"), [InputRequired(), LinkedDateTime('start_dt', not_equal=True)],
+    start_dt = IndicoDateTimeField(_('Start'), [InputRequired()], allow_clear=False)
+    end_dt = IndicoDateTimeField(_('End'), [InputRequired(), LinkedDateTime('start_dt', not_equal=True)],
                                  allow_clear=False)
     update_timetable = BooleanField(_('Update timetable'), widget=SwitchWidget(),
-                                    description=_("Move sessions/contributions/breaks in the timetable according "
-                                                  "to the new event start time."))
-    start_dt_override = IndicoDateTimeField(_("Start"), [Optional()], allow_clear=True,
-                                            description=_("Specifying this date overrides the start date displayed "
-                                                          "on the main conference page."))
-    end_dt_override = IndicoDateTimeField(_("End"), [Optional(), LinkedDateTime('start_dt_override', not_equal=True)],
+                                    description=_('Move sessions/contributions/breaks in the timetable according '
+                                                  'to the new event start time.'))
+    start_dt_override = IndicoDateTimeField(_('Start'), [Optional()], allow_clear=True,
+                                            description=_('Specifying this date overrides the start date displayed '
+                                                          'on the main conference page.'))
+    end_dt_override = IndicoDateTimeField(_('End'), [Optional(), LinkedDateTime('start_dt_override', not_equal=True)],
                                           allow_clear=True,
-                                          description=_("Specifying this date overrides the end date displayed "
-                                                        "on the main conference page."))
+                                          description=_('Specifying this date overrides the end date displayed '
+                                                        'on the main conference page.'))
 
     def __init__(self, *args, **kwargs):
         self.event = kwargs.pop('event')
-        super(EventDatesForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         # timetable synchronization
         self.check_timetable_boundaries = (self.event.type_ != EventType.lecture)
         if self.check_timetable_boundaries:
@@ -147,7 +140,7 @@ class EventDatesForm(IndicoForm):
         if not self.check_timetable_boundaries or self.update_timetable.data or field.object_data == field.data:
             return
         if field.data > min(self.toplevel_timetable_entries, key=attrgetter('start_dt')).start_dt:
-            raise ValidationError(_("To use this start date the timetable must be updated."))
+            raise ValidationError(_('To use this start date the timetable must be updated.'))
 
     def validate_end_dt(self, field):
         if not self.check_timetable_boundaries:
@@ -160,8 +153,8 @@ class EventDatesForm(IndicoForm):
             delta = max(timedelta(), start_dt_offset - end_buffer)
             if delta:
                 delta_str = format_human_timedelta(delta, 'minutes', True)
-                raise ValidationError(_("The event is too short to fit all timetable entries. "
-                                        "It must be at least {} longer.").format(delta_str))
+                raise ValidationError(_('The event is too short to fit all timetable entries. '
+                                        'It must be at least {} longer.').format(delta_str))
         else:
             # if we do not update timetable entries, only check that
             # the event does not end before its last timetable entry;
@@ -169,12 +162,19 @@ class EventDatesForm(IndicoForm):
             # field's validation method.
             max_end_dt = max(self.toplevel_timetable_entries, key=attrgetter('end_dt')).end_dt
             if field.data < max_end_dt:
-                raise ValidationError(_("The event cannot end before its last timetable entry, which is at {}.")
-                                      .format(to_unicode(format_datetime(max_end_dt, timezone=self.event.tzinfo))))
+                raise ValidationError(_('The event cannot end before its last timetable entry, which is at {}.')
+                                      .format(format_datetime(max_end_dt, timezone=self.event.tzinfo)))
 
 
 class EventLocationForm(IndicoForm):
     location_data = IndicoLocationField(_('Location'), allow_location_inheritance=False)
+    own_map_url = URLField(_('Map URL'), [Optional(), URL()])
+
+    def __init__(self, *args, **kwargs):
+        event = kwargs['event']
+        super().__init__(*args, **kwargs)
+        if event.room:
+            self.own_map_url.render_kw = {'placeholder': event.room.map_url}
 
 
 class EventPersonsForm(IndicoForm):
@@ -182,7 +182,7 @@ class EventPersonsForm(IndicoForm):
 
     def __init__(self, *args, **kwargs):
         self.event = kwargs.pop('event')
-        super(EventPersonsForm, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         if self.event.type_ == EventType.lecture:
             self.person_link_data.label.text = _('Speakers')
 
@@ -190,18 +190,19 @@ class EventPersonsForm(IndicoForm):
 class EventContactInfoForm(IndicoForm):
     _contact_fields = ('contact_title', 'contact_emails', 'contact_phones')
 
-    contact_title = StringField(_('Title'), [DataRequired()])
+    contact_title = StringField(pgettext('Salutation', 'Title'), [DataRequired()])
     contact_emails = MultiStringField(_('Emails'), field=('email', _('email')), unique=True, flat=True, sortable=True)
     contact_phones = MultiStringField(_('Phone numbers'), field=('phone', _('number')), unique=True, flat=True,
                                       sortable=True)
     organizer_info = TextAreaField(_('Organizers'))
     additional_info = TextAreaField(_('Additional information'),
-                                    widget=CKEditorWidget(simple=True, images=True, height=250),
-                                    description=_("This text is displayed on the main conference page."))
+                                    widget=TinyMCEWidget(images=True, height=250),
+                                    description=_('This text is displayed on the main conference page.'))
 
-    def __init__(self, *args, **kwargs):
-        self.event = kwargs.pop('event')
-        super(EventContactInfoForm, self).__init__(*args, **kwargs)
+    def __init__(self, *args, event, **kwargs):
+        self.event = event
+        self.editor_upload_url = url_for('attachments.upload_editor', event)
+        super().__init__(*args, **kwargs)
         if self.event.type_ != EventType.lecture:
             del self.organizer_info
         if self.event.type_ != EventType.conference:
@@ -214,18 +215,47 @@ class EventContactInfoForm(IndicoForm):
 
 
 class EventClassificationForm(IndicoForm):
-    keywords = IndicoTagListField(_('Keywords'))
+    _field_order = ('keywords', 'references', 'label', 'label_message')
+
+    # The 'keywords' field is dynamically added when creating the form.
     references = ReferencesField(_('External IDs'), reference_class=EventReference)
+    label = QuerySelectField(pgettext('Classification', 'Label'), allow_blank=True, get_label='title')
+    label_message = TextAreaField(pgettext('Classification', 'Label message'),
+                                  description=_('You can optionally provide a message that is shown when hovering '
+                                                'the selected label.'))
 
     def __init__(self, *args, **kwargs):
         event = kwargs.pop('event')
-        super(EventClassificationForm, self).__init__(*args, **kwargs)
-        if event.type_ != EventType.meeting:
+        super().__init__(*args, **kwargs)
+        if event.type_ != EventType.meeting or not ReferenceType.query.has_rows():
             del self.references
+        self.label.query = EventLabel.query.order_by(db.func.lower(EventLabel.title))
+        if not self.label.query.has_rows():
+            del self.label
+            del self.label_message
+
+    def validate_keywords(self, field):
+        validate_keywords_field('event', field)
+
+
+class EventPrivacyForm(IndicoForm):
+    _data_controller_fields = ('data_controller_name', 'data_controller_email')
+    _privacy_policy_fields = ('privacy_policy_urls', 'privacy_policy')
+    data_controller_name = StringField(_('Person/Institution'))
+    data_controller_email = EmailField(_('Contact email'), [Optional(), Email()])
+    privacy_policy_urls = IndicoLinkListField(_('External page'),
+                                              description=_('List of URLs to external pages containing privacy '
+                                                            'notices.'))
+    privacy_policy = TextAreaField(_('Text'), widget=TinyMCEWidget(),
+                                   description=_('Only used if no URL is provided'))
+
+    def validate_privacy_policy(self, field):
+        if self.privacy_policy_urls.data and self.privacy_policy.data:
+            raise ValidationError(_('Define either a privacy notice text or URLs'))
 
 
 class EventProtectionForm(IndicoForm):
-    permissions = PermissionsField(_("Permissions"), object_type='event')
+    permissions = PermissionsField(_('Permissions'), object_type='event')
     protection_mode = IndicoProtectionField(_('Protection mode'),
                                             protected_object=lambda form: form.protected_object,
                                             acl_message_url=lambda form: url_for('event_management.acl_message',
@@ -237,16 +267,29 @@ class EventProtectionForm(IndicoForm):
     own_no_access_contact = StringField(_('No access contact'),
                                         description=_('Contact information shown when someone lacks access to the '
                                                       'event'))
-    visibility = SelectField(_("Visibility"), [Optional()], coerce=lambda x: None if x == '' else int(x),
-                             description=_("""From which point in the category tree this event will be visible from """
-                                           """(number of categories upwards). Applies to "Today's events" and """
-                                           """Calendar only. If the event is moved, this number will be preserved."""))
+    visibility = SelectField(_('Visibility'),
+                             [Optional()], coerce=lambda x: None if x == '' else int(x),  # noqa: PLC1901
+                             description=_('''From which point in the category tree this event will be visible from '''
+                                           '''(number of categories upwards). Applies to "Today's events", '''
+                                           '''Calendar. If the event is moved, this number will be preserved. '''
+                                           '''The "Invisible" option will also hide the event from the category's '''
+                                           '''event list except for managers.'''))
+    public_regform_access = BooleanField(_('Public registration'), widget=SwitchWidget(),
+                                         description=_('Allow users who cannot access the event to register. This will '
+                                                       'expose open registration forms to anyone with a link to the '
+                                                       'event, so you can let users register without giving access '
+                                                       'to anything else in your event.'))
+    subcontrib_speakers = BooleanField(_('Speakers can submit'), widget=SwitchWidget(),
+                                       description=_('Subcontribution speakers can edit minutes and upload materials.'))
     priv_fields = set()
 
     def __init__(self, *args, **kwargs):
         self.protected_object = self.event = kwargs.pop('event')
-        super(EventProtectionForm, self).__init__(*args, **kwargs)
-        self._init_visibility(self.event)
+        super().__init__(*args, **kwargs)
+        if not self.event.category:
+            del self.visibility
+        else:
+            self._init_visibility(self.event)
 
     def _get_event_own_visibility_horizon(self, event):
         if self.visibility.data is None:  # unlimited
@@ -257,6 +300,8 @@ class EventProtectionForm(IndicoForm):
             return event.category.nth_parent(self.visibility.data - 1)
 
     def _init_visibility(self, event):
+        assert event.category
+
         self.visibility.choices = get_visibility_options(event, allow_invisible=True)
         # Check if event visibility would be affected by any of the categories
         real_horizon = event.category.real_visibility_horizon
@@ -272,7 +317,7 @@ class EventProtectionForm(IndicoForm):
 
     @classmethod
     def _create_coordinator_priv_fields(cls):
-        for name, title in sorted(COORDINATOR_PRIV_TITLES.iteritems(), key=itemgetter(1)):
+        for name, title in sorted(COORDINATOR_PRIV_TITLES.items(), key=itemgetter(1)):
             setattr(cls, name, BooleanField(title, widget=SwitchWidget(), description=COORDINATOR_PRIV_DESCS[name]))
             cls.priv_fields.add(name)
 
@@ -289,8 +334,8 @@ class PosterPrintingForm(IndicoForm):
     def __init__(self, event, **kwargs):
         all_templates = set(event.designer_templates) | get_inherited_templates(event)
         poster_templates = [tpl for tpl in all_templates if tpl.type.name == 'poster']
-        super(PosterPrintingForm, self).__init__(**kwargs)
-        self.template.choices = sorted(((unicode(tpl.id), tpl.title) for tpl in poster_templates), key=itemgetter(1))
+        super().__init__(**kwargs)
+        self.template.choices = sorted(((str(tpl.id), tpl.title) for tpl in poster_templates), key=itemgetter(1))
 
 
 class CloneRepeatabilityForm(IndicoForm):
@@ -299,33 +344,40 @@ class CloneRepeatabilityForm(IndicoForm):
 
 class CloneContentsForm(CloneRepeatabilityForm):
     selected_items = IndicoSelectMultipleCheckboxField(_('What to clone'))
+    selected_items_set = HiddenField()
+    refresh_users = BooleanField(_('Refresh user information'),
+                                 description=_('When checked, names and affiliations of users in the cloned event will '
+                                               'be synchronized with their Indico user profiles.'))
 
     def __init__(self, event, set_defaults=False, **kwargs):
-        options = EventCloner.get_cloners(event)
-        visible_options = filter(attrgetter('is_visible'), options)
-        default_selected_items = kwargs.get('selected_items', [option.name for option in options if option.is_default])
+        visible_options = list(filter(attrgetter('is_visible'), EventCloner.get_cloners(event)))
+        default_selected_items = kwargs.get('selected_items', [option.name for option in visible_options
+                                                               if option.is_default and option.is_available])
 
         if set_defaults:
             default_category = kwargs['category']['id'] if 'category' in kwargs else None
+            current_select_items = request.form.getlist('selected_items')
             form_params = {
                 'repeatability': request.form.get('repeatability', kwargs.pop('repeatability', None)),
-                'selected_items': (request.form.getlist('selected_items') or default_selected_items),
+                'selected_items': (current_select_items if 'selected_items_set' in request.form else
+                                   (current_select_items or default_selected_items)),
+                'refresh_users': 'refresh_users' in request.form if 'selected_items' in request.form else True,
                 'category': request.form.get('category', default_category),
                 'csrf_token': request.form.get('csrf_token')
             }
             kwargs['formdata'] = ImmutableMultiDict(form_params)
 
-        super(CloneContentsForm, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.selected_items.choices = [(option.name, option.friendly_name) for option in visible_options]
         self.selected_items.disabled_choices = [option.name for option in visible_options if not option.is_available]
 
 
 class CloneCategorySelectForm(CloneContentsForm):
-    category = CategoryField(_('Category'), require_event_creation_rights=True, allow_subcats=False)
+    category = CategoryField(_('Category'), require_event_creation_rights=True, show_event_creation_warning=True)
 
     def validate_category(self, field):
         if not field.data:
-            raise ValidationError(_("You have to select a category"))
+            raise ValidationError(_('You have to select a category'))
         elif not field.data.can_create_events(session.user):
             raise ValidationError(_("You can't create events in this category"))
 
@@ -349,7 +401,7 @@ class CloneRepeatFormBase(CloneCategorySelectForm):
 
     def __init__(self, event, **kwargs):
         kwargs['start_dt'] = self._calc_start_dt(event)
-        super(CloneRepeatFormBase, self).__init__(event, **kwargs)
+        super().__init__(event, **kwargs)
 
 
 class CloneRepeatOnceForm(CloneRepeatFormBase):
@@ -363,25 +415,106 @@ class CloneRepeatUntilFormBase(CloneRepeatOnceForm):
     until_dt = IndicoDateField(_('Day'), [HiddenUnless('stop_criterion', 'day'), DataRequired()])
     num_times = IntegerField(_('Number of times'),
                              [HiddenUnless('stop_criterion', 'num_times'), DataRequired(),
-                              NumberRange(1, 100, message=_("You can clone a maximum of 100 times"))],
+                              NumberRange(1, 100, message=_('You can clone a maximum of 100 times'))],
                              default=2)
 
     def __init__(self, event, **kwargs):
         kwargs.setdefault('until_dt', (self._calc_start_dt(event) + timedelta(days=14)).date())
-        super(CloneRepeatUntilFormBase, self).__init__(event, **kwargs)
+        super().__init__(event, **kwargs)
 
 
 class CloneRepeatIntervalForm(CloneRepeatUntilFormBase):
-    recurrence = RelativeDeltaField(_('Every'), [DataRequired(), NumberRange(min=1)],
+    # i18n: 'Every' is used in the context of 'Every year', 'Every month', etc.
+    recurrence = RelativeDeltaField(pgettext('Repetition', 'Every'),
+                                    [DataRequired()],
                                     units=('years', 'months', 'weeks', 'days'),
                                     default=relativedelta(weeks=1))
 
     def validate_recurrence(self, field):
         if field.data != abs(field.data):
-            raise ValidationError(_("The time period must be positive"))
+            raise ValidationError(_('The time period must be positive'))
 
 
 class CloneRepeatPatternForm(CloneRepeatUntilFormBase):
-    week_day = IndicoWeekDayRepetitionField(_('Every'))
+    week_day = IndicoWeekDayRepetitionField(pgettext('Repetition', 'Every'))
     num_months = IntegerField(_('Months'), [DataRequired(), NumberRange(min=1)], default=1,
-                              description=_("Number of months between repetitions"))
+                              description=_('Number of months between repetitions'))
+
+
+class ProgramCodesForm(IndicoForm):
+    session_template = StringField(_('Sessions'))
+    session_block_template = StringField(_('Session blocks'))
+    contribution_template = StringField(_('Contributions'))
+    subcontribution_template = StringField(_('Subcontributions'))
+
+
+class ImportSourceEventForm(IndicoForm):
+    source_event_url = URLField(_('Event URL'), [DataRequired(), URL()])
+
+
+class ImportContentsForm(ImportSourceEventForm):
+    selected_items = IndicoSelectMultipleCheckboxField(_('What to clone'))
+
+    def __init__(self, source_event, target_event, set_defaults=False, **kwargs):
+        cloners = EventCloner.get_cloners(source_event)
+        visible_options = [cloner for cloner in cloners if cloner.is_visible and not cloner.new_event_only]
+        conflicts = {cloner.name: cloner.get_conflicts(target_event) for cloner in cloners}
+        cloners_with_conflicts = {name for name in conflicts if conflicts[name]}
+
+        if set_defaults:
+            form_params = {
+                'source_event_url': request.form.get('source_event_url', kwargs.pop('source_event_url', None)),
+                'selected_items': request.form.getlist('selected_items'),
+                'csrf_token': request.form.get('csrf_token')
+            }
+            kwargs['formdata'] = ImmutableMultiDict(form_params)
+
+        super().__init__(**kwargs)
+        self.selected_items.choices = [(option.name, option.friendly_name) for option in visible_options]
+        # We disable all cloners that are not available, handle only cloning to new events,
+        # have conflicts with target_event or any of their dependencies have conflicts with target_event
+        disabled_choices = []
+        reasons = {}
+        for option in visible_options:
+            if not option.is_available:
+                disabled_choices.append(option.name)
+                reasons[option.name] = _('There is nothing to import')
+            elif conflict := conflicts[option.name]:
+                disabled_choices.append(option.name)
+                reasons[option.name] = '\n'.join(conflict)
+            elif cloners_with_conflicts & option.requires_deep:
+                disabled_choices.append(option.name)
+                reasons[option.name] = _('This option depends on other options which are unavailable')
+
+        self.selected_items.disabled_choices = disabled_choices
+        self.selected_items.disabled_choices_reasons = reasons
+
+
+class EventLanguagesForm(IndicoForm):
+    default_locale = SelectField(_('Default language'), description=_('This is the primary language of the event. It '
+                                                                      'will be included in the metadata of the event.'))
+    enforce_locale = BooleanField(_('Enforce language'), widget=SwitchWidget(),
+                                  description=_('If set, Indico will use the default language instead of the '
+                                                "user's language when displaying the event or sending emails related "
+                                                'to it. This setting should be enabled only for events where it is '
+                                                'important that there is no mix of languages e.g. due to custom menu '
+                                                'titles.'))
+    supported_locales = IndicoSelectMultipleCheckboxField(_('Additional languages'),
+                                                          description=_('Languages from this list will be used if the '
+                                                                        "user selected one of them, even if it's not "
+                                                                        "the event's default language."))
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        locales = [(code, f'{name} ({territory})' if territory else name)
+                   for code, (name, territory, __) in get_all_locales().items()]
+        locales.sort(key=itemgetter(1))
+        self.default_locale.choices = [('', _('No default language')), *locales]
+        self.supported_locales.choices = locales
+
+    def post_validate(self):
+        if self.default_locale.data and self.default_locale.data not in self.supported_locales.data:
+            self.supported_locales.data.append(self.default_locale.data)
+        if not self.default_locale.data:
+            self.supported_locales.data = []

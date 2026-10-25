@@ -1,13 +1,31 @@
 {% extends 'forms/base_widget.html' %}
+{% from 'message_box.html' import message_box %}
 
 
 {% block html %}
-    <div class="i-form-field-fixed-width">
+    <div>
         <div id="category-title-{{ field.id }}" class="text-holder-box flexrow f-a-center" data-tooltip-anchor></div>
-        <a class="i-button" id="categorynav-button-{{ field.id }}"
-           data-title='{% trans %}Choose category{% endtrans %}'>
+        <div id="category-warning-{{ field.id }}" class="hidden">
+            <div class="action-box mid-form for-form warning">
+                <div class="section">
+                    <div class="icon icon-warning"></div>
+                    <div class="text">
+                        <div>
+                            {% trans %}
+                                The selected category does not contain any events, only subcategories.
+                                Please make sure that you really want to create an event there.
+                            {% endtrans %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button type="button"
+                class="i-button"
+                id="categorynav-button-{{ field.id }}"
+                data-title='{% trans %}Choose category{% endtrans %}'>
             {%- trans %}Choose category{% endtrans -%}
-        </a>
+        </button>
         <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ field._value() | tojson | forceescape }}">
     </div>
 {% endblock %}
@@ -19,10 +37,8 @@
             fieldId: {{ field.id | tojson }},
             navigatorCategoryId: {{ field.navigator_category_id | tojson }},
             requireEventCreationRights: {{ field.require_event_creation_rights | tojson }},
-            allow: {
-                events: {{ field.allow_events | tojson }},
-                subcats: {{ field.allow_subcats | tojson }}
-            }
+            requireCategoryManagementRights: {{ field.require_category_management_rights | tojson }},
+            showEventCreationWarning: {{ field.show_event_creation_warning | tojson }},
         });
     </script>
 {% endblock %}

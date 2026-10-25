@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from functools import partial
 
@@ -27,13 +16,15 @@ from indico.web.flask.util import make_compat_redirect_func
 from indico.web.flask.wrappers import IndicoBlueprint
 
 
-_bp = IndicoBlueprint('abstracts', __name__, url_prefix='/event/<confId>', template_folder='templates',
+_bp = IndicoBlueprint('abstracts', __name__, url_prefix='/event/<int:event_id>', template_folder='templates',
                       virtual_template_folder='events/abstracts')
 
 # Display pages (not related to any specific abstract)
 _bp.add_url_rule('/abstracts/', 'call_for_abstracts', display.RHCallForAbstracts)
 _bp.add_url_rule('/abstracts/mine.pdf', 'my_abstracts_pdf', display.RHMyAbstractsExportPDF)
 _bp.add_url_rule('/abstracts/submit', 'submit', display.RHSubmitAbstract, methods=('GET', 'POST'))
+_bp.add_url_rule('/abstracts/submit/<uuid>', 'submit_invited_abstract', display.RHSubmitInvitedAbstract,
+                 methods=('GET', 'POST'))
 
 # Reviewing pages (display area, not related to any specific abstract)
 _bp.add_url_rule('/abstracts/reviewing/', 'display_reviewable_tracks', reviewing.RHDisplayReviewableTracks)
@@ -51,8 +42,11 @@ _bp.add_url_rule('/abstracts/reviewing/<int:track_id>/abstracts.xlsx', 'display_
                  reviewing.RHDisplayAbstractsExportExcel, methods=('POST',))
 
 # Book of Abstracts
-_bp.add_url_rule('/manage/abstracts/boa', 'manage_boa', boa.RHManageBOA, methods=('GET', 'POST'))
+_bp.add_url_rule('/manage/abstracts/boa/settings', 'manage_boa_settings', boa.RHBOASettings, methods=('GET', 'POST'))
+_bp.add_url_rule('/manage/abstracts/boa/custom/upload', 'upload_boa_file', boa.RHUploadBOAFile, methods=('POST',))
+_bp.add_url_rule('/manage/abstracts/boa/custom', 'manage_custom_boa', boa.RHCustomBOA, methods=('POST', 'DELETE'))
 _bp.add_url_rule('/book-of-abstracts.pdf', 'export_boa', boa.RHExportBOA)
+_bp.add_url_rule('/manage/book-of-abstracts.zip', 'export_boa_tex', boa.RHExportBOATeX)
 
 # Misc
 _bp.add_url_rule('/abstracts/other-list', 'other_abstracts', reviewing.RHListOtherAbstracts, methods=('POST',))
@@ -91,22 +85,30 @@ _bp.add_url_rule('/manage/abstracts/list/customize', 'customize_abstract_list', 
 _bp.add_url_rule('/manage/abstracts/list/static-url', 'generate_static_url', abstract_list.RHAbstractListStaticURL,
                  methods=('POST',))
 _bp.add_url_rule('/manage/abstracts/abstracts.pdf', 'abstracts_pdf_export', abstract_list.RHAbstractsExportPDF,
-                 methods=('POST',))
+                 methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/abstracts.csv', 'abstracts_csv_export', abstract_list.RHAbstractsExportCSV,
-                 methods=('POST',))
+                 methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/abstracts.xlsx', 'abstracts_xlsx_export', abstract_list.RHAbstractsExportExcel,
-                 methods=('POST',))
+                 methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/abstracts.json', 'abstracts_json_export', abstract_list.RHAbstractsExportJSON,
-                 methods=('POST',))
+                 methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/create', 'manage_create_abstract', abstract_list.RHCreateAbstract,
                  methods=('GET', 'POST'))
+
+# Emailing (management)
+_bp.add_url_rule('/manage/abstracts/api/email-roles/metadata', 'api_email_abstract_roles_metadata',
+                 abstract_list.RHAbstractsAPIEmailAbstractRolesMetadata, methods=('POST',))
+_bp.add_url_rule('/manage/abstracts/api/email-roles/preview', 'api_email_abstract_roles_preview',
+                 abstract_list.RHAbstractsAPIEmailAbstractRolesPreview, methods=('POST',))
+_bp.add_url_rule('/manage/abstracts/api/email-roles/send', 'api_email_abstract_roles_send',
+                 abstract_list.RHAbstractsAPIEmailAbstractRolesSend, methods=('POST',))
 
 # Bulk abstract actions (management)
 _bp.add_url_rule('/manage/abstracts/delete', 'manage_delete_abstracts', abstract_list.RHDeleteAbstracts,
                  methods=('POST',))
 _bp.add_url_rule('/manage/abstracts/person-list', 'person_list', abstract_list.RHAbstractPersonList, methods=('POST',))
 _bp.add_url_rule('/manage/abstracts/attachments', 'download_attachments', abstract_list.RHAbstractsDownloadAttachments,
-                 methods=('POST',))
+                 methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/judge', 'manage_judge_abstracts', abstract_list.RHBulkAbstractJudgment,
                  methods=('POST',))
 
@@ -124,6 +126,8 @@ _bp.add_url_rule('/manage/abstracts/email-templates/<email_tpl_id>/edit-text',
                  'email_tpl_text_edit', email_templates.RHEditEmailTemplateText, methods=('GET', 'POST'))
 _bp.add_url_rule('/manage/abstracts/email-templates/<email_tpl_id>',
                  'email_tpl_rest', email_templates.RHEmailTemplateREST, methods=('PATCH',))
+_bp.add_url_rule('/manage/abstracts/email-templates/quick-setup',
+                 'quick_setup_notifications', email_templates.RHQuickSetupEmailTemplates, methods=('POST',))
 
 
 # URLs available in both management and display areas
@@ -175,7 +179,7 @@ def _add_management_flag(endpoint, values):
 
 
 # Legacy URLs - display
-_compat_bp = IndicoBlueprint('compat_abstracts', __name__, url_prefix='/event/<int:confId>')
+_compat_bp = IndicoBlueprint('compat_abstracts', __name__, url_prefix='/event/<int:event_id>')
 _compat_bp.add_url_rule('/call-for-abstracts/', 'cfa', make_compat_redirect_func(_bp, 'call_for_abstracts'))
 _compat_bp.add_url_rule('/call-for-abstracts/my-abstracts', 'mine',
                         make_compat_redirect_func(_bp, 'call_for_abstracts'))

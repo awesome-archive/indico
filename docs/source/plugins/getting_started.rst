@@ -1,3 +1,5 @@
+.. _plugins-getting-started:
+
 Getting started with Indico plugins
 ===================================
 
@@ -53,7 +55,7 @@ your plugin folder. Your plugin can even load templates from other modules by pr
 `'other_plugin:example'` with `render_template()`. ::
 
     class WPExample(WPDecorated):
-        def _getBody(self, params):
+        def _get_body(self, params):
             return render_plugin_template('example.html', **params)
 
 

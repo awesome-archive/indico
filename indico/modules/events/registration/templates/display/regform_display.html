@@ -6,6 +6,7 @@
     {% extends 'events/registration/display/_meeting_registration_base.html' %}
 {% endif %}
 
+{% from 'events/registration/_template_hooks.html' import regform_attrs_template_hook %}
 {% from 'events/registration/display/_regform_invitation_info.html' import render_invitation_info %}
 {% from 'events/registration/display/_regform_info.html' import render_regform_info %}
 {% from 'message_box.html' import message_box %}
@@ -26,6 +27,26 @@
 
 
 {% block content %}
+    {% if regform.is_purged %}
+        {% call message_box('error', fixed_width=true, large_icon=true) %}
+            <div class="label">
+                {% trans %}Registration is disabled due to an expired retention period{% endtrans %}
+            </div>
+        {% endcall %}
+    {% else %}
+        {{ render_regform() }}
+    {% endif %}
+{% endblock %}
+
+
+{% macro render_regform() %}
+      {% if is_restricted_access %}
+        {% call message_box('warning') %}
+            {% trans -%}
+                Access to the rest of this event is restricted to registered participants.
+            {%- endtrans %}
+        {% endcall %}
+    {% endif %}
     {{ render_regform_info(regform) }}
 
     {% if invitation %}
@@ -64,20 +85,22 @@
             <div class="section">
                 <span class="icon icon-info"></span>
                 <div class="text">
-                    <div class="label">
-                        {%- if moderated %}
-                            {%- trans %}Account required to apply{% endtrans %}
-                        {%- else %}
-                            {%- trans %}Account required to register{% endtrans %}
-                        {%- endif -%}
-                    </div>
-                    <div>
-                        {%- if moderated %}
-                            {%- trans %}In order to apply for this event you have to be logged in.{% endtrans %}
-                        {%- else %}
-                            {%- trans %}In order to register for this event you have to be logged in.{% endtrans %}
-                        {%- endif -%}
-                    </div>
+                    {% block login_required_warning %}
+                        <div class="label">
+                            {%- if moderated %}
+                                {%- trans %}Account required to apply{% endtrans %}
+                            {%- else %}
+                                {%- trans %}Account required to register{% endtrans %}
+                            {%- endif -%}
+                        </div>
+                        <div>
+                            {%- if moderated %}
+                                {%- trans %}In order to apply for this event you have to be logged in.{% endtrans %}
+                            {%- else %}
+                                {%- trans %}In order to register for this event you have to be logged in.{% endtrans %}
+                            {%- endif -%}
+                        </div>
+                    {% endblock %}
                 </div>
                 <div class="toolbar">
                     <a href="{{ url_for_login(request.relative_url) }}" class="i-button next highlight">
@@ -92,25 +115,37 @@
                 <div class="label">
                     {% trans %}Participation in this event is moderated{% endtrans %}
                 </div>
-                {% trans -%}
-                    The organizers will have to approve your application.
-                {%- endtrans %}
+                {% block moderated_warning_explanation %}
+                    {% trans -%}
+                        The organizers will have to approve your application.
+                    {%- endtrans %}
+                {% endblock %}
             {% endcall %}
         {% endif %}
 
-        <div ng-app="nd" ng-controller="AppCtrl">
-            <div nd-reg-form
-                 conf-id="{{ event.id }}"
-                 conf-sections="{{ sections | tojson | forceescape }}"
-                 conf-currency="{{ regform.currency }}"
-                 user-info="{{ user_data | tojson | forceescape }}"
-                 post-url="{{ request.url | tojson | forceescape }}"
-                 check-email-url="{{ url_for('.check_email', regform, management=management) | tojson | forceescape }}"
-                 management="{{ management | tojson | forceescape }}"
-                 is-moderated="{{ moderated | tojson | forceescape }}"
-                 notify-default="{{ session.get('registration_notify_user_default', true) | tojson | forceescape }}">
-            </div>
-        </div>
-        {{ template_hook('after-regform', event=event, regform=regform, management=management, registration=none) }}
+        {% block registration_form %}
+            <div id="registration-form-submission-container"
+                data-event-id="{{ event.id }}"
+                data-regform-id="{{ regform.id }}"
+                data-submit-url="{{ request.url }}"
+                data-currency="{{ regform.currency }}"
+                data-form-data="{{ form_data | tojson | forceescape }}"
+                data-initial-values="{{ initial_values | tojson | forceescape }}"
+                data-file-data="{{ file_data | tojson | forceescape }}"
+                data-has-predefined-affiliations="{{ has_predefined_affiliations | tojson | forceescape }}"
+                data-management="{{ management | tojson | forceescape }}"
+                data-moderated="{{ moderated | tojson | forceescape }}"
+                data-lock-email="{{ (invitation.lock_email if invitation else false) | tojson | forceescape }}"
+                data-publish-to-participants="{{ regform.publish_registrations_participants.name }}"
+                data-publish-to-public="{{ regform.publish_registrations_public.name }}"
+                data-policy-agreement-required="{{ regform.require_privacy_policy_agreement | tojson | forceescape }}"
+                data-captcha-required="{{ captcha_required | tojson | forceescape }}"
+                {% if captcha_settings is defined %}
+                    data-captcha-settings="{{ captcha_settings | tojson | forceescape }}"
+                {% endif %}
+                {% if registration %}data-consent-to-publish="{{ registration.consent_to_publish.name }}"{% endif %}
+                {{ regform_attrs_template_hook(event, regform, management) }}
+            ></div>
+        {% endblock %}
     {% endif %}
-{% endblock %}
+{% endmacro %}

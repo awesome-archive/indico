@@ -1,25 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import sys
 from contextlib import contextmanager
 from functools import partial
+from threading import get_ident
 
+from flask import g
 from flask_sqlalchemy import SQLAlchemy
 from flask_sqlalchemy.model import BindMetaMixin
 from sqlalchemy.event import listen
@@ -29,20 +20,23 @@ from sqlalchemy.orm import CompositeProperty, mapper
 from sqlalchemy.sql.ddl import CreateSchema
 
 from indico.core import signals
+from indico.core.db.sqlalchemy.custom.array_utils import (create_array_append_function, create_array_is_unique_function,
+                                                          create_array_to_string_function)
 from indico.core.db.sqlalchemy.custom.natsort import create_natsort_function
 from indico.core.db.sqlalchemy.custom.unaccent import create_unaccent_function
 from indico.core.db.sqlalchemy.util.models import IndicoBaseQuery, IndicoModel
 
 
 class ConstraintViolated(Exception):
-    """Indicates that a constraint trigger was violated"""
+    """Indicate that a constraint trigger was violated."""
+
     def __init__(self, message, orig):
-        super(ConstraintViolated, self).__init__(message)
+        super().__init__(message)
         self.orig = orig
 
 
 def handle_sqlalchemy_database_error():
-    """Handle a SQLAlchemy DatabaseError exception nicely
+    """Handle a SQLAlchemy DatabaseError exception nicely.
 
     Currently this only takes care of custom INDX exception
     raised from constraint triggers.  It must be invoked from an
@@ -54,25 +48,38 @@ def handle_sqlalchemy_database_error():
                                that enforce consistenct
     :raise DatabaseError: any other database error is simply re-raised
     """
-    exc_class, exc, tb = sys.exc_info()
+    exc = sys.exc_info()[1]
     if exc.orig.pgcode is None or not exc.orig.pgcode.startswith('INDX'):
         # not an indico exception
-        raise
+        raise  # noqa: PLE0704
     msg = exc.orig.diag.message_primary
     if exc.orig.diag.message_detail:
-        msg += ': {}'.format(exc.orig.diag.message_detail)
+        msg += f': {exc.orig.diag.message_detail}'
     if exc.orig.diag.message_hint:
-        msg += ' ({})'.format(exc.orig.diag.message_hint)
-    raise ConstraintViolated, (msg, exc.orig), tb  # raise with original traceback
+        msg += f' ({exc.orig.diag.message_hint})'
+    raise ConstraintViolated(msg, exc.orig) from exc
+
+
+def _after_commit(*args, **kwargs):
+    signals.core.after_commit.send()
+    if hasattr(g, 'memoize_cache'):
+        del g.memoize_cache
 
 
 class IndicoSQLAlchemy(SQLAlchemy):
+    Model: type[IndicoModel]
+
     def __init__(self, *args, **kwargs):
-        super(IndicoSQLAlchemy, self).__init__(*args, **kwargs)
-        self.m = type(b'_Models', (object,), {})
+        super().__init__(*args, **kwargs)
+        self.m = type('_Models', (object,), {})
+
+    def _make_session_factory(self, *args, **kwargs):
+        factory = super()._make_session_factory(*args, **kwargs)
+        listen(factory, 'after_commit', _after_commit)
+        return factory
 
     def enforce_constraints(self):
-        """Enables immedaite enforcing of deferred constraints.
+        """Enable immediate enforcing of deferred constraints.
 
         This should be done at the end of normal request processing
         and exceptions should be handled in a clean way that goes
@@ -95,16 +102,15 @@ class IndicoSQLAlchemy(SQLAlchemy):
 
     @contextmanager
     def tmp_session(self):
-        """Provides a contextmanager with a temporary SQLAlchemy session.
+        """Provide a contextmanager with a temporary SQLAlchemy session.
 
         This allows you to use SQLAlchemy e.g. in a `after_this_request`
-        callback without having to worry about things like the ZODB extension,
-        implicit commits, etc.
+        callback without having to worry about things like implicit commits
         """
-        session = db.create_session({'query_cls': IndicoBaseQuery})()
+        session = db._make_session_factory({'query_cls': IndicoBaseQuery})()
         try:
             yield session
-        except:
+        except Exception:
             session.rollback()
             raise
         finally:
@@ -116,11 +122,6 @@ class NoNameGenMeta(BindMetaMixin, DeclarativeMeta):
     # generating table names (i.e. a model without an explicit table
     # name will fail instead of getting a name set implicitly)
     pass
-
-
-def on_models_committed(sender, changes):
-    for obj, change in changes:
-        obj.__committed__(change)
 
 
 def _schema_exists(connection, name):
@@ -135,10 +136,13 @@ def _before_create(target, connection, **kw):
     for schema in schemas:
         if not _schema_exists(connection, schema):
             CreateSchema(schema).execute(connection)
-            signals.db_schema_created.send(unicode(schema), connection=connection)
+            signals.core.db_schema_created.send(str(schema), connection=connection)
     # Create our custom functions
     create_unaccent_function(connection)
     create_natsort_function(connection)
+    create_array_is_unique_function(connection)
+    create_array_to_string_function(connection)
+    create_array_append_function(connection)
 
 
 def _mapper_configured(mapper, class_):
@@ -158,7 +162,7 @@ def _mapper_configured(mapper, class_):
 
 
 def _column_names(constraint, table):
-    return '_'.join((c if isinstance(c, basestring) else c.name) for c in constraint.columns)
+    return '_'.join((c if isinstance(c, str) else c.name) for c in constraint.columns)
 
 
 def _unique_index(constraint, table):
@@ -176,7 +180,8 @@ naming_convention = {
 }
 
 db = IndicoSQLAlchemy(model_class=declarative_base(cls=IndicoModel, metaclass=NoNameGenMeta, name='Model'),
-                      query_class=IndicoBaseQuery)
+                      query_class=IndicoBaseQuery, session_options={'scopefunc': get_ident})
 db.Model.metadata.naming_convention = naming_convention
+assert db.Model.metadata is db.metadata
 listen(db.Model.metadata, 'before_create', _before_create)
 listen(mapper, 'mapper_configured', _mapper_configured)

@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from sqlalchemy.ext.declarative import declared_attr
 
@@ -24,7 +13,7 @@ from indico.core.db.sqlalchemy.review_comments import ReviewCommentMixin
 from indico.modules.events.models.reviews import ProposalCommentMixin
 from indico.modules.events.papers.models.reviews import PaperCommentVisibility
 from indico.util.locators import locator_property
-from indico.util.string import format_repr, return_ascii, text_to_repr
+from indico.util.string import format_repr, text_to_repr
 
 
 class PaperReviewComment(ProposalCommentMixin, ReviewCommentMixin, db.Model):
@@ -68,7 +57,6 @@ class PaperReviewComment(ProposalCommentMixin, ReviewCommentMixin, db.Model):
     def locator(self):
         return dict(self.paper_revision.locator, comment_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         return format_repr(self, 'id', 'revision_id', is_deleted=False, _text=text_to_repr(self.text))
 

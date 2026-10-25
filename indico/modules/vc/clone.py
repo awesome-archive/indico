@@ -1,31 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
+from indico.core import signals
 from indico.core.db import db
 from indico.modules.events.cloning import EventCloner
-from indico.modules.vc import VCRoomEventAssociation, VCRoomLinkType, get_vc_plugins
+from indico.modules.vc import VCRoomEventAssociation
+from indico.modules.vc.models.vc_rooms import VCRoomLinkType
+from indico.modules.vc.util import get_vc_plugins
 from indico.util.i18n import _
 
 
 class VCCloner(EventCloner):
     name = 'vc'
-    friendly_name = _('Videoconference rooms')
-    uses = {'sessions', 'contributions'}
+    friendly_name = _('Videoconference')
+    uses = {'sessions', 'contributions', 'timetable'}
     is_default = True
 
     @property
@@ -34,9 +26,20 @@ class VCCloner(EventCloner):
 
     @property
     def is_available(self):
-        return VCRoomEventAssociation.find_for_event(self.old_event, include_hidden=True).has_rows()
+        if self.n_occurrence > 1:
+            # if we're not on the first occurrence, we shouldn't do this check,
+            # since there's the possibility all rooms are gone in the meantime
+            return True
+        return self._has_content(self.old_event)
 
-    def run(self, new_event, cloners, shared_data):
+    def get_conflicts(self, target_event):
+        if self._has_content(target_event):
+            return [_('The target event already has a videoconference')]
+
+    def _has_content(self, event):
+        return VCRoomEventAssociation.find_for_event(event, include_hidden=True).has_rows()
+
+    def run(self, new_event, cloners, shared_data, event_exists=False):
         self._clone_nested_vc_rooms = False
         self._session_block_map = self._contrib_map = None
         if cloners >= {'sessions', 'contributions'}:
@@ -58,6 +61,14 @@ class VCCloner(EventCloner):
                 link_object = self._session_block_map[old_event_vc_room.link_object]
             if link_object is None:
                 continue
-            event_vc_room = VCRoomEventAssociation(show=old_event_vc_room.show, data=old_event_vc_room.data,
-                                                   link_object=link_object)
-            old_event_vc_room.vc_room.events.append(event_vc_room)
+            plugin = old_event_vc_room.vc_room.plugin
+            if not plugin:
+                continue
+            clone = plugin.clone_room(old_event_vc_room, link_object)
+
+            if clone:
+                # the plugin may decide to not clone the room
+                old_event_vc_room.vc_room.events.append(clone)
+                signals.vc.vc_room_cloned.send(
+                    old_event_vc_room, new_assoc=clone, vc_room=old_event_vc_room.vc_room, link_object=link_object
+                )

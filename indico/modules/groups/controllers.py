@@ -1,30 +1,19 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from operator import attrgetter
 
 from flask import flash, jsonify, redirect, request
 from sqlalchemy.orm import joinedload
 from webargs import fields
-from webargs.flaskparser import use_kwargs
-from werkzeug.exceptions import NotFound
+from werkzeug.exceptions import Forbidden, NotFound
 
 from indico.core.auth import multipass
+from indico.core.config import config
 from indico.core.db import db
 from indico.modules.admin import RHAdminBase
 from indico.modules.groups import GroupProxy
@@ -33,7 +22,10 @@ from indico.modules.groups.models.groups import LocalGroup
 from indico.modules.groups.util import serialize_group
 from indico.modules.groups.views import WPGroupsAdmin
 from indico.modules.users import User
-from indico.util.i18n import _
+from indico.modules.users.operations import add_users_to_group, remove_users_from_group
+from indico.util.i18n import _, pgettext
+from indico.util.marshmallow import ModelField
+from indico.web.args import use_kwargs
 from indico.web.flask.templating import get_template_module
 from indico.web.flask.util import url_for
 from indico.web.forms.base import FormDefaults
@@ -41,27 +33,34 @@ from indico.web.rh import RHProtected
 
 
 class RHGroups(RHAdminBase):
-    """Admin group overview"""
+    """Admin group overview."""
 
     def _process(self):
         query = LocalGroup.query.options(joinedload(LocalGroup.members)).order_by(db.func.lower(LocalGroup.name))
         groups = [g.proxy for g in query]
-        providers = [p for p in multipass.identity_providers.itervalues() if p.supports_groups]
+        providers = [p for p in multipass.identity_providers.values() if p.supports_groups]
         form = SearchForm(obj=FormDefaults(exact=True))
-        if not providers:
+        groups_enabled = True
+        if not providers and not config.LOCAL_GROUPS:
+            groups_enabled = False
+        elif not providers:
             del form.provider
         else:
-            form.provider.choices = ([('', _('All')), ('indico', _('Local Groups'))] +
-                                     [(p.name, p.title) for p in sorted(providers, key=attrgetter('title'))])
+            choices = [('', pgettext('User groups', 'All'))]
+            if config.LOCAL_GROUPS:
+                choices.append(('indico', _('Local Groups')))
+            choices += [(p.name, p.title) for p in sorted(providers, key=attrgetter('title'))]
+            form.provider.choices = choices
         search_results = None
-        if form.validate_on_submit():
+        if groups_enabled and form.validate_on_submit():
             search_providers = None if not providers or not form.provider.data else {form.provider.data}
             search_results = GroupProxy.search(form.name.data, exact=form.exact.data, providers=search_providers)
-            search_results.sort(key=attrgetter('provider', 'name'))
-        provider_titles = {p.name: p.title for p in multipass.identity_providers.itervalues()}
+            search_results.sort(key=lambda x: (x.provider or '', x.name))
+        provider_titles = {p.name: p.title for p in multipass.identity_providers.values()}
         provider_titles[None] = _('Local')
         return WPGroupsAdmin.render_template('groups.html', groups=groups, providers=providers, form=form,
-                                             search_results=search_results, provider_titles=provider_titles)
+                                             search_results=search_results, provider_titles=provider_titles,
+                                             groups_enabled=groups_enabled)
 
 
 class RHGroupBase(RHAdminBase):
@@ -72,11 +71,13 @@ class RHGroupBase(RHAdminBase):
             group = None
         if group is None or group.group is None:
             raise NotFound
+        if not config.LOCAL_GROUPS and group.is_local:
+            raise Forbidden('Local groups are disabled.')
         self.group = group
 
 
 class RHGroupDetails(RHGroupBase):
-    """Admin group details"""
+    """Admin group details."""
 
     def _process(self):
         group = self.group
@@ -85,7 +86,7 @@ class RHGroupDetails(RHGroupBase):
 
 
 class RHGroupMembers(RHGroupBase):
-    """Admin group memberlist (json)"""
+    """Admin group memberlist (json)."""
 
     def _process(self):
         group = self.group
@@ -94,9 +95,11 @@ class RHGroupMembers(RHGroupBase):
 
 
 class RHGroupEdit(RHAdminBase):
-    """Admin group modification/creation"""
+    """Admin group modification/creation."""
 
     def _process_args(self):
+        if not config.LOCAL_GROUPS:
+            raise Forbidden('Local groups are disabled.')
         if 'group_id' in request.view_args:
             self.new_group = False
             self.group = LocalGroup.get(request.view_args['group_id'])
@@ -110,11 +113,14 @@ class RHGroupEdit(RHAdminBase):
         existing_group = self.group if not self.new_group else None
         form = EditGroupForm(obj=existing_group, group=existing_group)
         if form.validate_on_submit():
-            form.populate_obj(self.group)
+            form.populate_obj(self.group, skip={'members'})
             if self.new_group:
                 db.session.add(self.group)
+                add_users_to_group(form.members.data, self.group)
                 msg = _("The group '{name}' has been created.")
             else:
+                add_users_to_group(form.members.data - self.group.members, self.group)
+                remove_users_from_group(self.group.members - form.members.data, self.group)
                 msg = _("The group '{name}' has been updated.")
             db.session.flush()
             flash(msg.format(name=self.group.name), 'success')
@@ -124,13 +130,15 @@ class RHGroupEdit(RHAdminBase):
 
 class RHLocalGroupBase(RHAdminBase):
     def _process_args(self):
+        if not config.LOCAL_GROUPS:
+            raise Forbidden('Local groups are disabled.')
         self.group = LocalGroup.get(request.view_args['group_id'])
         if self.group is None:
             raise NotFound
 
 
 class RHGroupDelete(RHLocalGroupBase):
-    """Admin group deletion"""
+    """Admin group deletion."""
 
     def _process(self):
         db.session.delete(self.group)
@@ -139,17 +147,20 @@ class RHGroupDelete(RHLocalGroupBase):
 
 
 class RHGroupDeleteMember(RHLocalGroupBase):
-    """Admin group member deletion (ajax)"""
+    """Admin group member deletion (ajax)."""
 
-    def _process(self):
-        self.group.members.discard(User.get(request.view_args['user_id']))
+    @use_kwargs({'user': ModelField(User, required=True, data_key='user_id')}, location='view_args')
+    def _process(self, user):
+        remove_users_from_group({user}, self.group)
         return jsonify(success=True)
 
 
 class RHGroupSearch(RHProtected):
     @use_kwargs({
-        'name': fields.Str()
-    })
-    def _process(self, name):
-        groups = GroupProxy.search(name)
-        return jsonify([serialize_group(group) for group in groups])
+        'name': fields.Str(required=True),
+        'exact': fields.Bool(load_default=False),
+    }, location='query')
+    def _process(self, name, exact):
+        groups = GroupProxy.search(name, exact=exact)
+        total = len(groups)
+        return jsonify(groups=[serialize_group(group) for group in groups[:10]], total=total)

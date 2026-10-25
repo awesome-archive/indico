@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
@@ -46,6 +35,20 @@ class RHNews(RH):
     def _process(self):
         news = NewsItem.query.order_by(NewsItem.created_dt.desc()).all()
         return WPNews.render_template('news.html', news=news, _is_new=self._is_new)
+
+
+class RHNewsItem(RH):
+    normalize_url_spec = {
+        'locators': {
+            lambda self: self.item.locator.slugged
+        }
+    }
+
+    def _process_args(self):
+        self.item = NewsItem.get_or_404(request.view_args['news_id'])
+
+    def _process(self):
+        return WPNews.render_template('news_item.html', item=self.item)
 
 
 class RHManageNewsBase(RHAdminBase):
@@ -87,7 +90,7 @@ class RHCreateNews(RHManageNewsBase):
 class RHManageNewsItemBase(RHManageNewsBase):
     def _process_args(self):
         RHManageNewsBase._process_args(self)
-        self.item = NewsItem.get_one(request.view_args['news_id'])
+        self.item = NewsItem.get_or_404(request.view_args['news_id'])
 
 
 class RHEditNews(RHManageNewsItemBase):

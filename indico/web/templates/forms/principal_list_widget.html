@@ -2,17 +2,8 @@
 
 
 {% block html %}
-    {% if acl %}
-        <a href="#" class="enable-acl-link hidden"
-           title='{% trans %}This will change the protection mode to "Protected"{% endtrans %}'>
-            {{- field.default_text -}}
-        </a>
-    {% endif %}
     {% set value_json = field._value() | tojson %}
-    <div class="i-form-field-fixed-width {{ 'acl-list-field' if acl }}" data-tooltip-anchor>
-        {% if acl %}
-            <div class="inheriting-acl-message"></div>
-        {% endif %}
+    <div data-tooltip-anchor>
         <div id="userGroupList-{{ field.id }}" style="margin-bottom: 10px;"></div>
         <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ value_json | forceescape }}"
                {{ input_args | html_params }}>
@@ -24,13 +15,17 @@
 {% block javascript %}
     <script>
         setupPrincipalListWidget({
+            formContext: {{ [field.get_form().__class__.__name__, field.id] | tojson }},
             fieldId: {{ field.id | tojson }},
-            eventId: {{ (field.event.id if field.event else none) | tojson }},
-            openImmediately: {{ field.open_immediately | tojson }},
-            groups: {{ field.groups | tojson }},
-            allowExternal: {{ field.allow_external | tojson }},
-            allowNetworks: {{ field.allow_networks | tojson }},
-            networks: {{ field.ip_networks | sort(attribute='name') | tojson }}
+            eventId: {{ (field._event.id if field._event else none) | tojson }},
+            withGroups: {{  field.allow_groups | tojson }},
+            withExternalUsers: {{ field.allow_external_users | tojson }},
+            withEventRoles: {{ field.allow_event_roles | tojson }},
+            withCategoryRoles: {{ field.allow_category_roles | tojson }},
+            withRegistrants: {{ field.allow_registration_forms | tojson }},
+            withEmails: {{ field.allow_emails | tojson }},
+            protectedFieldId: {{ field.protected_field_id | default(none) | tojson }},
+            searchToken: {{ field.search_token | tojson }},
         });
     </script>
 {% endblock %}

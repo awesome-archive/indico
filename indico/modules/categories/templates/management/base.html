@@ -2,7 +2,9 @@
 
 {% macro delete_category_button(category, classes="i-button") %}
     {% set confirmation_message -%}
-        {% trans category=category.title %}Do you really want to delete the category "{{ category }}"?{% endtrans %}
+        {% trans category=category.title %}
+            Do you really want to delete the category &quot;{{ category }}&quot;?
+        {% endtrans %}
     {%- endset %}
     {% if category.is_empty %}
         {% set tooltip -%}
@@ -16,7 +18,7 @@
     {% endif %}
     <a class="{{ classes }} icon-remove js-delete-category"
        title="{{ tooltip|forceescape }}"
-       data-confirm="{{ confirmation_message|forceescape }}"
+       data-confirm="{{ confirmation_message }}"
        data-title="{% trans %}Delete category{% endtrans %}"
        data-href="{{ url_for('categories.delete', category) }}"
        data-method="POST"></a>
@@ -40,11 +42,14 @@
                 {{ move_category_button(category, classes="i-button borderless") }}
                 {{ delete_category_button(category, classes="i-button borderless") }}
             {% endif %}
+            {{ template_hook('category-management-after-banner-actions', category=category) }}
         </div>
     </div>
-    <script>
-        setupCategoryMoveButton({{ category.parent.id }});
-    </script>
+    {% if not category.is_root %}
+        <script>
+            setupCategoryMoveButton({{ category.parent.id }});
+        </script>
+    {% endif %}
 {% endblock %}
 
 {% block side_menu %}
@@ -56,7 +61,7 @@
         <a href="{{ category.url }}"
            class="icon-switchon highlight i-button"
            title="{% trans %}See the display page of the category{% endtrans %}">
-            {%- trans %}Switch to display view{% endtrans -%}
+            <span>{%- trans %}Switch to display view{% endtrans -%}</span>
         </a>
     </div>
 {% endblock %}

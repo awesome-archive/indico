@@ -1,3 +1,5 @@
+.. _contact:
+
 Contact
 =======
 
@@ -10,10 +12,10 @@ you can find useful information related to the project.
 IRC
 +++
 
-We use IRC as our main means of communication among the development team. Get in
-touch through the official `#indico <https://webchat.freenode.net/?channels=indico>`_
-channel on Freenode (irc.freenode.net).
-It is also accessible through `Matrix <https://riot.im/app/#/room/#indico:matrix.org>`_.
+We use IRC as our main means of real-time communication with the development community.
+Get in touch through the official `#indico <https://web.libera.chat/gamja/?channels=#indico>`_
+channel on Libera.Chat (irc.libera.chat).
+It is also accessible through `Matrix <https://app.element.io/#/room/#indico:matrix.org>`_.
 
 Forum
 +++++
@@ -32,5 +34,3 @@ Twitter
 
 Indico has an official Twitter account, `@getindico <https://twitter.com/getindico>`_
 which is occasionally used for announcements.
-
-

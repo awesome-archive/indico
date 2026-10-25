@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 
@@ -27,12 +18,12 @@ def test_get_locator_none():
 
 
 def test_get_locator():
-    class _Prop(object):
+    class _Prop:
         @property
         def locator(self):
             return {'foo': 'bar'}
 
-    class _Locator(object):
+    class _Locator:
         @locator_property
         def locator(self):
             return {'foo': 'bar'}
@@ -43,7 +34,7 @@ def test_get_locator():
 
 
 def test_locator_property():
-    class _Test(object):
+    class _Test:
         @locator_property
         def locator(self):
             return {'foo': 'bar'}
@@ -58,11 +49,11 @@ def test_locator_property():
     assert get_locator(t.locator) == {'foo': 'bar'}
     assert get_locator(t.locator.fancy) == {'foo': 'bar', 'awesome': 'magic'}
     with pytest.raises(AttributeError):
-        t.locator.invalid
+        t.locator.invalid  # noqa: B018
 
 
 def test_locator_property_lazy():
-    class _Test(object):
+    class _Test:
         @locator_property
         def locator(self):
             accessed.append('locator')
@@ -77,7 +68,7 @@ def test_locator_property_lazy():
     # creating the object or accessing the locator itself doesn't
     # call the underlying function
     t = _Test()
-    t.locator
+    t.locator  # noqa: B018
     assert not accessed
 
     # accessing the locator in any way that needs to access its data
@@ -88,13 +79,13 @@ def test_locator_property_lazy():
     # accessing a special locator only triggers that locator's accessor
     # but not the one of the default locator
     accessed = []
-    t.locator.fancy
+    t.locator.fancy  # noqa: B018
     assert accessed == ['fancy']
 
 
 def test_locator_property_nested():
     with pytest.raises(AttributeError):
-        class _Test(object):
+        class _Test:
             @locator_property
             def locator(self):
                 pass

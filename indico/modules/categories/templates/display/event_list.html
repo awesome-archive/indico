@@ -8,12 +8,16 @@
             <div class="content smaller">
                 <span class="js-show-message">
                     {{ message }}
-                    <a class="js-toggle-list" href="#">{% trans %}Show{% endtrans %}</a>
+                    <button class="js-toggle-list toggle-hidden-events">
+                        {% trans %}Show{% endtrans %}
+                    </button>
                     <span class="icon-spinner js-spinner"></span>
                 </span>
                 <span class="js-hide-message">
                     {{ message }}
-                    <a class="js-toggle-list" href="#">{% trans %}Hide{% endtrans %}</a>
+                    <button class="js-toggle-list toggle-hidden-events">
+                        {% trans %}Hide{% endtrans %}
+                    </button>
                 </span>
             </div>
         {% endcall %}
@@ -43,7 +47,19 @@
 
 {% macro event_list(events_by_month, format_event_date, is_recent, happening_now, category, future_event_count,
                     past_event_count, future_threshold, past_threshold, future_events_by_month=[],
-                    past_events_by_month=[], show_future_events=false, show_past_events=false) %}
+                    past_events_by_month=[], show_future_events=false, show_past_events=false,
+                    has_hidden_events=false, is_flat=false, request_params={}) %}
+    {#- request_params parameter provided for template extensions -#}
+    {% if has_hidden_events %}
+        {% call message_box('highlight', icon=true) %}
+            <div class="content smaller">
+                <span class="js-show-message">
+                    {% trans %}Some events in the list below have been hidden.{% endtrans %}
+                </span>
+            </div>
+        {% endcall %}
+    {% endif %}
+
     <div class="event-list"
          data-show-future-events-url="{{ url_for('.show_future_events', category) }}"
          data-show-past-events-url="{{ url_for('.show_past_events', category) }}">
@@ -73,21 +89,33 @@
     </div>
     <script>
         setupCategoryDisplayEventList({{ (show_future_events and not future_events_by_month) | tojson }},
-                                      {{ (show_past_events and not past_events_by_month) | tojson }});
+                                      {{ (show_past_events and not past_events_by_month) | tojson }},
+                                      {{ is_flat | tojson }},
+                                      {{ request_params | tojson }});
     </script>
 {% endmacro %}
 
 {% macro event_list_block(events_by_month, format_event_date, is_recent, happening_now) %}
     {% for month in events_by_month %}
-        <h4 class="{% if month.is_current %}current-month{% endif %}">
+        <h3 class="{% if month.is_current %}current-month{% endif %}">
             <span>{{ month.name }}</span>
-        </h4>
+        </h3>
         <ul>
             {% for event in month.events %}
                 {% set is_lecture = (event.type == 'lecture') %}
                 <li>
-                    <span class="ical">
-                        <a class="icon-calendar" href="{{ url_for('events.export_event_ical', event) }}"></a>
+                    <span class="event-icons">
+                        <ind-with-tooltip>
+                            <a class="icon-calendar" href="{{ url_for('events.export_event_ical', event) }}" aria-label="{% trans title=event.title|e %}Export {{ title }} to calendar{% endtrans %}">
+                                <span data-tip-content>{% trans %}Export{% endtrans %}</span>
+                            </a>
+                        </ind-with-tooltip>
+                        {% if session.user and event in session.user.favorite_events %}
+                            <ind-with-tooltip>
+                                <i class="icon-star"></i>
+                                <span data-tip-content>{% trans %}You have favorited this event.{% endtrans %}</span>
+                            </ind-with-tooltip>
+                        {% endif %}
                     </span>
                     <span class="list-name">
                         <span class="date {% if happening_now(event) %}today{% endif %}">
@@ -98,14 +126,33 @@
                                 {{ event.get_verbose_title(show_speakers=is_lecture, show_series_pos=is_lecture) | striptags }}
                             </a>
                             <span class="protected">
+                                {% if event.visibility == 0 %}
+                                    <span class="ui label mini grey"
+                                          title="{% trans %}This event is hidden.{% endtrans %}">
+                                        {%- trans %}hidden{% endtrans -%}
+                                    </span>
+                                {% endif %}
                                 {% if event.is_self_protected %}
-                                    <span data-type="restricted">({% trans %}protected{% endtrans %})</span>
+                                    <ind-with-tooltip>
+                                        <span class="icon-shield" data-type="restricted"></span>
+                                        <span data-tip-content>{% trans %}Protected{% endtrans %}</span>
+                                    </ind-with-tooltip>
                                 {% endif %}
 
                                 {% if is_recent(event.created_dt) %}
-                                    <i class="icon-new new-label" title="{% trans %}This event is new.{% endtrans %}"></i>
+                                    <span class="ui label mini blue"
+                                          title="{% trans %}This event is new.{% endtrans %}">
+                                        {%- trans %}new{% endtrans -%}
+                                    </span>
                                 {% endif %}
+                                {{ template_hook('event-status-labels', event=event) }}
                             </span>
+                            {% if event.label %}
+                                <span class="ui label basic mini {{ event.label.color }}"
+                                      title="{{ event.label_message }}">
+                                    {{- event.label.title -}}
+                                </span>
+                            {% endif %}
                         </div>
                     </span>
                 </li>

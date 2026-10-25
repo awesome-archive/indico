@@ -1,83 +1,98 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
+
+/* eslint-disable import/unambiguous */
+/* global build_url:false, handleAjaxError:false */
 
 (function(global) {
-    'use strict';
+  global.setupCategoryPickerWidget = function setupCategoryPickerWidget(options) {
+    options = $.extend(
+      true,
+      {
+        fieldId: null,
+        navigatorCategoryId: null,
+        requireEventCreationRights: false,
+        requireCategoryManagementRights: false,
+        showEventCreationWarning: false,
+      },
+      options
+    );
 
-    global.setupCategoryPickerWidget = function setupCategoryPickerWidget(options) {
-        options = $.extend(true, {
-            fieldId: null,
-            navigatorCategoryId: null,
-            requireEventCreationRights: false,
-            allow: {
-                events: true,
-                subcats: true
-            }
-        }, options);
+    const $field = $(`#${options.fieldId}`);
+    const $categoryTitle = $(`#category-title-${options.fieldId}`);
+    const $categoryWarning = $(`#category-warning-${options.fieldId}`);
+    const $dialogTrigger = $(`#categorynav-button-${options.fieldId}`);
+    let hiddenData = $field.val() ? JSON.parse($field.val()) : {};
+    let navigatorCategory = options.navigatorCategoryId;
+    const actionOn = {};
 
-        var $field = $('#' + options.fieldId);
-        var $categoryTitle = $('#category-title-' + options.fieldId);
-        var $dialogTrigger = $('#categorynav-button-' + options.fieldId);
-        var hiddenData = $field.val() ? JSON.parse($field.val()) : {};
-        var navigatorCategory = options.navigatorCategoryId;
-        var actionOn = {};
+    if (options.requireEventCreationRights) {
+      actionOn.categoriesWithoutEventCreationRights = {disabled: true};
+    }
 
-        if (options.requireEventCreationRights) {
-            actionOn.categoriesWithoutEventCreationRights = {disabled: true};
-        }
-        if (!options.allow.events) {
-            actionOn.categoriesWithEvents = {disabled: true};
-        }
-        if (!options.allow.subcats) {
-            actionOn.categoriesWithSubcategories = {disabled: true};
-        }
+    if (options.requireCategoryManagementRights) {
+      actionOn.categoriesWithoutCategoryManagementRights = {disabled: true};
+    }
 
-        if (hiddenData) {
-            $categoryTitle.text(hiddenData.title);
-            $field.val(JSON.stringify(hiddenData));
-        }
+    if (hiddenData) {
+      $categoryTitle.text(hiddenData.title);
+      $field.val(JSON.stringify(hiddenData));
+    }
 
-        $.ajax({
-            url: build_url(Indico.Urls.Categories.info, {category_id: navigatorCategory}),
-            dataType: 'json',
-            error: handleAjaxError,
-            success: function(data) {
-                navigatorCategory = data;
-            }
-        });
+    // null when we are in the root category and the root only has subcategories
+    // See RHCreateEvent._default_category
+    if (navigatorCategory !== null) {
+      $.ajax({
+        url: build_url(Indico.Urls.Categories.info, {category_id: navigatorCategory}),
+        dataType: 'json',
+        error: handleAjaxError,
+        success(data) {
+          navigatorCategory = data;
+          const {category} = navigatorCategory;
+          updateWarningVisibility(category);
+        },
+      });
+    }
 
-        $dialogTrigger.on('click', function(evt) {
-            evt.preventDefault();
-            $('<div>').categorynavigator({
-                category: navigatorCategory,
-                openInDialog: true,
-                actionOn: actionOn,
-                onAction: function(category) {
-                    var event = $.Event('indico:categorySelected');
-                    var dfd = $.Deferred();
-                    $categoryTitle.text(category.title);
-                    hiddenData = {id: category.id, title: category.title};
-                    navigatorCategory = category.id;
-                    $field.val(JSON.stringify(hiddenData)).trigger('change').trigger(event, [category, dfd]);
-                    if (event.isDefaultPrevented()) {
-                        return dfd;
-                    }
-                }
-            });
-        });
-    };
+    $field.on('indico:categorySelected', (evt, category) => {
+      updateWarningVisibility(category);
+    });
+
+    $dialogTrigger.on('click', evt => {
+      evt.preventDefault();
+      $('<div>').categorynavigator({
+        category: navigatorCategory,
+        openInDialog: true,
+        actionOn,
+        onAction(category) {
+          const event = $.Event('indico:categorySelected');
+          const dfd = $.Deferred();
+          updateWarningVisibility(category);
+          $categoryTitle.text(category.title);
+          hiddenData = {id: category.id, title: category.title};
+          navigatorCategory = category.id;
+          $field.val(JSON.stringify(hiddenData)).trigger('change').trigger(event, [category, dfd]);
+          // jquery events are not compatible with normal DOM events, so we also trigger a normal
+          // one so modern code can react to it
+          $field[0].dispatchEvent(new Event('change', {bubbles: true}));
+          if (event.isDefaultPrevented()) {
+            return dfd;
+          }
+        },
+      });
+    });
+
+    function updateWarningVisibility(category) {
+      const hidden =
+        !options.showEventCreationWarning ||
+        !category || // unlisted event or no category selected
+        !category.has_children ||
+        category.has_events;
+      $categoryWarning.toggleClass('hidden', hidden);
+    }
+  };
 })(window);

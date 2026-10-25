@@ -1,41 +1,28 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import itertools
-from collections import OrderedDict
 
 from flask import session
 
 from indico.core.notifications import make_email, send_email
 from indico.modules.events.abstracts.models.abstracts import AbstractState
 from indico.modules.events.abstracts.models.email_logs import AbstractEmailLogEntry
-from indico.util.i18n import _
+from indico.util.i18n import _, pgettext
 from indico.util.placeholders import replace_placeholders
 from indico.util.rules import Condition, check_rule
 from indico.web.flask.templating import get_template_module
 
 
 class EmailNotificationCondition(Condition):
-    #: Override if you want to customize the text
-    #: that shouls up for "Any"
-    any_caption = _("any")
+    #: Override if you want to customize the text that shows up for "Any"
+    any_caption = pgettext('Email notification condition', 'any')
     #: same for text that shows up for "none"
-    none_caption = _("none")
+    none_caption = pgettext('Email notification condition', 'none')
     #: Text that will show inline in rule descriptions
     label_text = None
 
@@ -43,23 +30,23 @@ class EmailNotificationCondition(Condition):
     def get_available_values(cls, event=None, **kwargs):
         choices = cls._iter_available_values(event=event, **kwargs)
         if not cls.required:
-            return OrderedDict(itertools.chain([('*', cls.any_caption), ('', cls.none_caption)], choices))
+            return dict(itertools.chain([('*', cls.any_caption), ('', cls.none_caption)], choices))
         else:
-            return OrderedDict(choices)
+            return dict(choices)
 
     @classmethod
     def _iter_available_values(cls, event, **kwargs):
-        raise NotImplemented
+        raise NotImplementedError
 
 
 class TrackCondition(EmailNotificationCondition):
     """A condition that matches a particular track."""
 
     name = 'track'
-    description = _("Destination Track")
-    any_caption = _("any track")
-    none_caption = _("no track")
-    label_text = _("in")
+    description = _('Destination Track')
+    any_caption = _('any track')
+    none_caption = _('no track')
+    label_text = _('in')
 
     @classmethod
     def _iter_available_values(cls, event, **kwargs):
@@ -85,10 +72,11 @@ class StateCondition(EmailNotificationCondition):
     """A condition that matches a particular abstract final state."""
 
     name = 'state'
-    description = _("Final State")
+    description = _('Final State')
     required = True
 
     compatible_with = {
+        AbstractState.invited.value: (),
         AbstractState.submitted.value: (),
         AbstractState.rejected.value: (),
         AbstractState.accepted.value: ('contribution_type', 'track'),
@@ -114,10 +102,10 @@ class ContributionTypeCondition(EmailNotificationCondition):
     """A condition that matches a particular contribution type."""
 
     name = 'contribution_type'
-    description = _("Contribution Type")
-    any_caption = _("any type")
-    none_caption = _("no type")
-    label_text = _("as")
+    description = _('Contribution Type')
+    any_caption = _('any type')
+    none_caption = _('no type')
+    label_text = _('as')
 
     @classmethod
     def _iter_available_values(cls, event, **kwargs):
@@ -140,7 +128,7 @@ class ContributionTypeCondition(EmailNotificationCondition):
 
 
 def get_abstract_notification_tpl_module(email_tpl, abstract):
-    """Get the Jinja template module for a notification email
+    """Get the Jinja template module for a notification email.
 
     :param email_tpl: the abstract email template used to populate the
                       email subject/body
@@ -178,8 +166,9 @@ def send_abstract_notifications(abstract):
                     cc_recipients += [author.email for author in abstract.secondary_authors]
 
                 tpl = get_abstract_notification_tpl_module(email_tpl, abstract)
-                email = make_email(to_list=to_recipients, cc_list=cc_recipients,
-                                   reply_address=email_tpl.reply_to_address, template=tpl)
+                reply_address = abstract.event.get_verbose_email_sender(email_tpl.reply_to_address)
+                email = make_email(to_list=to_recipients, cc_list=cc_recipients, reply_address=reply_address,
+                                   template=tpl)
                 send_email(email, abstract.event, 'Abstracts', session.user)
                 abstract.email_logs.append(AbstractEmailLogEntry.create_from_email(email, email_tpl=email_tpl,
                                                                                    user=session.user))

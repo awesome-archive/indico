@@ -1,33 +1,24 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+from flask import request, session
+from sqlalchemy.orm import joinedload, undefer
 
-from collections import OrderedDict
-
-from flask import request
-from sqlalchemy.orm import joinedload
-
+from indico.core import signals
 from indico.core.db import db
-from indico.modules.events.registration.models.form_fields import (RegistrationFormFieldData,
-                                                                   RegistrationFormPersonalDataField)
+from indico.modules.events.registration.models.form_fields import RegistrationFormFieldData
 from indico.modules.events.registration.models.items import PersonalDataType, RegistrationFormItem
-from indico.modules.events.registration.models.registrations import Registration, RegistrationData, RegistrationState
+from indico.modules.events.registration.models.registrations import (Registration, RegistrationData, RegistrationState,
+                                                                     RegistrationVisibility)
+from indico.modules.events.registration.models.tags import RegistrationTag
 from indico.modules.events.util import ListGeneratorBase
 from indico.util.i18n import _
+from indico.util.signals import named_objects_from_signal, values_from_signal
+from indico.util.string import natural_sort_key
 from indico.web.flask.templating import get_template_module
 
 
@@ -38,40 +29,88 @@ class RegistrationListGenerator(ListGeneratorBase):
     list_link_type = 'registration'
 
     def __init__(self, regform):
-        super(RegistrationListGenerator, self).__init__(regform.event, entry_parent=regform)
+        super().__init__(regform.event, entry_parent=regform)
         self.regform = regform
         self.default_list_config = {
-            'items': ('title', 'email', 'affiliation', 'reg_date', 'state'),
-            'filters': {'fields': {}, 'items': {}}
+            'items': ('title', 'email', 'affiliation', 'reg_date', 'state', 'tags_present'),
+            'filters': {'fields': {}, 'items': {}, 'extra': {}}
         }
-        self.static_items = OrderedDict([
-            ('reg_date', {
-                'title': _('Registration Date'),
-            }),
-            ('price', {
+        registration_tag_choices = self._get_registration_tag_choices()
+        self.static_items = {
+            'reg_date': {
+                'title': _('Registration date'),
+            },
+            'mod_date': {
+                'title': _('Modification date'),
+            },
+            'price': {
                 'title': _('Price'),
-            }),
-            ('state', {
+            },
+            'state': {
                 'title': _('State'),
                 'filter_choices': {str(state.value): state.title for state in RegistrationState}
-            }),
-            ('checked_in', {
+            },
+            'created_by': {
+                'title': _('Created by'),
+            },
+            'checked_in': {
                 'title': _('Checked in'),
                 'filter_choices': {
                     '0': _('No'),
                     '1': _('Yes')
                 }
-            }),
-            ('checked_in_date', {
+            },
+            'checked_in_date': {
                 'title': _('Check-in date'),
-            }),
-            ('payment_date', {
+            },
+            'payment_date': {
                 'title': _('Payment date'),
-            })
-        ])
+            },
+            'visibility': {
+                'title': _('Visibility'),
+            },
+            'consent_to_publish': {
+                'title': _('Consent to publish'),
+                'filter_choices': {str(visibility.value): visibility.title for visibility in RegistrationVisibility}
+            },
+            'participant_hidden': {
+                'title': _('Participant hidden'),
+                'filter_choices': {
+                    '0': _('No'),
+                    '1': _('Yes')
+                }
+            },
+            'tags_present': {
+                'title': _('Tags'),
+                'filter_title': _('Has tags'),
+                'filter_choices': registration_tag_choices
+            },
+            'tags_absent': {
+                'title': _('Tags absent'),
+                'filter_title': _('Does not have tags'),
+                'filter_choices': registration_tag_choices,
+                'filter_only': True
+            },
+            'receipts_present': {
+                'title': _('Has documents'),
+                'filter_choices': {
+                    '0': _('No'),
+                    '1': _('Yes')
+                }
+            },
+        }
+        self.extra_filters = self._get_custom_reglist_items()
         self.personal_items = ('title', 'first_name', 'last_name', 'email', 'position', 'affiliation', 'address',
-                               'phone', 'country')
+                               'phone', 'country', 'picture')
         self.list_config = self._get_config()
+
+    def _get_custom_reglist_items(self):
+        objs = named_objects_from_signal(signals.event.registrant_list_items.send(self.regform))
+        return {f'ext__{name}': obj(self.event, self.regform) for name, obj in objs.items()}
+
+    def _get_registration_tag_choices(self):
+        tags = sorted(self.event.registration_tags, key=lambda tag: natural_sort_key(tag.title))
+        return {str(tag.id): tag.title for tag in tags}
 
     def _get_static_columns(self, ids):
         """
@@ -80,28 +119,25 @@ class RegistrationListGenerator(ListGeneratorBase):
 
         :return: a list of {'id': ..., 'caption': ...} dicts
         """
+        ids = set(ids)
         result = []
-        for item_id in ids:
-            if item_id in self.personal_items:
-                field = RegistrationFormItem.find_one(registration_form=self.regform,
-                                                      personal_data_type=PersonalDataType[item_id])
-                result.append({
-                    'id': field.id,
-                    'caption': field.title
-                })
-            elif item_id in self.static_items:
-                result.append({
-                    'id': item_id,
-                    'caption': self.static_items[item_id]['title']
-                })
+        for item_id in [x for x in self.personal_items if x in ids]:
+            field = RegistrationFormItem.query.filter_by(registration_form=self.regform,
+                                                         personal_data_type=PersonalDataType[item_id]).one()
+            result.append({'id': field.id, 'caption': field.title})
+        for item_id in [x for x in self.static_items if x in ids]:
+            result.append({'id': item_id, 'caption': self.static_items[item_id]['title']})  # noqa: PERF401
         return result
+
+    def _get_extra_columns(self, ids: set):
+        return [self.extra_filters[x] for x in ids if (spec := self.extra_filters.get(x)) and not spec.filter_only]
 
     def _column_ids_to_db(self, ids):
         """Translate string-based ids to DB-based RegistrationFormItem ids."""
         result = []
         personal_data_field_ids = {x.personal_data_type: x.id for x in self.regform.form_items if x.is_field}
         for item_id in ids:
-            if isinstance(item_id, basestring):
+            if isinstance(item_id, str):
                 personal_data_type = PersonalDataType.get(item_id)
                 if personal_data_type:
                     item_id = personal_data_field_ids[personal_data_type]
@@ -110,11 +146,10 @@ class RegistrationListGenerator(ListGeneratorBase):
 
     def _get_sorted_regform_items(self, item_ids):
         """Return the form items ordered by their position in the registration form."""
-
         if not item_ids:
             return []
-        return (RegistrationFormItem
-                .find(~RegistrationFormItem.is_deleted, RegistrationFormItem.id.in_(item_ids))
+        return (RegistrationFormItem.query
+                .filter(~RegistrationFormItem.is_deleted, RegistrationFormItem.id.in_(item_ids))
                 .with_parent(self.regform)
                 .join(RegistrationFormItem.parent, aliased=True)
                 .filter(~RegistrationFormItem.is_deleted)  # parent deleted
@@ -124,34 +159,50 @@ class RegistrationListGenerator(ListGeneratorBase):
                 .all())
 
     def _get_filters_from_request(self):
-        filters = super(RegistrationListGenerator, self)._get_filters_from_request()
+        filters = super()._get_filters_from_request()
         for field in self.regform.form_items:
-            if field.is_field and field.input_type in {'single_choice', 'multi_choice', 'country', 'bool', 'checkbox'}:
-                options = request.form.getlist('field_{}'.format(field.id))
+            if field.is_field and field.field_impl.filter_choices:
+                options = request.form.getlist(f'field_{field.id}')
                 if options:
                     filters['fields'][str(field.id)] = options
         return filters
 
     def _build_query(self):
+        extra_criteria = values_from_signal(
+            signals.event.filter_registration_list.send(self.regform, user=session.user), as_list=True
+        )
         return (Registration.query
                 .with_parent(self.regform)
-                .filter(~Registration.is_deleted)
-                .options(joinedload('data').joinedload('field_data').joinedload('field'))
+                .filter(~Registration.is_deleted, *extra_criteria)
+                .options(joinedload('data').joinedload('field_data').joinedload('field'),
+                         joinedload('tags'),
+                         undefer('num_receipt_files'))
                 .order_by(db.func.lower(Registration.last_name), db.func.lower(Registration.first_name)))
 
+    def _apply_extra_filters(self, registrations, filters):
+        if not (extra_filters := filters.get('extra')):
+            return registrations
+        extra_filters = {self.extra_filters[name]: data for name, data in extra_filters.items()
+                         if name in self.extra_filters and data}
+        for impl, data in extra_filters.items():
+            registrations = impl.filter_list(registrations, data)
+        return registrations
+
     def _filter_list_entries(self, query, filters):
-        if not (filters.get('fields') or filters.get('items')):
+        if not (filters.get('fields') or filters.get('items') or filters.get('extra')):
             return query
         field_types = {str(f.id): f.field_impl for f in self.regform.form_items
                        if f.is_field and not f.is_deleted and (f.parent_id is None or not f.parent.is_deleted)}
         field_filters = {field_id: data_list
-                         for field_id, data_list in filters['fields'].iteritems()
+                         for field_id, data_list in filters['fields'].items()
                          if field_id in field_types}
-        if not field_filters and not filters['items']:
+        extra_filters = {self.extra_filters[name]: data for name, data in filters.get('extra', {}).items()
+                         if name in self.extra_filters}
+        if not field_filters and not filters['items'] and not extra_filters:
             return query
         criteria = [db.and_(RegistrationFormFieldData.field_id == field_id,
                             field_types[field_id].create_sql_filter(data_list))
-                    for field_id, data_list in field_filters.iteritems()]
+                    for field_id, data_list in field_filters.items()]
         items_criteria = []
         if 'checked_in' in filters['items']:
             checked_in_values = filters['items']['checked_in']
@@ -163,6 +214,30 @@ class RegistrationListGenerator(ListGeneratorBase):
             states = [RegistrationState(int(state)) for state in filters['items']['state']]
             items_criteria.append(Registration.state.in_(states))
 
+        if 'consent_to_publish' in filters['items']:
+            states = [RegistrationVisibility(int(visibility)) for visibility in filters['items']['consent_to_publish']]
+            items_criteria.append(Registration.consent_to_publish.in_(states))
+
+        if 'participant_hidden' in filters['items']:
+            participant_hidden_values = filters['items']['participant_hidden']
+            # If both values 'true' and 'false' are selected, there's no point in filtering
+            if len(participant_hidden_values) == 1:
+                items_criteria.append(Registration.participant_hidden == bool(int(participant_hidden_values[0])))
+
+        if 'tags_present' in filters['items']:
+            tag_ids = [int(tag_id) for tag_id in filters['items']['tags_present']]
+            items_criteria.append(Registration.tags.any(RegistrationTag.id.in_(tag_ids)))
+
+        if 'tags_absent' in filters['items']:
+            tag_ids = [int(tag_id) for tag_id in filters['items']['tags_absent']]
+            items_criteria.append(~Registration.tags.any(RegistrationTag.id.in_(tag_ids)))
+
+        if 'receipts_present' in filters['items']:
+            receipts_present_values = filters['items']['receipts_present']
+            # If both values 'true' and 'false' are selected, there's no point in filtering
+            if len(receipts_present_values) == 1:
+                items_criteria.append(Registration.receipt_files.any() == bool(int(receipts_present_values[0])))
+
         if field_filters:
             subquery = (RegistrationData.query
                         .with_entities(db.func.count(RegistrationData.registration_id))
@@ -170,38 +245,55 @@ class RegistrationListGenerator(ListGeneratorBase):
                         .filter(RegistrationData.registration_id == Registration.id)
                         .filter(db.or_(*criteria))
                         .correlate(Registration)
-                        .as_scalar())
+                        .scalar_subquery())
             query = query.filter(subquery == len(field_filters))
-        return query.filter(db.or_(*items_criteria))
+
+        for impl, values in extra_filters.items():
+            query = impl.modify_query(query, values)
+            if (crit := impl.get_filter_criterion(values)) is not None:
+                items_criteria.append(crit)
+
+        return query.filter(db.and_(*items_criteria))
+
+    def _split_item_ids(self, item_ids, separator_type=None):
+        extra_item_ids = {item_id for item_id in item_ids if isinstance(item_id, str) and item_id.startswith('ext__')}
+        item_ids = [item_id for item_id in item_ids if item_id not in extra_item_ids]
+        return (*super()._split_item_ids(item_ids, separator_type), extra_item_ids)
 
     def get_list_kwargs(self):
         reg_list_config = self._get_config()
         registrations_query = self._build_query()
         total_entries = registrations_query.count()
         registrations = self._filter_list_entries(registrations_query, reg_list_config['filters']).all()
-        dynamic_item_ids, static_item_ids = self._split_item_ids(reg_list_config['items'], 'dynamic')
+        registrations = self._apply_extra_filters(registrations, reg_list_config['filters'])
+        dynamic_item_ids, static_item_ids, extra_item_ids = self._split_item_ids(reg_list_config['items'], 'dynamic')
         static_columns = self._get_static_columns(static_item_ids)
+        extra_columns = self._get_extra_columns(extra_item_ids)
+        for col in extra_columns:
+            col.data = col.load_data(registrations)
         regform_items = self._get_sorted_regform_items(dynamic_item_ids)
         return {
             'regform': self.regform,
             'registrations': registrations,
             'total_registrations': total_entries,
             'static_columns': static_columns,
+            'extra_columns': extra_columns,
             'dynamic_columns': regform_items,
             'filtering_enabled': total_entries != len(registrations)
         }
 
     def get_list_export_config(self):
-        static_item_ids, item_ids = self.get_item_ids()
+        static_item_ids, item_ids, extra_item_ids = self.get_item_ids()
         return {
             'static_item_ids': static_item_ids,
-            'regform_items': self._get_sorted_regform_items(item_ids)
+            'regform_items': self._get_sorted_regform_items(item_ids),
+            'extra_columns': self._get_extra_columns(extra_item_ids),
         }
 
     def get_item_ids(self):
         reg_list_config = self._get_config()
-        static_item_ids, item_ids = self._split_item_ids(reg_list_config['items'], 'static')
-        return static_item_ids, self._column_ids_to_db(item_ids)
+        static_item_ids, item_ids, extra_item_ids = self._split_item_ids(reg_list_config['items'], 'static')
+        return static_item_ids, self._column_ids_to_db(item_ids), extra_item_ids
 
     def render_list(self):
         reg_list_kwargs = self.get_list_kwargs()

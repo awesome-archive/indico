@@ -1,25 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from datetime import timedelta
 
 from celery.schedules import crontab
-from flask import g, session
+from flask import session
 
 from indico.core.celery import celery
 from indico.core.db import db
@@ -46,7 +35,7 @@ def build_static_site(static_site):
         zip_file_path = create_static_site(rh, static_site.event)
         static_site.state = StaticSiteState.success
         static_site.content_type = 'application/zip'
-        static_site.filename = 'offline_site_{}.zip'.format(static_site.event.id)
+        static_site.filename = f'offline_site_{static_site.event.id}.zip'
         with open(zip_file_path, 'rb') as f:
             static_site.save(f)
         db.session.commit()
@@ -62,20 +51,23 @@ def build_static_site(static_site):
 
 @email_sender
 def notify_static_site_success(static_site):
-    template = get_template_module('events/static/emails/download_notification_email.txt',
-                                   user=static_site.creator, event=static_site.event,
-                                   link=url_for('static_site.download', static_site, _external=True))
-    return make_email({static_site.creator.email}, template=template, html=False)
+    with static_site.creator.force_user_locale():
+        template = get_template_module('events/static/emails/download_notification_email.txt',
+                                       user=static_site.creator, event=static_site.event,
+                                       link=url_for('static_site.download', static_site, _external=True))
+        return make_email({static_site.creator.email}, template=template, html=False)
 
 
 @celery.periodic_task(name='static_sites_cleanup', run_every=crontab(minute='30', hour='3', day_of_week='monday'))
 def static_sites_cleanup(days=30):
-    """Clean up old static sites
+    """Clean up old static sites.
 
     :param days: number of days after which to remove static sites
     """
-    expired_sites = StaticSite.find_all(StaticSite.requested_dt < (now_utc() - timedelta(days=days)),
-                                        StaticSite.state == StaticSiteState.success)
+    expired_sites = (StaticSite.query
+                     .filter(StaticSite.requested_dt < (now_utc() - timedelta(days=days)),
+                             StaticSite.state == StaticSiteState.success)
+                     .all())
     logger.info('Removing %d expired static sites from the past %d days', len(expired_sites), days)
     try:
         for site in expired_sites:

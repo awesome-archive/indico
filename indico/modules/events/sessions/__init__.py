@@ -1,24 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from flask import flash, session
 
 from indico.core import signals
+from indico.core.db.sqlalchemy.protection import make_acl_log_fn
 from indico.core.logger import Logger
 from indico.core.permissions import ManagementPermission, check_permissions
 from indico.modules.events.sessions.models.sessions import Session
@@ -30,6 +20,7 @@ from indico.web.menu import SideMenuItem
 
 
 logger = Logger.get('events.sessions')
+
 session_settings = EventSettingsProxy('sessions', {
     # Whether session coordinators can manage contributions inside their sessions
     'coordinators_manage_contributions': False,
@@ -46,6 +37,9 @@ COORDINATOR_PRIV_DESCS = {'manage-contributions': _('Allows coordinators to modi
                           'manage-blocks': _('Allows coordinators to manage/reschedule session blocks of their '
                                              'sessions.  This includes creating new session blocks.')}
 
+# Log ACL changes
+signals.acl.entry_changed.connect(make_acl_log_fn(Session), sender=Session, weak=False)
+
 
 @signals.users.merged.connect
 def _merge_users(target, source, **kwargs):
@@ -55,13 +49,13 @@ def _merge_users(target, source, **kwargs):
 
 @signals.users.registered.connect
 @signals.users.email_added.connect
-def _convert_email_principals(user, **kwargs):
+def _convert_email_principals(user, silent=False, **kwargs):
     from indico.modules.events.sessions.models.principals import SessionPrincipal
     sessions = SessionPrincipal.replace_email_with_user(user, 'session')
-    if sessions:
+    if sessions and not silent:
         num = len(sessions)
-        flash(ngettext("You have been granted manager/coordination privileges for a session.",
-                       "You have been granted manager/coordination privileges for {} sessions.", num).format(num),
+        flash(ngettext('You have been granted manager/coordination privileges for a session.',
+                       'You have been granted manager/coordination privileges for {} sessions.', num).format(num),
               'info')
 
 
@@ -79,7 +73,7 @@ def _get_session_cloner(sender, **kwargs):
     return SessionCloner
 
 
-@signals.app_created.connect
+@signals.core.app_created.connect
 def _check_permissions(app, **kwargs):
     check_permissions(Session)
 
@@ -103,5 +97,5 @@ def _extend_event_menu(sender, **kwargs):
     def _visible_my_sessions(event):
         return session.user and has_sessions_for_user(event, session.user)
 
-    yield MenuEntryData(title=_("My Sessions"), name='my_sessions', endpoint='sessions.my_sessions', position=1,
+    yield MenuEntryData(title=_('My Sessions'), name='my_sessions', endpoint='sessions.my_sessions', position=1,
                         parent='my_conference', visible=_visible_my_sessions)

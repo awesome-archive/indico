@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 
@@ -31,7 +22,6 @@ from indico.util.event import truncate_path
     (['aaa', 'bbb', 'ccc', 'ddd', 'eee'],        14, False, ('aaa', ['ccc', 'ddd'], 'eee', True)),
     (['aaaaaaaa', 'bbb', 'ccc'],                 10, False, (None, ['bbb'], 'ccc', True)),
     (['aaaaaaaa', 'bbb', 'ccc', 'ddd'],          10, False, (None, ['bbb', 'ccc'], 'ddd', True)),
-    ([],                                         10, False, (None, None, None, False)),
     (['aaa'],                                     5, True,  (None, None, 'aaa', False)),
     (['aaaaaa'],                                  5, True,  (None, None, 'aaaaaa', False)),
     (['aaa', 'bbb'],                             10, True,  ('aaa', None, 'bbb', False)),

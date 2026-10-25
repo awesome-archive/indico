@@ -1,28 +1,16 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from indico.core.db import db
-from indico.core.db.sqlalchemy.util.models import get_simple_column_attrs
 from indico.core.db.sqlalchemy.util.session import no_autoflush
 from indico.modules.events.abstracts.models.email_templates import AbstractEmailTemplate
 from indico.modules.events.abstracts.models.review_questions import AbstractReviewQuestion
 from indico.modules.events.abstracts.settings import abstracts_reviewing_settings, abstracts_settings, boa_settings
-from indico.modules.events.cloning import EventCloner
+from indico.modules.events.cloning import EventCloner, get_attrs_to_clone
 from indico.modules.events.models.events import EventType
 from indico.util.i18n import _
 
@@ -30,17 +18,28 @@ from indico.util.i18n import _
 class AbstractSettingsCloner(EventCloner):
     name = 'abstracts_settings'
     friendly_name = _('Call for Abstracts (settings, email templates, review questions)')
-    requires = {'contribution_types', 'tracks'}
+    requires = {'contribution_fields', 'contribution_types', 'tracks'}
 
     @property
     def is_visible(self):
         return self.old_event.type_ == EventType.conference
 
+    def get_conflicts(self, target_event):
+        conflicts = []
+
+        if target_event.abstract_review_questions:
+            conflicts.append(_('The target event already has review questions'))
+
+        if target_event.abstract_email_templates:
+            conflicts.append(_('The target event already has email templates'))
+
+        return conflicts
+
     @no_autoflush
-    def run(self, new_event, cloners, shared_data):
+    def run(self, new_event, cloners, shared_data, event_exists=False):
         self._contrib_type_id_map = {old.id: new.id
-                                     for old, new in shared_data['contribution_types']['contrib_type_map'].iteritems()}
-        self._track_id_map = {old.id: new.id for old, new in shared_data['tracks']['track_map'].iteritems()}
+                                     for old, new in shared_data['contribution_types']['contrib_type_map'].items()}
+        self._track_id_map = {old.id: new.id for old, new in shared_data['tracks']['track_map'].items()}
         self._clone_settings(new_event)
         self._clone_email_templates(new_event)
         self._clone_review_questions(new_event)
@@ -59,11 +58,11 @@ class AbstractSettingsCloner(EventCloner):
         boa_settings.set_multi(new_event, boa_settings.get_all(self.old_event, no_defaults=True))
 
     def _clone_email_templates(self, new_event):
-        attrs = get_simple_column_attrs(AbstractEmailTemplate) - {'rules'}
+        attrs = get_attrs_to_clone(AbstractEmailTemplate, skip={'rules'})
         for old_tpl in self.old_event.abstract_email_templates:
             tpl = AbstractEmailTemplate()
             tpl.populate_from_attrs(old_tpl, attrs)
-            tpl.rules = filter(None, map(self._clone_email_template_rule, old_tpl.rules))
+            tpl.rules = [_f for _f in map(self._clone_email_template_rule, old_tpl.rules) if _f]
             new_event.abstract_email_templates.append(tpl)
 
     def _clone_email_template_rule(self, old_rule):
@@ -81,7 +80,7 @@ class AbstractSettingsCloner(EventCloner):
         return rule
 
     def _clone_review_questions(self, new_event):
-        attrs = get_simple_column_attrs(AbstractReviewQuestion)
+        attrs = get_attrs_to_clone(AbstractReviewQuestion)
         for old_question in self.old_event.abstract_review_questions:
             question = AbstractReviewQuestion()
             question.populate_from_attrs(old_question, attrs)

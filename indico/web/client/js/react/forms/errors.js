@@ -1,32 +1,53 @@
-/* This file is part of Indico.
- * Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
- *
- * Indico is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 3 of the
- * License, or (at your option) any later version.
- *
- * Indico is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Indico; if not, see <http://www.gnu.org/licenses/>.
- */
+// This file is part of Indico.
+// Copyright (C) 2002 - 2026 CERN
+//
+// Indico is free software; you can redistribute it and/or
+// modify it under the terms of the MIT License; see the
+// LICENSE file for more details.
 
-import _ from 'lodash';
 import {FORM_ERROR} from 'final-form';
+import _ from 'lodash';
 
+function flatten(value) {
+  // marshmallow's List returns an object with the index as the key
+  if (_.isPlainObject(value)) {
+    value = Object.values(value);
+  }
+  // Nested returns an object mapping the inner field name to its error(s)
+  return _.uniq(_.flattenDeep(value.map(x => (_.isPlainObject(x) ? Object.values(x) : x))));
+}
 
-export function handleSubmissionError(error, defaultMessage = null, fieldErrorMap = {}) {
-    const webargsErrors = _.get(error, 'response.data.webargs_errors');
-    if (webargsErrors && error.response.status === 422) {
-        // flatten errors in case there's more than one
-        return _.fromPairs(Object.entries(webargsErrors).map(([field, errors]) => {
-            return [fieldErrorMap[field] || field, errors.join(' / ')];
-        }));
-    } else {
-        return {[FORM_ERROR]: defaultMessage || error.message};
+/**
+ * Handle an error during a form submission.
+ *
+ * This is an internal util; if you are looking for a function to handle any error
+ * that could happen from a form submission request (including unexpected errors),
+ * use the `handleSubmitError` function instead (which will call this function if
+ * appropriate but also take care of showing an error report dialog otherwise).
+ */
+export function handleSubmissionError(
+  error,
+  defaultMessage = null,
+  fieldErrorMap = {},
+  joinErrors = true
+) {
+  const webargsErrors = _.get(error, 'response.data.webargs_errors');
+  if (webargsErrors && error.response.status === 422) {
+    if (Array.isArray(webargsErrors)) {
+      // schema-level validation failed
+      return {[FORM_ERROR]: joinErrors ? webargsErrors.join(' / ') : webargsErrors};
     }
+    // flatten errors in case there's more than one
+    return _.fromPairs(
+      Object.entries(webargsErrors).map(([field, errors]) => {
+        return [
+          fieldErrorMap[field] || field,
+          joinErrors ? flatten(errors).join(' / ') : flatten(errors),
+        ];
+      })
+    );
+  } else {
+    const message = defaultMessage || error.response?.data?.error?.message || error.message;
+    return {[FORM_ERROR]: joinErrors ? message : [message]};
+  }
 }

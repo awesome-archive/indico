@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import absolute_import, unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import json
 from operator import attrgetter
@@ -22,143 +11,200 @@ from operator import attrgetter
 from wtforms import HiddenField
 
 from indico.core.db.sqlalchemy.principals import PrincipalType, serialize_email_principal
-from indico.core.permissions import get_permissions_info
+from indico.core.permissions import get_available_permissions, get_permissions_info
 from indico.modules.events import Event
 from indico.modules.events.contributions.models.contributions import Contribution
-from indico.modules.events.roles.util import serialize_role
+from indico.modules.events.roles.util import serialize_event_role
 from indico.modules.events.sessions.models.sessions import Session
-from indico.modules.groups import GroupProxy
 from indico.modules.groups.util import serialize_group
 from indico.modules.networks.models.networks import IPNetworkGroup
-from indico.modules.networks.util import serialize_ip_network_group
-from indico.modules.users import User
+from indico.modules.networks.schemas import IPNetworkGroupSchema
 from indico.modules.users.util import serialize_user
-from indico.util.user import principal_from_fossil
+from indico.util.user import make_user_search_token, principal_from_identifier
 from indico.web.forms.fields import JSONField
 from indico.web.forms.widgets import JinjaWidget
 
 
 def serialize_principal(principal):
+    from indico.modules.categories.util import serialize_category_role
+    from indico.modules.events.registration.util import serialize_registration_form
     if principal.principal_type == PrincipalType.email:
         return serialize_email_principal(principal)
     elif principal.principal_type == PrincipalType.network:
-        return serialize_ip_network_group(principal)
+        return IPNetworkGroupSchema().dump(principal)
     elif principal.principal_type == PrincipalType.user:
         return serialize_user(principal)
     elif principal.principal_type == PrincipalType.event_role:
-        return serialize_role(principal)
-    elif principal.is_group:
+        return serialize_event_role(principal)
+    elif principal.principal_type == PrincipalType.category_role:
+        return serialize_category_role(principal)
+    elif principal.principal_type == PrincipalType.registration_form:
+        return serialize_registration_form(principal)
+    elif principal.principal_type in (PrincipalType.local_group, PrincipalType.multipass_group):
         return serialize_group(principal)
     else:
-        raise ValueError('Invalid principal: {} ({})'.format(principal, principal.principal_type))
+        raise ValueError(f'Invalid principal: {principal} ({principal.principal_type})')
 
 
-class PrincipalListField(HiddenField):
-    """A field that lets you select a list Indico user/group ("principal")
+class SearchTokenMixin:
+    @property
+    def search_token(self):
+        if not getattr(self.get_form(), 'allow_user_search', True):
+            # allow forms to disable user search
+            return None
+        return make_user_search_token()
 
-    :param groups: If groups should be selectable.
-    :param allow_networks: If ip networks should be selectable.
-    :param allow_emails: If emails should be allowed.
-    :param allow_external: If "search users with no indico account"
-                           should be available.  Selecting such a user
-                           will automatically create a pending user once
-                           the form is submitted, even if other fields
-                           in the form fail to validate!
+
+class PrincipalListField(SearchTokenMixin, HiddenField):
+    """A field that lets you select a list of principals.
+
+    Principals are users or other objects representing users such as
+    groups or roles that can be added to ACLs.
+
+    :param allow_external_users: If "search users with no indico account"
+                                 should be available. Selecting such a user
+                                 will automatically create a pending user once
+                                 the form is submitted, even if other fields
+                                 in the form fail to validate!
+    :param allow_groups: If groups should be selectable.
+    :param allow_event_roles: If event roles should be selectable.
+    :param allow_category_roles: If category roles should be selectable.
+    :param allow_registration_forms: If registration form associated
+                                     to an event should be selectable.
+    :param allow_emails: If the field should allow bare emails. Those are not
+                         selectable in the widget, but may be added to an ACL
+                         through other means.
     """
 
     widget = JinjaWidget('forms/principal_list_widget.html', single_kwargs=True)
 
     def __init__(self, *args, **kwargs):
+        self.allow_external_users = kwargs.pop('allow_external_users', False)
+        self.allow_groups = kwargs.pop('allow_groups', False)
+        self.allow_event_roles = kwargs.pop('allow_event_roles', False)
+        self.allow_category_roles = kwargs.pop('allow_category_roles', False)
+        self.allow_registration_forms = kwargs.pop('allow_registration_forms', False)
         self.allow_emails = kwargs.pop('allow_emails', False)
-        self.groups = kwargs.pop('groups', False)
-        self.allow_networks = kwargs.pop('allow_networks', False)
-        self.ip_networks = []
-        if self.allow_networks:
-            self.ip_networks = map(serialize_ip_network_group, IPNetworkGroup.query.filter_by(hidden=False))
-        # Whether it is allowed to search for external users with no indico account
-        self.allow_external = kwargs.pop('allow_external', False)
-        # Whether the add user dialog is opened immediately when the field is displayed
-        self.open_immediately = kwargs.pop('open_immediately', False)
         self._event = kwargs.pop('event')(kwargs['_form']) if 'event' in kwargs else None
-        super(PrincipalListField, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def _convert_principal(self, principal):
-        return principal_from_fossil(principal, allow_pending=self.allow_external,
-                                     allow_emails=self.allow_emails, allow_networks=self.allow_networks,
-                                     existing_data=self.object_data, event=self._event)
+        event_id = self._event.id if self._event else None
+        return principal_from_identifier(principal, event_id=event_id, allow_groups=self.allow_groups,
+                                         allow_external_users=self.allow_external_users,
+                                         allow_event_roles=self.allow_event_roles,
+                                         allow_category_roles=self.allow_category_roles,
+                                         allow_registration_forms=self.allow_registration_forms,
+                                         allow_emails=self.allow_emails)
 
     def process_formdata(self, valuelist):
         if valuelist:
-            self.data = {self._convert_principal(x) for x in json.loads(valuelist[0])}
-
-    def pre_validate(self, form):
-        if not self.groups and any(isinstance(p, GroupProxy) for p in self._get_data()):
-            raise ValueError('You cannot select groups')
+            self._submitted_data = json.loads(valuelist[0])
+            self.data = {self._convert_principal(x) for x in self._submitted_data}
 
     def _value(self):
-        from indico.modules.events.models.persons import PersonLinkBase
-
-        def key(obj):
-            if isinstance(obj, PersonLinkBase):
-                return obj.display_full_name.lower()
-            name = obj.display_full_name if isinstance(obj, User) else obj.name
-            return obj.principal_type, name.lower()
-
-        principals = sorted(self._get_data(), key=key)
-        return map(serialize_principal, principals)
+        try:
+            return self._submitted_data
+        except AttributeError:
+            return [x.identifier for x in self._get_data()]
 
     def _get_data(self):
-        return sorted(self.data) if self.data else []
+        return sorted(self.data, key=attrgetter('identifier')) if self.data else []
 
 
 class AccessControlListField(PrincipalListField):
-    widget = JinjaWidget('forms/principal_list_widget.html', single_kwargs=True, acl=True)
+    def __init__(self, *args, **kwargs):
+        # Hardcoded value of the protected field for legacy compatibility
+        self.protected_field_id = 'protected'
+        super().__init__(*args, **kwargs)
+
+
+class PrincipalField(SearchTokenMixin, HiddenField):
+    """A field that lets you select a single Indico user.
+
+    :param allow_external_users: If "search users with no indico account"
+                                 should be available. Selecting such a user
+                                 will automatically create a pending user once
+                                 the form is submitted, even if other fields
+                                 in the form fail to validate!
+    """
+
+    widget = JinjaWidget('forms/principal_widget.html', single_kwargs=True)
 
     def __init__(self, *args, **kwargs):
-        # The text of the link that changes the protection mode of the object to protected
-        self.default_text = kwargs.pop('default_text')
-        super(AccessControlListField, self).__init__(*args, **kwargs)
-
-
-class PrincipalField(PrincipalListField):
-    """A field that lets you select an Indico user/group ("principal")"""
-
-    widget = JinjaWidget('forms/principal_widget.html', single_line=True)
-
-    def _get_data(self):
-        return [] if self.data is None else [self.data]
+        self.allow_external_users = kwargs.pop('allow_external_users', False)
+        super().__init__(*args, **kwargs)
 
     def process_formdata(self, valuelist):
         if valuelist:
-            data = map(self._convert_principal, json.loads(valuelist[0]))
-            self.data = None if not data else data[0]
+            self._submitted_data = valuelist[0]
+            self.data = principal_from_identifier(self._submitted_data, allow_external_users=self.allow_external_users)
+
+    def _value(self):
+        try:
+            return self._submitted_data
+        except AttributeError:
+            return self.data.identifier if self.data else ''
 
 
-class PermissionsField(JSONField):
+class PermissionsField(SearchTokenMixin, JSONField):
+    from indico.modules.categories.models.categories import Category
     widget = JinjaWidget('forms/permissions_widget.html', single_kwargs=True, acl=True)
 
     type_mapping = {
         'event': Event,
         'session': Session,
-        'contribution': Contribution
+        'contribution': Contribution,
+        'category': Category
     }
 
-    def __init__(self, *args, **kwargs):
-        self.object_type = kwargs.pop('object_type')
-        super(PermissionsField, self).__init__(*args, **kwargs)
-        self.ip_networks = map(serialize_ip_network_group, IPNetworkGroup.query.filter_by(hidden=False))
+    def __init__(self, *args, object_type, **kwargs):
+        self.object_type = object_type
+        super().__init__(*args, **kwargs)
+        self.ip_networks = IPNetworkGroupSchema(many=True).dump(IPNetworkGroup.query.filter_by(hidden=False).all())
 
     @property
     def event(self):
         return self.get_form().event
 
     @property
-    def roles(self):
-        return [serialize_role(role) for role in sorted(self.event.roles, key=attrgetter('code'))]
+    def category(self):
+        if self.object_type == 'category':
+            return self.get_form().category
+        return self.event.category
+
+    @property
+    def event_roles(self):
+        return [serialize_event_role(role) for role in sorted(self.event.roles, key=attrgetter('code'))]
+
+    @property
+    def category_roles(self):
+        from indico.modules.categories.models.roles import CategoryRole
+        from indico.modules.categories.util import serialize_category_role
+        category_roles = CategoryRole.get_category_roles(self.category)
+        return [serialize_category_role(role, legacy=True) for role in category_roles]
+
+    @property
+    def registration_forms(self):
+        from indico.modules.events.registration.util import serialize_registration_form
+        if not self.event.has_feature('registration'):
+            return []
+        registration_forms = self.event.registration_forms
+        return [serialize_registration_form(regform) for regform in registration_forms]
 
     @property
     def permissions_info(self):
         return get_permissions_info(PermissionsField.type_mapping[self.object_type])[0]
 
+    @property
+    def is_unlisted(self):
+        return self.object_type in ['event', 'session', 'contribution'] and self.event.is_unlisted
+
+    @property
+    def hidden_permissions_info(self):
+        all_permissions = get_available_permissions(PermissionsField.type_mapping[self.object_type])
+        visible_permissions = get_permissions_info(PermissionsField.type_mapping[self.object_type])[0]
+        return {k: all_permissions[k].friendly_name for k in set(all_permissions) - set(visible_permissions)}
+
     def _value(self):
-        return self.data if self.data else []
+        return self.data or []

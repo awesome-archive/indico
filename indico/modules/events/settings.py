@@ -1,25 +1,14 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-import os
 import re
 from datetime import timedelta
 from functools import wraps
+from pathlib import Path
 
 import yaml
 from flask.helpers import get_root_path
@@ -27,7 +16,8 @@ from flask.helpers import get_root_path
 from indico.core import signals
 from indico.core.settings import ACLProxyBase, SettingProperty, SettingsProxyBase
 from indico.core.settings.converters import DatetimeConverter, TimedeltaConverter
-from indico.core.settings.util import get_all_settings, get_setting, get_setting_acl
+from indico.core.settings.proxy import SettingsProxy
+from indico.core.settings.util import get_all_settings, get_setting, get_setting_acl, preload_settings_bulk
 from indico.modules.events.models.settings import EventSetting, EventSettingPrincipal
 from indico.util.caching import memoize
 from indico.util.signals import values_from_signal
@@ -46,11 +36,11 @@ def event_or_id(f):
 
 
 class EventACLProxy(ACLProxyBase):
-    """Proxy class for event-specific ACL settings"""
+    """Proxy class for event-specific ACL settings."""
 
     @event_or_id
     def get(self, event, name):
-        """Retrieves an ACL setting
+        """Retrieve an ACL setting.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -60,7 +50,7 @@ class EventACLProxy(ACLProxyBase):
 
     @event_or_id
     def set(self, event, name, acl):
-        """Replaces an ACL with a new one
+        """Replace an ACL with a new one.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -72,7 +62,7 @@ class EventACLProxy(ACLProxyBase):
 
     @event_or_id
     def contains_user(self, event, name, user):
-        """Checks if a user is in an ACL.
+        """Check if a user is in an ACL.
 
         To pass this check, the user can either be in the ACL itself
         or in a group in the ACL.
@@ -81,11 +71,14 @@ class EventACLProxy(ACLProxyBase):
         :param name: Setting name
         :param user: A :class:`.User`
         """
-        return any(user in principal for principal in iter_acl(self.get(event, name)))
+        # we need to use the original `get` method in case this acl proxy is bound to an event,
+        # in which case calling `self.get()` with an explicitly provided event argument would fail
+        acl_entries = EventACLProxy.get(self, event, name)
+        return any(user in principal for principal in iter_acl(acl_entries))
 
     @event_or_id
     def add_principal(self, event, name, principal):
-        """Adds a principal to an ACL
+        """Add a principal to an ACL.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -97,7 +90,7 @@ class EventACLProxy(ACLProxyBase):
 
     @event_or_id
     def remove_principal(self, event, name, principal):
-        """Removes a principal from an ACL
+        """Remove a principal from an ACL.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -108,24 +101,24 @@ class EventACLProxy(ACLProxyBase):
         self._flush_cache()
 
     def merge_users(self, target, source):
-        """Replaces all ACL user entries for `source` with `target`"""
+        """Replace all ACL user entries for `source` with `target`."""
         EventSettingPrincipal.merge_users(self.module, target, source)
         self._flush_cache()
 
 
 class EventSettingsProxy(SettingsProxyBase):
-    """Proxy class to access event-specific settings for a certain module"""
+    """Proxy class to access event-specific settings for a certain module."""
 
     acl_proxy_class = EventACLProxy
 
     @property
     def query(self):
-        """Returns a query object filtering by the proxy's module."""
-        return EventSetting.find(module=self.module)
+        """A query object filtering by the proxy's module."""
+        return EventSetting.query.filter_by(module=self.module)
 
     @event_or_id
     def get_all(self, event, no_defaults=False):
-        """Retrieves all settings
+        """Retrieve all settings.
 
         :param event: Event (or its ID)
         :param no_defaults: Only return existing settings and ignore defaults.
@@ -135,7 +128,7 @@ class EventSettingsProxy(SettingsProxyBase):
 
     @event_or_id
     def get(self, event, name, default=SettingsProxyBase.default_sentinel):
-        """Retrieves the value of a single setting.
+        """Retrieve the value of a single setting.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -147,7 +140,7 @@ class EventSettingsProxy(SettingsProxyBase):
 
     @event_or_id
     def set(self, event, name, value):
-        """Sets a single setting.
+        """Set a single setting.
 
         :param event: Event (or its ID)
         :param name: Setting name
@@ -159,12 +152,12 @@ class EventSettingsProxy(SettingsProxyBase):
 
     @event_or_id
     def set_multi(self, event, items):
-        """Sets multiple settings at once.
+        """Set multiple settings at once.
 
         :param event: Event (or its ID)
         :param items: Dict containing the new settings
         """
-        items = {k: self._convert_from_python(k, v) for k, v in items.iteritems()}
+        items = {k: self._convert_from_python(k, v) for k, v in items.items()}
         self._split_call(items,
                          lambda x: EventSetting.set_multi(self.module, x, event_id=event),
                          lambda x: EventSettingPrincipal.set_acl_multi(self.module, x, event_id=event))
@@ -172,7 +165,7 @@ class EventSettingsProxy(SettingsProxyBase):
 
     @event_or_id
     def delete(self, event, *names):
-        """Deletes settings.
+        """Delete settings.
 
         :param event: Event (or its ID)
         :param names: One or more names of settings to delete
@@ -184,7 +177,7 @@ class EventSettingsProxy(SettingsProxyBase):
 
     @event_or_id
     def delete_all(self, event):
-        """Deletes all settings.
+        """Delete all settings.
 
         :param event: Event (or its ID)
         """
@@ -192,18 +185,23 @@ class EventSettingsProxy(SettingsProxyBase):
         EventSettingPrincipal.delete_all(self.module, event_id=event)
         self._flush_cache()
 
+    def preload_bulk(self, event_ids):
+        """Preload all settings for the specified event ids.
+
+        :param event_ids: List of event IDs
+        """
+        preload_settings_bulk(self, EventSetting.event_id, event_ids)
+
 
 class EventSettingProperty(SettingProperty):
     attr = 'event'
 
 
-class ThemeSettingsProxy(object):
+class ThemeSettingsProxy:
     @property
     @memoize
     def settings(self):
-        core_path = os.path.join(get_root_path('indico'), 'modules', 'events', 'themes.yaml')
-        with open(core_path) as f:
-            core_data = f.read()
+        core_data = Path(get_root_path('indico'), 'modules', 'events', 'themes.yaml').read_text()
         core_settings = yaml.safe_load(core_data)
         # YAML doesn't give us access to anchors so we need to include the base yaml.
         # Since duplicate keys are invalid (and may start failing in the future) we
@@ -211,10 +209,9 @@ class ThemeSettingsProxy(object):
         # file provided by a plugin.
         core_data = re.sub(r'^(\S+:)$', r'__core_\1', core_data, flags=re.MULTILINE)
         for plugin, path in values_from_signal(signals.plugin.get_event_themes_files.send(), return_plugins=True):
-            with open(path) as f:
-                data = f.read()
+            data = Path(path).read_text()
             settings = {k: v
-                        for k, v in yaml.safe_load(core_data + '\n' + data).viewitems()
+                        for k, v in yaml.safe_load(core_data + '\n' + data).items()
                         if not k.startswith('__core_')}
             # We assume there's no more than one theme plugin that provides defaults.
             # If that's not the case the last one "wins". We could reject this but it
@@ -225,7 +222,7 @@ class ThemeSettingsProxy(object):
             # to avoid using definition names that are likely to cause collisions.
             # Either way, if someone does this on purpose chances are good they want
             # to override a default style so let them do so...
-            for name, definition in settings.get('definitions', {}).viewitems():
+            for name, definition in settings.get('definitions', {}).items():
                 definition['plugin'] = plugin
                 definition.setdefault('user_visible', False)
                 core_settings['definitions'][name] = definition
@@ -243,7 +240,7 @@ class ThemeSettingsProxy(object):
 
     @memoize
     def get_themes_for(self, event_type):
-        return {theme_id: theme_data for theme_id, theme_data in self.themes.viewitems()
+        return {theme_id: theme_data for theme_id, theme_data in self.themes.items()
                 if event_type in theme_data['event_types']}
 
 
@@ -251,7 +248,8 @@ event_core_settings = EventSettingsProxy('core', {
     'start_dt_override': None,
     'end_dt_override': None,
     'organizer_info': '',
-    'additional_info': ''
+    'additional_info': '',
+    'public_regform_access': False
 }, converters={
     'start_dt_override': DatetimeConverter,
     'end_dt_override': DatetimeConverter
@@ -261,4 +259,29 @@ event_contact_settings = EventSettingsProxy('contact', {
     'title': 'Contact',
     'emails': [],
     'phones': []
+})
+
+event_language_settings = EventSettingsProxy('language', {
+    'supported_locales': [],
+    'default_locale': '',
+    'enforce_locale': False,
+})
+
+unlisted_events_settings = SettingsProxy('unlisted_events', {
+    'enabled': False,
+    'restricted': False,
+}, acls={
+    'authorized_creators'
+})
+
+autolinker_settings = SettingsProxy('autolinker', {
+    'rules': []
+})
+
+data_retention_settings = SettingsProxy('data_retention', {
+    'minimum_data_retention': timedelta(days=7),
+    'maximum_data_retention': None,
+}, converters={
+    'minimum_data_retention': TimedeltaConverter,
+    'maximum_data_retention': TimedeltaConverter
 })

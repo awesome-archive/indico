@@ -1,21 +1,13 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from indico.core.signals import acl, agreements, attachments, category, event, event_management, menu, plugin, rh, users
-from indico.core.signals.core import *
+from indico.core.signals import (acl, affiliations, agreements, attachments, category, core, event, event_management,
+                                 menu, plugin, rb, rh, users, vc)
 
 
-__all__ = ('acl', 'agreements', 'attachments', 'category', 'event', 'event_management', 'menu', 'plugin', 'rh', 'users')
+__all__ = ('acl', 'affiliations', 'agreements', 'attachments', 'category', 'core', 'event', 'event_management', 'menu',
+           'plugin', 'rb', 'rh', 'users', 'vc')

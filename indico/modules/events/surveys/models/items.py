@@ -1,37 +1,28 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.event import listens_for
 
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum
 from indico.core.db.sqlalchemy.descriptions import DescriptionMixin, RenderMode
 from indico.modules.events.surveys.fields import get_field_types
-from indico.util.string import return_ascii, text_to_repr
-from indico.util.struct.enum import IndicoEnum
+from indico.util.enum import IndicoIntEnum
+from indico.util.string import text_to_repr
 
 
 def _get_next_position(context):
     """Get the next question position for the event."""
     survey_id = context.current_parameters['survey_id']
     parent_id = context.current_parameters['parent_id']
-    res = db.session.query(db.func.max(SurveyItem.position)).filter_by(survey_id=survey_id, parent_id=parent_id).one()
+    res = (db.session.query(db.func.max(SurveyItem.position))
+           .filter(SurveyItem.survey_id == survey_id, SurveyItem.parent_id == parent_id)
+           .one())
     return (res[0] or 0) + 1
 
 
@@ -39,7 +30,7 @@ def _get_item_default_title(context):
     return '' if context.current_parameters['type'] == SurveyItemType.section else None
 
 
-class SurveyItemType(int, IndicoEnum):
+class SurveyItemType(IndicoIntEnum):
     question = 1
     section = 2
     text = 3
@@ -47,29 +38,29 @@ class SurveyItemType(int, IndicoEnum):
 
 class SurveyItem(DescriptionMixin, db.Model):
     __tablename__ = 'items'
-    __table_args__ = (db.CheckConstraint("type != {type} OR ("
-                                         "title IS NOT NULL AND "
-                                         "is_required IS NOT NULL AND "
-                                         "field_type IS NOT NULL AND "
-                                         "parent_id IS NOT NULL AND "
-                                         "display_as_section IS NULL)"
-                                         .format(type=SurveyItemType.question), 'valid_question'),
-                      db.CheckConstraint("type != {type} OR ("
-                                         "title IS NOT NULL AND "
-                                         "is_required IS NULL AND "
-                                         "field_type IS NULL AND "
-                                         "field_data::text = '{{}}' AND "
-                                         "parent_id IS NULL AND "
-                                         "display_as_section IS NOT NULL)"
-                                         .format(type=SurveyItemType.section), 'valid_section'),
-                      db.CheckConstraint("type != {type} OR ("
-                                         "title IS NULL AND "
-                                         "is_required IS NULL AND "
-                                         "field_type IS NULL AND "
-                                         "field_data::text = '{{}}' AND "
-                                         "parent_id IS NOT NULL AND "
-                                         "display_as_section IS NULL)"
-                                         .format(type=SurveyItemType.text), 'valid_text'),
+    __table_args__ = (db.CheckConstraint(f'type != {SurveyItemType.question} OR ('
+                                         'title IS NOT NULL AND '
+                                         'is_required IS NOT NULL AND '
+                                         'field_type IS NOT NULL AND '
+                                         'parent_id IS NOT NULL AND '
+                                         'display_as_section IS NULL)',
+                                         'valid_question'),
+                      db.CheckConstraint(f'type != {SurveyItemType.section} OR ('
+                                         'title IS NOT NULL AND '
+                                         'is_required IS NULL AND '
+                                         'field_type IS NULL AND '
+                                         "field_data::text = '{}' AND "
+                                         'parent_id IS NULL AND '
+                                         'display_as_section IS NOT NULL)',
+                                         'valid_section'),
+                      db.CheckConstraint(f'type != {SurveyItemType.text} OR ('
+                                         'title IS NULL AND '
+                                         'is_required IS NULL AND '
+                                         'field_type IS NULL AND '
+                                         "field_data::text = '{}' AND "
+                                         'parent_id IS NOT NULL AND '
+                                         'display_as_section IS NULL)',
+                                         'valid_text'),
                       {'schema': 'event_surveys'})
     __mapper_args__ = {
         'polymorphic_on': 'type',
@@ -122,7 +113,7 @@ class SurveyItem(DescriptionMixin, db.Model):
     )
 
     # The following columns are only used for SurveyQuestion objects, but by
-    # specifying them here we can access them withouy an extra query when we
+    # specifying them here we can access them without an extra query when we
     # query SurveyItem objects directly instead of going through a subclass.
     # This is done e.g. when using the Survey.top_level_items relationship.
 
@@ -138,7 +129,7 @@ class SurveyItem(DescriptionMixin, db.Model):
     )
     #: Field-specific data (such as choices for multi-select fields)
     field_data = db.Column(
-        JSON,
+        JSONB,
         nullable=False,
         default={}
     )
@@ -180,16 +171,15 @@ class SurveyQuestion(SurveyItem):
         return [a for a in self.answers if not a.is_empty]
 
     def get_summary(self, **kwargs):
-        """Returns the summary of answers submitted for this question."""
+        """Return the summary of answers submitted for this question."""
         if self.field:
             return self.field.get_summary(**kwargs)
 
-    @return_ascii
     def __repr__(self):
-        return '<SurveyQuestion({}, {}, {}, {})>'.format(self.id, self.survey_id, self.field_type, self.title)
+        return f'<SurveyQuestion({self.id}, {self.survey_id}, {self.field_type}, {self.title})>'
 
     def to_dict(self):
-        data = super(SurveyQuestion, self).to_dict()
+        data = super().to_dict()
         data.update({'is_required': self.is_required, 'field_type': self.field_type,
                      'field_data': self.field.copy_field_data()})
         return data
@@ -215,12 +205,11 @@ class SurveySection(SurveyItem):
     def locator(self):
         return dict(self.survey.locator, section_id=self.id)
 
-    @return_ascii
     def __repr__(self):
-        return '<SurveySection({}, {}, {})>'.format(self.id, self.survey_id, self.title)
+        return f'<SurveySection({self.id}, {self.survey_id}, {self.title})>'
 
     def to_dict(self):
-        data = super(SurveySection, self).to_dict()
+        data = super().to_dict()
         content = [child.to_dict() for child in self.children]
         data.update({'content': content, 'display_as_section': self.display_as_section})
         if not self.display_as_section:
@@ -238,13 +227,12 @@ class SurveyText(SurveyItem):
     def locator(self):
         return dict(self.survey.locator, section_id=self.parent_id, text_id=self.id)
 
-    @return_ascii
     def __repr__(self):
         desc = text_to_repr(self.description)
-        return '<SurveyText({}, {}): "{}")>'.format(self.id, self.survey_id, desc)
+        return f'<SurveyText({self.id}, {self.survey_id}): "{desc}")>'
 
     def to_dict(self):
-        data = super(SurveyText, self).to_dict()
+        data = super().to_dict()
         del data['title']
         return data
 

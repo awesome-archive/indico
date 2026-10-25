@@ -21,14 +21,16 @@
                         </div>
                         <div class="group">
                             <span class="i-button label icon-search"></span>
-                            <input type="text" id="search-input" placeholder="{% trans %}Enter #id or search string{% endtrans %}">
+                            <input type="text" class="thin" id="search-input" placeholder="{% trans %}Enter #id or search string{% endtrans %}">
                         </div>
                     </div>
-                    <div class="group">
-                        <a href="{{ url_for('abstracts.my_abstracts_pdf', event) }}"
-                           title="{% trans %}Export to PDF{% endtrans %}"
-                           class="i-button icon-file-pdf"></a>
-                    </div>
+                    {% if indico_config.LATEX_ENABLED %}
+                        <div class="group">
+                            <a href="{{ url_for('abstracts.my_abstracts_pdf', event) }}"
+                               title="{% trans %}Export to PDF{% endtrans %}"
+                               class="i-button icon-file-pdf"></a>
+                        </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -45,7 +47,7 @@
                     </div>
                     <div class="speaker-list icon-user" data-searchable="{{ abstract.speakers|map(attribute='name')|join(', ')|lower }}">
                         {{ render_users(abstract.speakers|sort(attribute='display_order_key'),
-                                        span_class='speaker-item-inline') }}
+                                        span_class='speaker-item-inline', title=abstract.event.show_titles) }}
                     </div>
                     <div class="contrib-time icon-time">
                         {% set dt = abstract.modified_dt or abstract.submitted_dt %}
@@ -92,7 +94,7 @@
             </section>
         {% endif %}
         <section class="cfa-infoline-section">
-            {{ render_cfa_infoline(event, cfa, show_icon=false) }}
+            {{ render_cfa_infoline(event, cfa, show_icon=false, abstracts=abstracts) }}
         </section>
         {% if abstracts %}
             {{ render_user_abstract_list(event, abstracts) }}

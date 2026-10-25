@@ -1,18 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 """
 This module contains very generic Celery tasks which are not specific
@@ -22,7 +13,6 @@ anything from `indico.modules`, your task most likely does not belong
 in here but in your module instead.
 """
 
-from __future__ import unicode_literals
 
 from datetime import timedelta
 
@@ -39,11 +29,11 @@ def _log_deleted(logger, msg, files):
 
 @celery.periodic_task(name='temp_cleanup', run_every=crontab(minute='0', hour='4'))
 def temp_cleanup():
-    """Cleanup temp/cache dirs"""
+    """Cleanup temp/cache dirs."""
     from indico.core.config import config
     from indico.core.logger import Logger
     logger = Logger.get()
-    deleted = cleanup_dir(config.CACHE_DIR, timedelta(days=1))
+    deleted = cleanup_dir(config.CACHE_DIR, timedelta(days=1), exclude=lambda p: p == 'fontconfig')
     _log_deleted(logger, 'Deleted from cache: %s', deleted)
     deleted = cleanup_dir(config.TEMP_DIR, timedelta(days=1))
     _log_deleted(logger, 'Deleted from temp: %s', deleted)

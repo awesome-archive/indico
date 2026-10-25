@@ -1,52 +1,37 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from markupsafe import Markup, escape
 
 from indico.util.i18n import _
-from indico.util.placeholders import Placeholder
+from indico.util.placeholders import ParametrizedPlaceholder, Placeholder
 from indico.web.flask.util import url_for
-
-
-class EventTitlePlaceholder(Placeholder):
-    name = 'event_title'
-    description = _("The title of the event")
-
-    @classmethod
-    def render(cls, event, survey, **kwargs):
-        return event.title
 
 
 class SurveyTitlePlaceholder(Placeholder):
     name = 'survey_title'
-    description = _("The title of the survey")
+    description = _('The title of the survey')
 
     @classmethod
     def render(cls, event, survey, **kwargs):
         return survey.title
 
 
-class SurveyLinkPlaceholder(Placeholder):
+class SurveyLinkPlaceholder(ParametrizedPlaceholder):
     name = 'survey_link'
-    description = _("Link to the survey")
+    param_friendly_name = 'link title'
     required = True
 
     @classmethod
-    def render(cls, event, survey, **kwargs):
-        url = url_for('.display_survey_form', survey, survey.locator.token, _external=True)
-        return Markup('<a href="{url}" title="{title}">{url}</a>'.format(url=url, title=escape(survey.title)))
+    def render(cls, param, survey, **kwargs):
+        url = url_for('surveys.display_survey_form', survey, survey.locator.token, _external=True)
+        return Markup(f'<a href="{url}" title="{escape(survey.title)}">{param or url}</a>')
+
+    @classmethod
+    def iter_param_info(cls, **kwargs):
+        yield None, _('Link to the survey')
+        yield 'custom-text', _('Custom link text instead of the full URL')

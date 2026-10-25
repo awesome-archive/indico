@@ -1,43 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from indico.core.db import db
-
-
-def uniqueId(obj):
-    if isinstance(obj, db.m.Contribution):
-        return '{}.{}'.format(obj.event_id, obj.legacy_mapping.legacy_contribution_id if obj.legacy_mapping else obj.id)
-    elif isinstance(obj, db.m.SubContribution):
-        return '{}.{}.{}'.format(
-            obj.event.id,
-            obj.legacy_mapping.legacy_contribution_id if obj.legacy_mapping else obj.contribution.id,
-            obj.legacy_mapping.legacy_subcontribution_id if obj.legacy_mapping else obj.id
-        )
-    elif isinstance(obj, db.m.Session):
-        return '{}.s{}'.format(obj.event_id, obj.legacy_mapping.legacy_session_id if obj.legacy_mapping else obj.id)
-    elif isinstance(obj, db.m.SessionBlock):
-        return '{}.s{}.{}'.format(obj.event.id,
-                                  obj.legacy_mapping.legacy_session_id if obj.legacy_mapping else obj.session.id,
-                                  obj.legacy_mapping.legacy_session_block_id if obj.legacy_mapping else obj.id)
-    elif isinstance(obj, db.m.EventNote):
-        return '{}.n{}'.format(uniqueId(obj.object), obj.id)
-    else:
-        # XXX: anything besides Conference/Event?! probably not..
-        return obj.getId() if hasattr(obj, 'getId') else obj.id
-
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 def truncate_path(full_path, chars=30, skip_first=True):
     """Truncate the path of a category to the number of character.

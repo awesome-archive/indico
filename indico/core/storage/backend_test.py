@@ -1,23 +1,13 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -50,23 +40,23 @@ def test_parse_data(data, expected):
 def test_fs_errors(fs_storage):
     with pytest.raises(StorageError) as exc_info:
         fs_storage.open('xxx')
-    assert 'Could not open' in unicode(exc_info.value)
+    assert 'Could not open' in str(exc_info.value)
     with pytest.raises(StorageError) as exc_info:
         fs_storage.send_file('xxx', 'unused/unused', 'unused')
-    assert 'Could not send' in unicode(exc_info.value)
+    assert 'Could not send' in str(exc_info.value)
     with pytest.raises(StorageError) as exc_info:
         fs_storage.delete('xxx')
-    assert 'Could not delete' in unicode(exc_info.value)
+    assert 'Could not delete' in str(exc_info.value)
     with pytest.raises(StorageError) as exc_info:
         fs_storage.getsize('xxx')
-    assert 'Could not get size' in unicode(exc_info.value)
+    assert 'Could not get size' in str(exc_info.value)
     with pytest.raises(StorageError) as exc_info:
         fs_storage.open('../xxx')
-    assert 'Invalid path' in unicode(exc_info.value)
+    assert 'Invalid path' in str(exc_info.value)
     os.mkdir(fs_storage._resolve_path('secret'), 0o000)
     with pytest.raises(StorageError) as exc_info:
         fs_storage.save('secret/test.txt', 'unused/unused', 'unused', b'hello test')
-    assert 'Could not save' in unicode(exc_info.value)
+    assert 'Could not save' in str(exc_info.value)
     os.rmdir(fs_storage._resolve_path('secret'))
 
 
@@ -84,7 +74,7 @@ def test_fs_overwrite(fs_storage):
     f, __ = fs_storage.save('test.txt', 'unused/unused', 'unused', b'hello test')
     with pytest.raises(StorageError) as exc_info:
         fs_storage.save('test.txt', 'unused/unused', 'unused', b'hello fail')
-    assert 'already exists' in unicode(exc_info.value)
+    assert 'already exists' in str(exc_info.value)
     with fs_storage.open(f) as fd:
         assert fd.read() == b'hello test'
 
@@ -94,11 +84,11 @@ def test_fs_dir(fs_storage):
     # Cannot open directory
     with pytest.raises(StorageError) as exc_info:
         fs_storage.open('foo')
-    assert 'Could not open' in unicode(exc_info.value)
+    assert 'Could not open' in str(exc_info.value)
     # Cannot create file colliding with the directory
     with pytest.raises(StorageError) as exc_info:
         fs_storage.save('foo', 'unused/unused', 'unused', b'hello test')
-    assert 'Could not save' in unicode(exc_info.value)
+    assert 'Could not save' in str(exc_info.value)
 
 
 def test_fs_operations(fs_storage):
@@ -107,9 +97,9 @@ def test_fs_operations(fs_storage):
     f3, h3 = fs_storage.save('test.txt', 'unused/unused', 'unused', b'very very long file' * 1024 * 1024)
 
     # check md5 checksums
-    assert h1 == u'5eb63bbbe01eeed093cb22bb8f5acdc3'
-    assert h2 == u'161bc25962da8fed6d2f59922fb642aa'
-    assert h3 == u'd35ddfd803cbe8915f5c3ecd1d0523b4'
+    assert h1 == '5eb63bbbe01eeed093cb22bb8f5acdc3'
+    assert h2 == '161bc25962da8fed6d2f59922fb642aa'
+    assert h3 == 'd35ddfd803cbe8915f5c3ecd1d0523b4'
 
     with fs_storage.open(f1) as fd:
         assert fd.read() == b'hello world'
@@ -134,7 +124,7 @@ def test_fs_send_file(fs_storage):
     response = fs_storage.send_file(f1, 'text/plain', 'filename.txt')
     assert 'text/plain' in response.headers['Content-type']
     assert 'filename.txt' in response.headers['Content-disposition']
-    assert ''.join(response.response) == 'hello world'
+    assert b''.join(response.response) == b'hello world'
 
 
 @pytest.mark.usefixtures('request_context')
@@ -156,8 +146,7 @@ def test_fs_get_local_path(fs_storage):
     f, __ = fs_storage.save('test.txt', 'unused/unused', 'unused', b'hello world')
     with fs_storage.get_local_path(f) as path:
         assert path == fs_storage._resolve_path(f)
-        with open(path, 'rb') as fd:
-            assert fd.read() == b'hello world'
+        assert Path(path).read_bytes() == b'hello world'
     # fs storage returns the real path so it should still exist afterwards
     assert os.path.exists(path)
 
@@ -170,6 +159,5 @@ def test_storage_get_local_path(fs_storage):
     storage = CustomStorage(fs_storage.path)
     f, __ = storage.save('test.txt', 'unused/unused', 'unused', b'hello world')
     with storage.get_local_path(f) as path:
-        with open(path, 'rb') as fd:
-            assert fd.read() == b'hello world'
+        assert Path(path).read_bytes() == b'hello world'
     assert not os.path.exists(path)

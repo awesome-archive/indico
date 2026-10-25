@@ -1,24 +1,13 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import pytest
 
-from indico.web.flask.util import endpoint_for_url
+from indico.web.flask.util import endpoint_for_url, should_inline_file
 
 
 @pytest.mark.parametrize(('base_url', 'url', 'endpoint'), (
@@ -36,3 +25,17 @@ def test_endpoint_for_url(base_url, url, endpoint):
     else:
         assert data is not None
         assert data[0] == endpoint
+
+
+@pytest.mark.parametrize('mimetype', ('text/html', 'image/svg+xml'))
+@pytest.mark.parametrize(('inline', 'safe', 'expected'), (
+    (None, True, False),
+    (False, True, False),
+    (True, True, False),
+    (None, False, True),
+    (False, False, False),
+    (True, False, True),
+))
+@pytest.mark.usefixtures('request_context')
+def test_should_inline_file_dangerous_types(mimetype, inline, safe, expected):
+    assert should_inline_file(mimetype, inline, safe=safe) == expected

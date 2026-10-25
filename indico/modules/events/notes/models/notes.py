@@ -1,20 +1,9 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 from functools import partial
 
@@ -27,10 +16,14 @@ from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.core.db.sqlalchemy.descriptions import RenderMode
 from indico.core.db.sqlalchemy.links import LinkMixin, LinkType
+from indico.core.db.sqlalchemy.searchable import fts_matches, make_fts_index
 from indico.core.db.sqlalchemy.util.models import auto_table_args
+from indico.core.db.sqlalchemy.util.session import no_autoflush
+from indico.modules.events.notes.util import render_note
 from indico.util.date_time import now_utc
+from indico.util.decorators import strict_classproperty
 from indico.util.locators import locator_property
-from indico.util.string import render_markdown, return_ascii, text_to_repr
+from indico.util.string import text_to_repr
 
 
 class EventNote(LinkMixin, db.Model):
@@ -40,9 +33,15 @@ class EventNote(LinkMixin, db.Model):
     events_backref_name = 'all_notes'
     link_backref_name = 'note'
 
+    @strict_classproperty
+    @classmethod
+    def __auto_table_args(cls):
+        return (make_fts_index(cls, 'html'),
+                {'schema': 'events'})
+
     @declared_attr
     def __table_args__(cls):
-        return auto_table_args(cls, schema='events')
+        return auto_table_args(cls)
 
     #: The ID of the note
     id = db.Column(
@@ -95,7 +94,7 @@ class EventNote(LinkMixin, db.Model):
 
     @classmethod
     def get_for_linked_object(cls, linked_object, preload_event=True):
-        """Gets the note for the given object.
+        """Get the note for the given object.
 
         This only returns a note that hasn't been deleted.
 
@@ -124,23 +123,23 @@ class EventNote(LinkMixin, db.Model):
 
     @classmethod
     def get_or_create(cls, linked_object):
-        """Gets the note for the given object or creates a new one.
+        """Get the note for the given object or creates a new one.
 
         If there is an existing note for the object, it will be returned
         even.  Otherwise a new note is created.
         """
-        note = cls.find_first(object=linked_object)
+        note = cls.query.filter_by(object=linked_object).first()
         if note is None:
             note = cls(object=linked_object)
         return note
 
     def delete(self, user):
-        """Marks the note as deleted and adds a new empty revision"""
+        """Mark the note as deleted and adds a new empty revision."""
         self.create_revision(self.current_revision.render_mode, '', user)
         self.is_deleted = True
 
     def create_revision(self, render_mode, source, user):
-        """Creates a new revision if needed and marks it as undeleted if it was
+        """Create a new revision if needed and marks it as undeleted if it was.
 
         Any change to the render mode or the source causes a new
         revision to be created.  The user is not taken into account
@@ -155,7 +154,17 @@ class EventNote(LinkMixin, db.Model):
         self.current_revision = EventNoteRevision(render_mode=render_mode, source=source, user=user)
         return self.current_revision
 
-    @return_ascii
+    @classmethod
+    def html_matches(cls, search_string, exact=False):
+        """Check whether the html content matches a search string.
+
+        To be used in a SQLAlchemy `filter` call.
+
+        :param search_string: A string to search for
+        :param exact: Whether to search for the exact string
+        """
+        return fts_matches(cls.html, search_string, exact=exact)
+
     def __repr__(self):
         return '<EventNote({}, current_revision={}{}, {})>'.format(
             self.id,
@@ -223,12 +232,10 @@ class EventNoteRevision(db.Model):
     # relationship backrefs:
     # - note (EventNote.revisions)
 
-    @return_ascii
     def __repr__(self):
         render_mode = self.render_mode.name if self.render_mode is not None else None
         source = text_to_repr(self.source, html=True)
-        return '<EventNoteRevision({}, {}, {}, {}): "{}">'.format(self.id, self.note_id, render_mode, self.created_dt,
-                                                                  source)
+        return f'<EventNoteRevision({self.id}, {self.note_id}, {render_mode}, {self.created_dt}): "{source}">'
 
 
 @listens_for(EventNote.current_revision, 'set')
@@ -240,17 +247,14 @@ def _add_current_revision(target, value, *unused):
     target.html = value.html
 
 
+@no_autoflush
 def _render_revision(attr, target, value, *unused):
     source = value if attr == 'source' else target.source
     render_mode = value if attr == 'render_mode' else target.render_mode
     if source is None or render_mode is None:
         return
-    if render_mode == RenderMode.html:
-        target.html = source
-    elif render_mode == RenderMode.markdown:
-        target.html = render_markdown(source, extensions=('nl2br',))
-    else:  # pragma: no cover
-        raise ValueError('Invalid render mode: {}'.format(render_mode))
+
+    target.html = render_note(source, render_mode)
 
 
 listen(EventNoteRevision.render_mode, 'set', partial(_render_revision, 'render_mode'))

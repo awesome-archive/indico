@@ -1,50 +1,66 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
+import math
+from operator import itemgetter
+from uuid import uuid4
 
+from authlib.common.security import generate_token
 from flask import flash, jsonify, redirect, render_template, request, session
+from flask_multipass import AuthProvider
 from itsdangerous import BadData, BadSignature
 from markupsafe import Markup
+from marshmallow import RAISE, ValidationError, post_load, pre_load, validate, validates, validates_schema
 from webargs import fields
-from webargs.flaskparser import use_kwargs
 from werkzeug.exceptions import BadRequest, Forbidden, NotFound
 
 from indico.core import signals
-from indico.core.auth import multipass
+from indico.core.auth import login_rate_limiter, multipass, signup_rate_limiter
+from indico.core.cache import make_scoped_cache
 from indico.core.config import config
 from indico.core.db import db
+from indico.core.marshmallow import mm
 from indico.core.notifications import make_email, send_email
 from indico.modules.admin import RHAdminBase
 from indico.modules.auth import Identity, logger, login_user
-from indico.modules.auth.forms import (AddLocalIdentityForm, EditLocalIdentityForm, LocalRegistrationForm,
-                                       MultipassRegistrationForm, RegistrationEmailForm, ResetPasswordEmailForm,
-                                       ResetPasswordForm, SelectEmailForm)
+from indico.modules.auth.forms import (AddLocalIdentityForm, EditLocalIdentityForm, RegistrationEmailForm,
+                                       ResetPasswordEmailForm, ResetPasswordForm, SelectEmailForm)
 from indico.modules.auth.models.registration_requests import RegistrationRequest
-from indico.modules.auth.util import impersonate_user, load_identity_info, register_user, undo_impersonate_user
-from indico.modules.auth.views import WPAuth, WPAuthUser
-from indico.modules.users import User
+from indico.modules.auth.util import (impersonate_user, load_identity_info, register_user, undo_impersonate_user,
+                                      url_for_logout)
+from indico.modules.auth.views import WPAuth, WPAuthUser, WPSignup
+from indico.modules.legal import legal_settings
+from indico.modules.logs.models.entries import LogKind, UserLogRealm
+from indico.modules.users import User, user_management_settings
 from indico.modules.users.controllers import RHUserBase
-from indico.util.i18n import _
+from indico.modules.users.models.affiliations import Affiliation
+from indico.util.date_time import format_human_timedelta, now_utc
+from indico.util.i18n import _, force_locale
+from indico.util.marshmallow import LowercaseString, ModelField, not_empty
+from indico.util.passwords import validate_secure_password
 from indico.util.signing import secure_serializer
+from indico.util.string import crc32, make_unique_token, validate_email
+from indico.web.args import parser, use_kwargs
 from indico.web.flask.templating import get_template_module
 from indico.web.flask.util import url_for
 from indico.web.forms.base import FormDefaults, IndicoForm
 from indico.web.rh import RH
 from indico.web.util import url_for_index
+
+
+token_store = make_scoped_cache('email-tokens')
+
+
+def _load_secure_token(token, salt, *, consume=False):
+    if (payload := token_store.get(token)) is None or payload['salt'] != salt:
+        raise BadData('Invalid or expired token')
+    if consume:
+        token_store.delete(token)
+    return payload['data']
 
 
 def _get_provider(name, external):
@@ -57,8 +73,13 @@ def _get_provider(name, external):
     return provider
 
 
+def _sort_providers(providers: list[AuthProvider]) -> list[AuthProvider]:
+    """Sort providers by `display_order` and `title`."""
+    return sorted(providers, key=lambda p: (p.settings.get('display_order', math.inf), p.title))
+
+
 class RHLogin(RH):
-    """The login page"""
+    """The login page."""
 
     # Disable global CSRF check. The form might not be an IndicoForm
     # but a normal WTForm from Flask-WTF which does not use the same
@@ -66,21 +87,27 @@ class RHLogin(RH):
     # CSRF check anyway disabling the global check is perfectly fine.
     CSRF_ENABLED = False
 
-    def _process(self):
+    @use_kwargs({'force': fields.Bool(load_default=False)}, location='query')
+    def _process(self, force):
         login_reason = session.pop('login_reason', None)
 
         # User is already logged in
-        if session.user is not None:
+        if session.user is not None and not force:
             multipass.set_next_url()
             return multipass.redirect_success()
 
+        # Some clients attempt to incorrectly resolve redirections internally.
+        # See https://github.com/indico/indico/issues/4720 for details
+        user_agent = request.headers.get('User-Agent', '')
+        sso_redirect = not any(s in user_agent for s in ('ms-office', 'Microsoft Office'))
+
         # If we have only one provider, and this provider is external, we go there immediately
         # However, after a failed login we need to show the page to avoid a redirect loop
-        if not session.pop('_multipass_auth_failed', False) and 'provider' not in request.view_args:
+        if not session.pop('_multipass_auth_failed', False) and 'provider' not in request.view_args and sso_redirect:
             single_auth_provider = multipass.single_auth_provider
             if single_auth_provider and single_auth_provider.is_external:
                 multipass.set_next_url()
-                return redirect(url_for('.login', provider=single_auth_provider.name))
+                return redirect(url_for('.login', provider=single_auth_provider.name, force=('1' if force else None)))
 
         # Save the 'next' url to go to after login
         multipass.set_next_url()
@@ -91,25 +118,30 @@ class RHLogin(RH):
             return provider.initiate_external_login()
 
         # If we have a POST request we submitted a login form for a local provider
+        rate_limit_exceeded = False
         if request.method == 'POST':
             active_provider = provider = _get_provider(request.form['_provider'], False)
             form = provider.login_form()
-            if form.validate_on_submit():
+            rate_limit_exceeded = not login_rate_limiter.test()
+            if not rate_limit_exceeded and form.validate_on_submit():
                 response = multipass.handle_login_form(provider, form.data)
                 if response:
                     return response
+                # re-check since a failed login may have triggered the rate limit
+                rate_limit_exceeded = not login_rate_limiter.test()
         # Otherwise we show the form for the default provider
         else:
             active_provider = multipass.default_local_auth_provider
             form = active_provider.login_form() if active_provider else None
 
-        providers = multipass.auth_providers.values()
+        providers = _sort_providers(multipass.auth_providers.values())
+        retry_in = login_rate_limiter.get_reset_delay() if rate_limit_exceeded else None
         return render_template('auth/login_page.html', form=form, providers=providers, active_provider=active_provider,
-                               login_reason=login_reason)
+                               login_reason=login_reason, retry_in=retry_in, force=(force or None))
 
 
 class RHLoginForm(RH):
-    """Retrieves a login form (json)"""
+    """Retrieve a login form (json)."""
 
     def _process(self):
         provider = _get_provider(request.view_args['provider'], False)
@@ -119,26 +151,39 @@ class RHLoginForm(RH):
 
 
 class RHLogout(RH):
-    """Logs the user out"""
+    """Log the user out."""
 
-    def _process(self):
-        return multipass.logout(request.args.get('next') or url_for_index(), clear_session=True)
+    @use_kwargs({
+        'next_url': fields.String(load_default=None, data_key='next'),
+    }, location='query')
+    def _process(self, next_url):
+        if not next_url or not multipass.validate_next_url(next_url):
+            next_url = url_for_index()
+        return multipass.logout(next_url, clear_session=True)
 
 
-def _send_confirmation(email, salt, endpoint, template, template_args=None, url_args=None, data=None):
+def _send_confirmation(email, salt, endpoint, template, template_args=None, *, url_args=None, data=None,
+                       sensitive=True, ttl=None):
     template_args = template_args or {}
     url_args = url_args or {}
-    token = secure_serializer.dumps(data or email, salt=salt)
+    if sensitive:
+        assert ttl
+        token = make_unique_token(lambda t: not token_store.get(t), lambda: generate_token(42))
+        payload = {'data': data or email, 'salt': salt}
+        token_store.set(token, payload, ttl)
+    else:
+        token = secure_serializer.dumps(data or email, salt=salt)
     url = url_for(endpoint, token=token, _external=True, **url_args)
-    template_module = get_template_module(template, email=email, url=url, **template_args)
-    send_email(make_email(email, template=template_module))
+    with force_locale(None) if 'user' not in template_args else template_args['user'].force_user_locale():
+        template_module = get_template_module(template, email=email, url=url, **template_args)
+        send_email(make_email(email, template=template_module))
     flash(_('We have sent you a verification email. Please check your mailbox within the next hour and open '
             'the link in that email.'))
     return redirect(url_for(endpoint, **url_args))
 
 
 class RHLinkAccount(RH):
-    """Links a new identity with an existing user.
+    """Link a new identity with an existing user.
 
     This RH is only used if the identity information contains an
     email address and an existing user was found.
@@ -147,7 +192,7 @@ class RHLinkAccount(RH):
     def _process_args(self):
         self.identity_info = load_identity_info()
         if not self.identity_info or self.identity_info['indico_user_id'] is None:
-            # Just redirect to the front page or whereever we wanted to go.
+            # Just redirect to the front page or wherever we wanted to go.
             # Probably someone simply used his browser's back button.
             flash('There is no pending login.', 'warning')
             return multipass.redirect_success()
@@ -157,9 +202,12 @@ class RHLinkAccount(RH):
         self.email_verified = self.identity_info['email_verified']
         self.must_choose_email = len(self.emails) != 1 and not self.email_verified
 
-    def _process(self):
-        if self.verification_email_sent and 'token' in request.args:
-            email = secure_serializer.loads(request.args['token'], max_age=3600, salt='link-identity-email')
+    @use_kwargs({
+        'token': fields.String(load_default=None),
+    }, location='query')
+    def _process(self, token):
+        if self.verification_email_sent and token is not None:
+            email = _load_secure_token(token, 'link-identity-email', consume=True)
             if email not in self.emails:
                 raise BadData('Emails do not match')
             session['login_identity_info']['email_verified'] = True
@@ -170,7 +218,7 @@ class RHLinkAccount(RH):
 
         if self.must_choose_email:
             form = SelectEmailForm()
-            form.email.choices = zip(self.emails, self.emails)
+            form.email.choices = list(zip(self.emails, self.emails, strict=True))
         else:
             form = IndicoForm()
 
@@ -190,6 +238,9 @@ class RHLinkAccount(RH):
         identity = Identity(user=self.user, provider=self.identity_info['provider'],
                             identifier=self.identity_info['identifier'], data=self.identity_info['data'],
                             multipass_data=self.identity_info['multipass_data'])
+        self.user.log(UserLogRealm.user, LogKind.positive, 'Accounts', 'External account linked',
+                      data={'Provider': multipass.identity_providers[identity.provider].title,
+                            'Identifier': identity.identifier})
         logger.info('Created new identity for %s: %s', self.user, identity)
         del session['login_identity_info']
         db.session.flush()
@@ -201,11 +252,11 @@ class RHLinkAccount(RH):
         session['login_identity_info']['data']['email'] = email  # throw away other emails
         return _send_confirmation(email, 'link-identity-email', '.link_account',
                                   'auth/emails/link_identity_verify_email.txt', {'user': self.user},
-                                  url_args={'provider': self.identity_info['provider']})
+                                  url_args={'provider': self.identity_info['provider']}, ttl=3600)
 
 
 class RHRegister(RH):
-    """Creates a new indico user.
+    """Create a new indico user.
 
     This handles two cases:
     - creation of a new user with a locally stored username and password
@@ -221,18 +272,19 @@ class RHRegister(RH):
                 return redirect(url_for('.login'))
             elif info['indico_user_id'] is not None or info['provider'] != self.provider_name:
                 # If we have a matching user id, we shouldn't be on the registration page
-                # If the provider doesn't match it would't be a big deal but the request doesn't make sense
+                # If the provider doesn't match it isn't a big deal but the request doesn't make sense
                 raise BadRequest
         elif not config.LOCAL_IDENTITIES:
             raise Forbidden('Local identities are disabled')
         elif not config.LOCAL_REGISTRATION:
             raise Forbidden('Local registration is disabled')
 
-    def _get_verified_email(self):
-        """Checks if there is an email verification token."""
-        try:
-            token = request.args['token']
-        except KeyError:
+    @use_kwargs({
+        'token': fields.String(load_default=None),
+    }, location='query')
+    def _get_verified_email(self, token):
+        """Check if there is an email verification token."""
+        if token is None:
             return None, None
         try:
             return secure_serializer.loads(token, max_age=3600, salt='register-email'), False
@@ -248,53 +300,63 @@ class RHRegister(RH):
         if verified_email is not None:
             handler.email_verified(verified_email)
             if prevalidated:
-                flash(_("You may change your email address after finishing the registration process."), 'info')
+                flash(_('You may change your email address after finishing the registration process.'), 'info')
             else:
-                flash(_('You have successfully validated your email address and can now proceeed with the '
+                flash(_('You have successfully validated your email address and can now proceed with the '
                         'registration.'), 'success')
             return redirect(url_for('.register', provider=self.provider_name))
 
-        form = handler.create_form()
-        if not handler.moderate_registrations and not handler.must_verify_email:
-            del form.comment
-        # Check for pending users if we have verified emails
-        pending = None
-        if not handler.must_verify_email:
-            pending = User.find_first(~User.is_deleted, User.is_pending,
-                                      User.all_emails.contains(db.func.any(list(handler.get_all_emails(form)))))
-        if form.validate_on_submit():
-            if handler.must_verify_email:
-                return self._send_confirmation(form.email.data)
-            elif handler.moderate_registrations:
-                return self._create_registration_request(form, handler)
-            else:
-                return self._create_user(form, handler)
-        elif not form.is_submitted() and pending:
-            # If we have a pending user, populate empty fields with data from that user
-            for field in form:
-                value = getattr(pending, field.short_name, '')
-                if value and not field.data:
-                    field.data = value
-        if pending:
-            flash(_("There is already some information in Indico that concerns you. "
-                    "We are going to link it automatically."), 'info')
-        return WPAuth.render_template('register.html', form=form, local=(not self.identity_info),
-                                      must_verify_email=handler.must_verify_email, widget_attrs=handler.widget_attrs,
-                                      email_sent=session.pop('register_verification_email_sent', False),
-                                      moderate_accounts=handler.moderate_registrations)
+        if handler.must_verify_email:
+            return self._process_verify(handler)
+
+        signup_config = handler.get_signup_config()
+        if request.method == 'POST':
+            if 'is_email_verification' not in request.form:
+                return self._process_post(handler)
+            elif request.form.get('email') != session.get('register_verified_email'):
+                # User somehow succeeded to trigger again the request to send verification email
+                # while the session is pending to a previously validated email
+                flash(_('Please finish or cancel your pending registration before attempting to register with '
+                        'another email address.'), 'warning')
+        return WPSignup.render_template('register.html', signup_config=signup_config)
+
+    def _process_verify(self, handler):
+        email_sent = session.pop('register_verification_email_sent', False)
+        form = handler.create_verify_email_form()
+        rate_limit_exceeded = not signup_rate_limiter.test()
+        if not email_sent and rate_limit_exceeded:
+            # tell users that they exceeded the rate limit, but NOT if they just
+            # used their last attempt successfully
+            retry_in = login_rate_limiter.get_reset_delay()
+            delay = format_human_timedelta(retry_in, 'minutes')
+            flash(_('Too many signup attempts. Please wait {}').format(delay), 'error')
+        if not rate_limit_exceeded and form.validate_on_submit():
+            signup_rate_limiter.hit()
+            return self._send_confirmation(form.email.data)
+        return WPSignup.render_template('register_verify.html', form=form, email_sent=email_sent)
+
+    def _process_post(self, handler):
+        data = handler.parse_request()
+        if handler.moderate_registrations:
+            rv = self._create_registration_request(data, handler)
+        else:
+            rv = self._create_user(data, handler)
+        return jsonify(redirect=rv.headers['Location'])
 
     def _send_confirmation(self, email):
         session['register_verification_email_sent'] = True
         return _send_confirmation(email, 'register-email', '.register', 'auth/emails/register_verify_email.txt',
-                                  url_args={'provider': self.provider_name})
+                                  url_args={'provider': self.provider_name}, sensitive=False)
 
-    def _prepare_registration_data(self, form, handler):
-        email = form.email.data
-        extra_emails = handler.get_all_emails(form) - {email}
-        user_data = {k: v for k, v in form.data.viewitems() if k in {'first_name', 'last_name', 'affiliation',
-                                                                     'address', 'phone'}}
-        user_data.update(handler.get_extra_user_data(form))
-        identity_data = handler.get_identity_data(form)
+    def _prepare_registration_data(self, data, handler):
+        email = data['email']
+        extra_emails = handler.get_all_emails(data) - {email}
+        user_data = {k: v for k, v in data.items()
+                     if k in {'first_name', 'last_name', 'affiliation', 'affiliation_link', 'address', 'phone'}}
+        user_data.update(handler.get_extra_user_data(data))
+        if data.pop('accept_terms', False):
+            user_data['accepted_terms_dt'] = now_utc()
+        identity_data = handler.get_identity_data(data)
         settings = {
             'timezone': config.DEFAULT_TIMEZONE if session.timezone == 'LOCAL' else session.timezone,
             'lang': session.lang or config.DEFAULT_LOCALE
@@ -302,11 +364,17 @@ class RHRegister(RH):
         return {'email': email, 'extra_emails': extra_emails, 'user_data': user_data, 'identity_data': identity_data,
                 'settings': settings}
 
-    def _create_registration_request(self, form, handler):
-        registration_data = self._prepare_registration_data(form, handler)
+    def _create_registration_request(self, data, handler):
+        registration_data = self._prepare_registration_data(data, handler)
         email = registration_data['email']
-        req = RegistrationRequest.find_first(email=email) or RegistrationRequest(email=email)
-        req.comment = form.comment.data
+        req = RegistrationRequest.query.filter_by(email=email).first() or RegistrationRequest(email=email)
+        req.comment = data['comment']
+        if accepted_terms_dt := registration_data['user_data'].pop('accepted_terms_dt', None):
+            registration_data['user_data']['accepted_terms_dt'] = accepted_terms_dt.isoformat()
+        if aff_link := registration_data['user_data'].pop('affiliation_link', None):
+            db.session.add(aff_link)  # in case it's newly created
+            db.session.flush()
+            registration_data['user_data']['affiliation_id'] = aff_link.id
         req.populate_from_dict(registration_data)
         db.session.add(req)
         db.session.flush()
@@ -315,10 +383,10 @@ class RHRegister(RH):
               'success')
         return handler.redirect_success()
 
-    def _create_user(self, form, handler):
-        user, identity = register_user(**self._prepare_registration_data(form, handler))
+    def _create_user(self, data, handler):
+        user, identity = register_user(**self._prepare_registration_data(data, handler))
         login_user(user, identity)
-        msg = _('You have sucessfully registered your Indico profile. '
+        msg = _('You have successfully registered your Indico profile. '
                 'Check <a href="{url}">your profile</a> for further details and settings.')
         flash(Markup(msg).format(url=url_for('users.user_profile')), 'success')
         db.session.flush()
@@ -326,28 +394,38 @@ class RHRegister(RH):
 
 
 class RHAccounts(RHUserBase):
-    """Displays user accounts"""
+    """Display user accounts."""
 
     def _create_form(self):
         if self.user.local_identity:
             defaults = FormDefaults(username=self.user.local_identity.identifier)
             local_account_form = EditLocalIdentityForm(identity=self.user.local_identity, obj=defaults)
         else:
-            local_account_form = AddLocalIdentityForm()
+            local_account_form = AddLocalIdentityForm(user_emails=self.user.all_emails)
         return local_account_form
 
     def _handle_add_local_account(self, form):
-        identity = Identity(provider='indico', identifier=form.data['username'], password=form.data['password'])
+        identifier = form.username.data if config.LOCAL_USERNAMES else str(uuid4())  # uuid to have something unique
+        identity = Identity(provider='indico', identifier=identifier, password=form.password.data)
         self.user.identities.add(identity)
-        flash(_("Local account added successfully"), 'success')
+        self.user.log(UserLogRealm.user, LogKind.positive, 'Accounts', 'Local account created', session.user,
+                      data={'Identifier': identifier})
+        logger.info('User %s added a local account (%s)', self.user, identity.identifier)
+        flash(_('Local account added successfully'), 'success')
 
     def _handle_edit_local_account(self, form):
-        self.user.local_identity.identifier = form.data['username']
+        if config.LOCAL_USERNAMES:
+            self.user.local_identity.identifier = form.username.data
         if form.data['new_password']:
-            self.user.local_identity.password = form.data['new_password']
-        flash(_("Your local account credentials have been updated successfully"), 'success')
+            self.user.local_identity.password = form.new_password.data
+            session.pop('insecure_password_error', None)
+            logger.info('User %s (%s) changed their password', self.user, self.user.local_identity.identifier)
+            self.user.log(UserLogRealm.user, LogKind.change, 'Accounts', 'Password changed', session.user)
+        flash(_('Your local account credentials have been updated successfully'), 'success')
 
     def _process(self):
+        insecure_login_password_error = session.get('insecure_password_error')
+
         form = self._create_form()
         if form.validate_on_submit():
             if isinstance(form, AddLocalIdentityForm):
@@ -355,19 +433,20 @@ class RHAccounts(RHUserBase):
             elif isinstance(form, EditLocalIdentityForm):
                 self._handle_edit_local_account(form)
             return redirect(url_for('auth.accounts'))
-        provider_titles = {name: provider.title for name, provider in multipass.identity_providers.iteritems()}
+        provider_titles = {name: provider.title for name, provider in multipass.identity_providers.items()}
         return WPAuthUser.render_template('accounts.html', 'accounts',
-                                          form=form, user=self.user, provider_titles=provider_titles)
+                                          form=form, user=self.user, provider_titles=provider_titles,
+                                          insecure_login_password_error=insecure_login_password_error)
 
 
 class RHRemoveAccount(RHUserBase):
-    """Removes an identity linked to a user"""
+    """Remove an identity linked to a user."""
 
     def _process_args(self):
         RHUserBase._process_args(self)
-        self.identity = Identity.get_one(request.view_args['identity'])
+        self.identity = Identity.get_or_404(request.view_args['identity'])
         if self.identity.user != self.user:
-            raise NotFound()
+            raise NotFound
 
     def _process(self):
         if session.get('login_identity') == self.identity.id:
@@ -379,37 +458,107 @@ class RHRemoveAccount(RHUserBase):
             provider_title = multipass.identity_providers[self.identity.provider].title
         except KeyError:
             provider_title = self.identity.provider.title()
-        flash(_("{provider} ({identifier}) successfully removed from your accounts"
-              .format(provider=provider_title, identifier=self.identity.identifier)), 'success')
+        self.user.log(UserLogRealm.user, LogKind.negative, 'Accounts', 'External account removed', session.user,
+                      data={'Provider': provider_title, 'Identifier': self.identity.identifier})
+        flash(_('{provider} ({identifier}) successfully removed from your accounts')
+              .format(provider=provider_title, identifier=self.identity.identifier), 'success')
         return redirect(url_for('.accounts'))
 
 
-class RegistrationHandler(object):
-    form = None
-
+class RegistrationHandler:
     def __init__(self, rh):
         pass
+
+    def create_verify_email_form(self):
+        return RegistrationEmailForm()
 
     def email_verified(self, email):
         raise NotImplementedError
 
-    def get_form_defaults(self):
-        raise NotImplementedError
+    def get_pending_initial_data(self, emails):
+        pending = User.query.filter(~User.is_deleted, User.is_pending, User.all_emails.in_(emails)).first()
+        if not pending:
+            return {}
+        data = {
+            'first_name': pending.first_name,
+            'last_name': pending.last_name,
+            'affiliation': pending.affiliation,
+            'affiliation_data': {'id': pending.affiliation_id, 'text': pending.affiliation},
+        }
+        if pending.phone:
+            data['phone'] = pending.phone
+        if pending.address:
+            data['address'] = pending.address
+        return data
 
-    def create_form(self):
-        defaults = self.get_form_defaults()
-        if self.must_verify_email:
-            # We don't bother with multiple emails here. The case that the provider sends more
-            # than one email AND those emails are untrusted is so low it's simply not worth it.
-            # The only drawback in that situation would be not showing the extra emails to the
-            # user...
-            return RegistrationEmailForm(obj=defaults)
-        else:
-            return self.form(obj=defaults)
+    def get_signup_config(self):
+        effective_date = legal_settings.get('terms_effective_date')
 
-    @property
-    def widget_attrs(self):
-        return {}
+        return {
+            'cancelURL': url_for_logout(),
+            'moderated': self.moderate_registrations,
+            'hasPredefinedAffiliations': Affiliation.query.has_rows(),
+            'allowCustomAffiliations': not user_management_settings.get('only_predefined_affiliations'),
+            'mandatoryFields': user_management_settings.get('mandatory_fields_account_request'),
+            'tosUrl': legal_settings.get('tos_url'),
+            'tos': legal_settings.get('tos'),
+            'privacyPolicyUrl': legal_settings.get('privacy_policy_url'),
+            'privacyPolicy': legal_settings.get('privacy_policy'),
+            'termsRequireAccept': legal_settings.get('terms_require_accept'),
+            'termsEffectiveDate': effective_date.isoformat() if effective_date else None,
+        }
+
+    def create_schema(self):
+        emails = self.get_all_emails()
+        mandatory_fields = user_management_settings.get('mandatory_fields_account_request')
+
+        class SignupSchema(mm.Schema):
+            class Meta:
+                unknown = RAISE
+
+            email = fields.String(required=True, validate=validate.OneOf(emails))
+            first_name = fields.String(required=True, validate=[not_empty, validate.Length(max=250)])
+            last_name = fields.String(required=True, validate=[not_empty, validate.Length(max=250)])
+            address = fields.String(load_default='', validate=validate.Length(max=500))
+            if self.moderate_registrations and 'affiliation' in mandatory_fields:
+                affiliation = fields.String(required=True, validate=[not_empty, validate.Length(max=250)])
+            else:
+                affiliation = fields.String(load_default='', validate=validate.Length(max=250))
+            phone = fields.String(load_default='', validate=validate.Length(max=100))
+            affiliation_link = ModelField(Affiliation, data_key='affiliation_id', load_default=None)
+
+            if legal_settings.get('terms_require_accept'):
+                accept_terms = fields.Bool(required=True, validate=not_empty)
+
+            if self.moderate_registrations:
+                if 'comment' in mandatory_fields:
+                    comment = fields.String(required=True, validate=not_empty)
+                else:
+                    comment = fields.String(load_default='')
+
+            @post_load
+            def ensure_affiliation_text(self, data, **kwargs):
+                if affiliation_link := data.get('affiliation_link'):
+                    data['affiliation'] = affiliation_link.name
+                elif 'affiliation' in data:
+                    data['affiliation_link'] = None
+                return data
+
+            @validates('email')
+            def check_email_unique(self, email, **kwargs):
+                if User.query.filter(~User.is_deleted, ~User.is_pending, User.all_emails == email).has_rows():
+                    raise ValidationError('Email already in use')
+
+            @validates_schema(skip_on_field_errors=True)
+            def check_restricted_affiliation(self, data, **kwargs):
+                restricted = user_management_settings.get('only_predefined_affiliations')
+                if restricted and data['affiliation'] and not data['affiliation_link']:
+                    raise ValidationError('Custom affiliations are not allowed', field_name='affiliation_data')
+
+        return SignupSchema
+
+    def parse_request(self):
+        return parser.parse(self.create_schema())
 
     @property
     def must_verify_email(self):
@@ -419,17 +568,17 @@ class RegistrationHandler(object):
     def moderate_registrations(self):
         return False
 
-    def get_all_emails(self, form):
+    def get_all_emails(self, data=None):
         # All (verified!) emails that should be set on the user.
         # This MUST include the primary email from the form if available.
         # Any additional emails will be set as secondary emails
         # The emails returned here are used to check for pending users
-        return {form.email.data} if form.validate_on_submit() else set()
+        return {data['email']} if data and data.get('email') else set()
 
-    def get_identity_data(self, form):
+    def get_identity_data(self, data):
         raise NotImplementedError
 
-    def get_extra_user_data(self, form):
+    def get_extra_user_data(self, data):
         return {}
 
     def redirect_success(self):
@@ -445,31 +594,113 @@ class MultipassRegistrationHandler(RegistrationHandler):
         # If the multipass login came from the provider that's used for synchronization
         return multipass.sync_provider and multipass.sync_provider.name == self.identity_info['provider']
 
+    def create_verify_email_form(self):
+        if email := self.identity_info['data'].get('email'):
+            return RegistrationEmailForm(email=email)
+        return super().create_verify_email_form()
+
     def email_verified(self, email):
         session['login_identity_info']['data']['email'] = email
         session['login_identity_info']['email_verified'] = True
         session.modified = True
 
-    def get_form_defaults(self):
-        return FormDefaults(self.identity_info['data'])
+    def get_signup_config(self):
+        base_signup_config = super().get_signup_config()
 
-    def create_form(self):
-        form = super(MultipassRegistrationHandler, self).create_form()
-        # We only want the phone/address fields if the provider gave us data for it
-        for field in {'address', 'phone'}:
-            if field in form and not self.identity_info['data'].get(field):
-                delattr(form, field)
-        emails = self.identity_info['data'].getlist('email')
-        form.email.choices = zip(emails, emails)
-        return form
-
-    def form(self, **kwargs):
+        emails = sorted(set(self.identity_info['data'].getlist('email')))
+        initial_values = {
+            'email': emails[0] if emails else '',
+            'synced_fields': [],
+            'affiliation_data': {'id': None, 'text': ''}
+        }
+        affiliation_meta = None
+        pending_data = self.get_pending_initial_data(emails)
         if self.from_sync_provider:
-            synced_values = {k: v or '' for k, v in self.identity_info['data'].iteritems()}
-            return MultipassRegistrationForm(synced_fields=multipass.synced_fields, synced_values=synced_values,
-                                             **kwargs)
+            synced_fields = set(multipass.synced_fields)
+            synced_values = {k: v or '' for k, v in self.identity_info['data'].items() if k in synced_fields}
+            required_empty_fields = {x for x in ('first_name', 'last_name') if not synced_values.get(x)}
+            initial_values['synced_fields'] = sorted(multipass.synced_fields - required_empty_fields)
+            initial_values.update(synced_values)
+            if affiliation_data := self.identity_info['data'].get('affiliation_data'):
+                affiliation_meta = affiliation_data | {'id': -1}
+                initial_values['affiliation_data'] = {'id': -1, 'text': affiliation_data['name']}
+                if 'affiliation' in synced_fields:
+                    synced_values['affiliation_id'] = -1
+            initial_values.update((k, v) for k, v in pending_data.items()
+                                  if k not in synced_fields and k not in initial_values)
+            locked_fields = list(multipass.locked_fields - required_empty_fields)
         else:
-            return MultipassRegistrationForm(**kwargs)
+            synced_values = {}
+            allowed_fields = {'first_name', 'last_name', 'affiliation', 'phone', 'address'}
+            multipass_data = {k: v for k, v in self.identity_info['data'].items() if k in allowed_fields and v}
+            initial_values.update(pending_data or multipass_data)
+            locked_fields = []
+
+        return {
+            **base_signup_config,
+            'initialValues': initial_values,
+            'showAccountForm': False,
+            'syncedValues': synced_values,
+            'emails': emails,
+            'affiliationMeta': affiliation_meta,
+            'hasPendingUser': bool(pending_data),
+            'lockedFields': locked_fields,
+            'lockedFieldMessage': multipass.locked_field_message,
+        }
+
+    def create_schema(self):
+        class MultipassSignupSchema(super().create_schema()):
+            synced_fields = fields.List(fields.String(validate=validate.OneOf(multipass.synced_fields)), required=True)
+
+            @pre_load
+            def fix_affiliation_id(self, data, **kwargs):
+                if data.get('affiliation_id') == -1:
+                    self.context['use_default_affiliation_link'] = True
+                    del data['affiliation_id']
+                return data
+
+            @post_load
+            def pass_default_affiliation(self, data, **kwargs):
+                if self.context.get('use_default_affiliation_link'):
+                    data['use_default_affiliation_link'] = True
+                return data
+
+            @post_load
+            def remove_synced_data(self, data, **kwargs):
+                for field in data['synced_fields']:
+                    if field == 'email':
+                        continue
+                    if field == 'affiliation':
+                        del data['affiliation_link']
+                    del data[field]
+                return data
+
+            @validates_schema(skip_on_field_errors=True)
+            def validate_everything(self, data, **kwargs):
+                if 'first_name' not in data['synced_fields'] and not data['first_name']:
+                    raise ValidationError(_('This field cannot be empty.'), 'first_name')
+                if 'last_name' not in data['synced_fields'] and not data['last_name']:
+                    raise ValidationError(_('This field cannot be empty.'), 'last_name')
+
+        return MultipassSignupSchema
+
+    def parse_request(self):
+        def _must_force_sync(field):
+            if field not in ('first_name', 'last_name'):
+                return True
+            return self.identity_info['data'].get(field)
+        data = super().parse_request()
+        data['synced_fields'] += [f for f in multipass.locked_fields
+                                  if f not in data['synced_fields'] and _must_force_sync(f)]
+        for field in data['synced_fields']:
+            data[field] = self.identity_info['data'][field] or ''
+        if (
+            data.pop('use_default_affiliation_link', False) and
+            (aff_data := self.identity_info['data'].get('affiliation_data'))
+        ):
+            data['affiliation_link'] = Affiliation.get_or_create_from_data(aff_data)
+            data['affiliation'] = data['affiliation_link'].name
+        return data
 
     @property
     def must_verify_email(self):
@@ -479,36 +710,77 @@ class MultipassRegistrationHandler(RegistrationHandler):
     def moderate_registrations(self):
         return self.identity_info['moderated']
 
-    def get_all_emails(self, form):
-        emails = super(MultipassRegistrationHandler, self).get_all_emails(form)
+    def get_all_emails(self, data=None):
+        emails = super().get_all_emails(data)
         return emails | set(self.identity_info['data'].getlist('email'))
 
-    def get_identity_data(self, form):
+    def get_identity_data(self, data):
         del session['login_identity_info']
         return {'provider': self.identity_info['provider'], 'identifier': self.identity_info['identifier'],
                 'data': self.identity_info['data'], 'multipass_data': self.identity_info['multipass_data']}
 
-    def get_extra_user_data(self, form):
-        data = super(MultipassRegistrationHandler, self).get_extra_user_data(form)
+    def get_extra_user_data(self, data):
+        extra_data = super().get_extra_user_data(data)
         if self.from_sync_provider:
-            data['synced_fields'] = form.synced_fields | {field for field in multipass.synced_fields
-                                                          if field not in form}
-        return data
+            extra_data['synced_fields'] = sorted(
+                set(data.get('synced_fields', ())) | (multipass.synced_fields - set(data))
+            )
+        return extra_data
 
     def redirect_success(self):
         return multipass.redirect_success()
 
 
 class LocalRegistrationHandler(RegistrationHandler):
-    form = LocalRegistrationForm
+    @use_kwargs({
+        'next_url': fields.String(load_default=None, data_key='next'),
+    }, location='query')
+    def __init__(self, rh, next_url):
+        if next_url and multipass.validate_next_url(next_url):
+            session['register_next_url'] = next_url
 
-    def __init__(self, rh):
-        if 'next' in request.args:
-            session['register_next_url'] = request.args['next']
+    def get_signup_config(self):
+        base_signup_config = super().get_signup_config()
+        email = session['register_verified_email']
+        initial_values = {'email': email, 'affiliation_data': {'id': None, 'text': ''}}
+        pending_data = self.get_pending_initial_data([email])
+        initial_values.update(pending_data)
+        return {
+            **base_signup_config,
+            'initialValues': initial_values,
+            'showAccountForm': True,
+            'showUsernameField': config.LOCAL_USERNAMES,
+            'syncedValues': {},
+            'emails': [email],
+            'hasPendingUser': bool(pending_data),
+        }
 
-    @property
-    def widget_attrs(self):
-        return {'email': {'disabled': not self.must_verify_email}}
+    def create_schema(self):
+        class LocalSignupSchema(super().create_schema()):
+            first_name = fields.String(required=True, validate=[not_empty, validate.Length(max=250)])
+            last_name = fields.String(required=True, validate=[not_empty, validate.Length(max=250)])
+            if config.LOCAL_USERNAMES:
+                username = LowercaseString(required=True, validate=[not_empty, validate.Length(max=100)])
+            password = fields.String(required=True, validate=[not_empty, validate.Length(max=100)])
+
+            if config.LOCAL_USERNAMES:
+                @validates('username')
+                def validate_username(self, username, **kwargs):
+                    if Identity.query.filter_by(provider='indico', identifier=username).has_rows():
+                        raise ValidationError(_('This username is already in use.'))
+                    if validate_email(username, check_dns=False):
+                        raise ValidationError(_('Your username cannot be an email address.'))
+
+            @validates_schema(skip_on_field_errors=False)
+            def validate_password(self, data, **kwargs):
+                if 'password' not in data:
+                    return
+                if error := validate_secure_password('set-user-password', data['password'],
+                                                     username=data.get('username', ''),
+                                                     emails={session['register_verified_email']}):
+                    raise ValidationError(error, 'password')
+
+        return LocalSignupSchema
 
     @property
     def must_verify_email(self):
@@ -518,8 +790,8 @@ class LocalRegistrationHandler(RegistrationHandler):
     def moderate_registrations(self):
         return config.LOCAL_MODERATION
 
-    def get_all_emails(self, form):
-        emails = super(LocalRegistrationHandler, self).get_all_emails(form)
+    def get_all_emails(self, data=None):
+        emails = super().get_all_emails(data)
         if not self.must_verify_email:
             emails.add(session['register_verified_email'])
         return emails
@@ -527,47 +799,37 @@ class LocalRegistrationHandler(RegistrationHandler):
     def email_verified(self, email):
         session['register_verified_email'] = email
 
-    def get_form_defaults(self):
-        email = session.get('register_verified_email')
-        existing_user_id = session.get('register_pending_user')
-        existing_user = User.get(existing_user_id) if existing_user_id else None
-        data = {'email': email}
-
-        if existing_user:
-            data.update(first_name=existing_user.first_name,
-                        last_name=existing_user.last_name,
-                        affiliation=existing_user.affiliation)
-
-        return FormDefaults(**data)
-
-    def create_form(self):
-        form = super(LocalRegistrationHandler, self).create_form()
-        if not self.must_verify_email:
-            form.email.data = session['register_verified_email']
-        return form
-
-    def get_identity_data(self, form):
+    def get_identity_data(self, data):
         del session['register_verified_email']
-        return {'provider': 'indico', 'identifier': form.username.data,
-                'password_hash': Identity.password.backend.hash(form.password.data)}
+        return {
+            'provider': 'indico',
+            'identifier': data['username'] if config.LOCAL_USERNAMES else str(uuid4()),
+            'password_hash': Identity.password.backend.create_hash(data['password']),
+        }
 
     def redirect_success(self):
         return redirect(session.pop('register_next_url', url_for_index()))
 
 
 class RHResetPassword(RH):
-    """Resets the password for a local identity."""
+    """Reset the password for a local identity."""
 
-    def _process_args(self):
+    @use_kwargs({
+        'token': fields.String(load_default=None),
+    }, location='query')
+    def _process_args(self, token):
+        self.token = token
         if not config.LOCAL_IDENTITIES:
             raise Forbidden('Local identities are disabled')
 
     def _process(self):
-        if 'token' in request.args:
-            identity_id = secure_serializer.loads(request.args['token'], max_age=3600, salt='reset-password')
-            identity = Identity.get(identity_id)
+        if self.token:
+            data = _load_secure_token(self.token, 'reset-password')
+            identity = Identity.get(data['id'])
             if not identity:
                 raise BadData('Identity does not exist')
+            elif crc32(identity.password_hash) != data['hash']:
+                raise BadData('Password already changed')
             return self._reset_password(identity)
         else:
             return self._request_token()
@@ -579,37 +841,97 @@ class RHResetPassword(RH):
             # The only case where someone would have more than one identity is after a merge.
             # And the worst case that can happen here is that we send the user a different
             # username than the one he expects. But he still gets back into his profile.
-            # Showing a list of usernames would be a little bit more user-friendly but less
-            # secure as we'd expose valid usernames for a specific user to an untrusted person.
-            identity = next(iter(user.local_identities))
-            _send_confirmation(form.email.data, 'reset-password', '.resetpass', 'auth/emails/reset_password.txt',
-                               {'user': user, 'username': identity.identifier}, data=identity.id)
+            alternatives = sorted([
+                {
+                    'name': provider.title,
+                    'identifier': identity.identifier,
+                    'last_login_dt': identity.last_login_dt,
+                }
+                for identity in user.external_identities
+                if (provider := multipass.identity_providers.get(identity.provider)) and identity.last_login_dt
+            ], key=itemgetter('last_login_dt'), reverse=True)
+            if identity := user.local_identity:
+                _send_confirmation(form.email.data, 'reset-password', '.resetpass', 'auth/emails/reset_password.txt',
+                                   {'user': user, 'username': identity.identifier, 'alternatives': alternatives},
+                                   data={'id': identity.id, 'hash': crc32(identity.password_hash)}, ttl=3600)
+            else:
+                _send_confirmation(form.email.data, 'create-local-identity', '.create_local_identity',
+                                   'auth/emails/create_local_identity.txt',
+                                   {'user': user, 'alternatives': alternatives}, data={'id': user.id}, ttl=3600)
+            user.log(UserLogRealm.user, LogKind.other, 'Accounts', 'Password reset requested',
+                     data={'IP': request.remote_addr})
             session['resetpass_email_sent'] = True
+            logger.info('Password reset requested for user %s', user)
             return redirect(url_for('.resetpass'))
         return WPAuth.render_template('reset_password.html', form=form, identity=None, widget_attrs={},
                                       email_sent=session.pop('resetpass_email_sent', False))
 
     def _reset_password(self, identity):
-        form = ResetPasswordForm()
+        form = ResetPasswordForm(user_emails=identity.user.all_emails)
         if form.validate_on_submit():
             identity.password = form.password.data
-            flash(_("Your password has been changed successfully."), 'success')
+            token_store.delete(self.token)
+            flash(_('Your password has been changed successfully.'), 'success')
             login_user(identity.user, identity)
+            identity.user.log(UserLogRealm.user, LogKind.change, 'Accounts', 'Password reset', session.user,
+                              data={'IP': request.remote_addr})
+            logger.info('Password reset confirmed for user %s', identity.user)
             # We usually come here from a multipass login page so we should have a target url
             return multipass.redirect_success()
-        form.username.data = identity.identifier
-        return WPAuth.render_template('reset_password.html', form=form, identity=identity,
+        if config.LOCAL_USERNAMES:
+            form.username.data = identity.identifier
+        return WPAuth.render_template('reset_password.html', form=form, identity=identity, email_sent=False,
                                       widget_attrs={'username': {'disabled': True}})
+
+
+class RHCreateLocalIdentity(RH):
+    """Create a new local identity from a password reset email."""
+
+    @use_kwargs({
+        'token': fields.String(load_default=None),
+    }, location='query')
+    def _process_args(self, token):
+        self.token = token
+        if not config.LOCAL_IDENTITIES:
+            raise Forbidden('Local identities are disabled')
+
+    def _process(self):
+        if not self.token:
+            return redirect(url_for('.resetpass'))
+        data = _load_secure_token(self.token, 'create-local-identity')
+        user = User.get(data['id'], is_deleted=False)
+        if not user:
+            raise BadData('User does not exist')
+        elif user.local_identity:
+            raise BadData('User already has a local identity')
+        return self._create_local_identity(user)
+
+    def _create_local_identity(self, user):
+        form = AddLocalIdentityForm(user_emails=user.all_emails)
+        if form.validate_on_submit():
+            identifier = form.username.data if config.LOCAL_USERNAMES else str(uuid4())  # uuid to have something unique
+            identity = Identity(provider='indico', identifier=identifier, password=form.password.data)
+            user.identities.add(identity)
+            token_store.delete(self.token)
+            flash(_('Local account added successfully'), 'success')
+            login_user(identity.user, identity)
+            user.log(UserLogRealm.user, LogKind.positive, 'Accounts', 'Local account created (password reset)',
+                     session.user, data={'Identifier': identifier, 'IP': request.remote_addr})
+            logger.info('Password reset confirmed for user %s; local identity created', user)
+            # We usually come here from a multipass login page so we should have a target url
+            return multipass.redirect_success()
+
+        return WPAuth.render_template('create_local_identity.html', form=form, user=user)
 
 
 class RHAdminImpersonate(RHAdminBase):
     @use_kwargs({
-        'undo': fields.Bool(missing=False),
-        'user_id': fields.Int(missing=None)
+        'undo': fields.Bool(load_default=False),
+        'user_id': fields.Int(load_default=None)
     })
     def _process_args(self, undo, user_id):
         RHAdminBase._process_args(self)
-        self.user = None if undo else User.get_one(user_id, is_deleted=False)
+        self.user = None if undo else User.get_or_404(user_id, is_deleted=False)
 
     def _check_access(self):
         if self.user:

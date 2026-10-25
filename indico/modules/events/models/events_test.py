@@ -1,30 +1,22 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
+import pytz
+from flask import session
 
 from indico.core.db.sqlalchemy.protection import ProtectionMode
 from indico.modules.events import Event
 from indico.modules.events.contributions import Contribution
 from indico.modules.events.contributions.models.subcontributions import SubContribution
 from indico.modules.events.sessions import Session
+from indico.util.i18n import get_current_locale
 
 
 def test_deleted_relationships(db, dummy_event):
@@ -71,7 +63,7 @@ def test_modify_relationship_with_deleted(db, dummy_event):
     # this should hard-delete c but not touch cd since it's not in the relationship
     event.contributions = [c2]
     db.session.flush()
-    assert set(Contribution.find_all()) == {cd, c2}
+    assert set(Contribution.query) == {cd, c2}
 
 
 @pytest.mark.parametrize(('category_pm', 'event_pm', 'effective_pm'), (
@@ -86,3 +78,101 @@ def test_effective_protection_mode(db, dummy_category, dummy_event, category_pm,
     dummy_event.protection_mode = event_pm
     db.session.flush()
     assert dummy_event.effective_protection_mode == effective_pm
+
+
+@pytest.mark.parametrize('tz', ('UTC', 'Europe/Zurich'))
+@pytest.mark.parametrize(('start_dt', 'end_dt', 'days'), (
+    (datetime(2019, 8, 16, 10, 0), datetime(2019, 8, 16, 15, 0), [date(2019, 8, 16)]),
+    (datetime(2019, 8, 16, 10, 0), datetime(2019, 8, 17, 15, 0), [date(2019, 8, 16), date(2019, 8, 17)]),
+    (datetime(2019, 8, 16, 10, 0), datetime(2019, 8, 17, 8, 0), [date(2019, 8, 16), date(2019, 8, 17)]),
+    (datetime(2019, 8, 16, 0, 0), datetime(2019, 8, 17, 0, 0), [date(2019, 8, 16), date(2019, 8, 17)]),
+    (datetime(2020, 9, 24, 12, 0), datetime(2020, 9, 25, 14, 0), [date(2020, 9, 24), date(2020, 9, 25)]),
+))
+def test_iter_days(dummy_event, tz, start_dt, end_dt, days):
+    tzinfo = pytz.timezone(tz)
+    dummy_event.start_dt = tzinfo.localize(start_dt)
+    dummy_event.end_dt = tzinfo.localize(end_dt)
+    assert list(dummy_event.iter_days()) == days
+
+
+@pytest.mark.parametrize('tz', ('UTC', 'Europe/Zurich'))
+@pytest.mark.parametrize(('start_time', 'end_time'), (
+    (time(0), time(0)),
+    (time(1), time(1)),
+    (time(1), time(2)),
+    (time(2), time(2)),
+    (time(12), time(14)),
+    (time(22), time(22)),
+    (time(22), time(23)),
+    (time(23), time(23)),
+))
+@pytest.mark.parametrize(('start_date', 'end_date', 'days'), (
+    # no dst change
+    (date(2020, 9, 24), date(2020, 9, 25), [date(2020, 9, 24), date(2020, 9, 25)]),
+    # one dst change (UTC+1 to UTC+2)
+    (date(2020, 3, 28), date(2020, 3, 29), [date(2020, 3, 28), date(2020, 3, 29)]),
+    # one dst change (UTC+2 to UTC+1)
+    (date(2020, 10, 24), date(2020, 10, 25), [date(2020, 10, 24), date(2020, 10, 25)]),
+    # two dst changes
+    (date(2020, 10, 24), date(2021, 3, 30), [date(2020, 10, 24), date(2021, 3, 30)]),
+))
+def test_iter_days_dst(dummy_event, tz, start_time, end_time, start_date, end_date, days):
+    start_dt = datetime.combine(start_date, start_time)
+    end_dt = datetime.combine(end_date, end_time)
+    tzinfo = pytz.timezone(tz)
+    dummy_event.start_dt = tzinfo.localize(start_dt)
+    dummy_event.end_dt = tzinfo.localize(end_dt)
+    all_days = list(dummy_event.iter_days())
+    assert all_days[0] == days[0]
+    assert all_days[-1] == days[-1]
+
+
+@pytest.mark.parametrize(('supported_locales', 'default_locale', 'enforce', 'user_lang', 'force_language', 'locale'), (
+    # Test with user who has force_language setting enabled
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', True, 'fr_FR', True, 'fr_FR'),
+    # Test with user who has force_language setting disabled and supported language
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', True, 'en_US', False, 'en_US'),
+    # Test with user who has force_language setting disabled and unsupported language
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', True, 'fr_FR', False, 'de_DE'),
+    # Test with enforcing disabled
+    # Test with user who has force_language setting enabled
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', False, 'fr_FR', True, None),
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', False, 'en_US', False, None),
+    (['en_US', 'en_GB', 'de_DE'], 'de_DE', False, 'fr_FR', False, None),
+
+))
+def test_force_event_locale(dummy_event, dummy_user, supported_locales, default_locale, enforce, user_lang,
+                            force_language, locale):
+    dummy_event.supported_locales = supported_locales
+    dummy_event.default_locale = default_locale
+    dummy_event.enforce_locale = enforce
+    dummy_user.settings.set('lang', user_lang)
+    dummy_user.settings.set('force_language', force_language)
+
+    assert dummy_event.get_forced_event_locale(dummy_user) == locale
+    with dummy_event.force_event_locale(dummy_user):
+        assert str(get_current_locale()) == ('en_GB' if not enforce else locale)
+
+    # Test without a user
+    assert dummy_event.get_forced_event_locale() == (default_locale if enforce else None)
+    with dummy_event.force_event_locale():
+        assert str(get_current_locale()) == default_locale
+
+
+@pytest.mark.usefixtures('request_context')
+def test_force_event_locale_fallback(dummy_event):
+    session.lang = 'de_DE'
+    # no locale set
+    with dummy_event.force_event_locale():
+        assert str(get_current_locale()) == 'en_GB'
+    # no locale set, but session allowed
+    with dummy_event.force_event_locale(allow_session=True):
+        assert str(get_current_locale()) == 'de_DE'
+    # event locale set (but not globally enforced)
+    dummy_event.default_locale = 'fr_FR'
+    with dummy_event.force_event_locale():
+        assert str(get_current_locale()) == 'fr_FR'
+    # event locale set (but not globally enforced, and session allowed)
+    dummy_event.default_locale = 'fr_FR'
+    with dummy_event.force_event_locale(allow_session=True):
+        assert str(get_current_locale()) == 'de_DE'

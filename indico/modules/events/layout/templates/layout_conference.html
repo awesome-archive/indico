@@ -9,10 +9,11 @@
 {%- block content %}
     {% call simple_form(form, save_reminder=true, back_button=false) %}
         {% call form_fieldset(_('General')) %}
-            {{ form_rows(form, fields=('is_searchable', 'show_nav_bar', 'show_banner', 'show_social_badges')) }}
+            {{ form_rows(form, fields=('is_searchable', 'show_nav_bar', 'show_banner', 'show_social_badges',
+                                       'name_format', 'show_vc_rooms')) }}
         {% endcall %}
         {% call form_fieldset(_('Header Style')) %}
-            {{ form_rows(form, fields=('header_text_color', 'header_background_color')) }}
+            {{ form_rows(form, fields=('header_text_color', 'header_background_color', 'header_logo_as_banner')) }}
         {% endcall %}
         {% call form_fieldset(_('Announcement')) %}
             {{ form_rows(form, fields=('announcement', 'show_announcement')) }}
@@ -31,6 +32,14 @@
                     {%- trans %}Preview{% endtrans -%}
                 </a>
             {% endcall %}
+            <div class="form-group">
+                <div class="form-label"></div>
+                <div class="form-field">
+                    <a href="{{ url_for('event_layout.view_stylesheet', event) }}" target="_blank" class="js-view-stylesheet-btn">
+                        {%- trans %}View current stylesheet{% endtrans -%}
+                    </a>
+                </div>
+            </div>
         {% endcall %}
     {% endcall %}
 
@@ -68,16 +77,37 @@
         </button>
     {% endcall %}
 
+    {% block after_forms %}{% endblock %}
+
     <script>
         $(document).ready(function() {
             'use strict';
 
+            function updateViewStylesheet(theme) {
+                if (theme !== '') {
+                    const stylesheetURL = build_url(
+                        {{ url_for('event_layout.view_stylesheet', event) | tojson }},
+                        {theme}
+                    );
+                    $('.js-view-stylesheet-btn').attr('href', stylesheetURL).show();
+                } else {
+                    $('.js-view-stylesheet-btn').hide();
+                }
+            }
+
             $('#theme').nullableselector({nullvalue: ''}).on('change', function() {
-                var previewURL = build_url({{ url_for('event_layout.css_preview', event) | tojson }}, {
-                    theme: $(this).val()
+                const $this = $(this);
+                const previewURL = build_url({{ url_for('event_layout.css_preview', event) | tojson }}, {
+                    theme: $this.val()
                 });
-                $(this).nextAll('.js-theme-preview-btn').attr('href', previewURL);
+                $this.nextAll('.js-theme-preview-btn').attr('href', previewURL);
+                updateViewStylesheet($this.val());
             }).trigger('change');
+
+            $('#use_custom_css').on('change', function () {
+                const useCustomCSS = $(this).prop('checked');
+                updateViewStylesheet(useCustomCSS ? '_custom' : $('#theme').val())
+            });
 
             function updateCustomCSS(hasFile) {
                 var useCustomCSS = $('#use_custom_css');

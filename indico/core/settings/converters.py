@@ -1,29 +1,23 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
-from __future__ import unicode_literals
-
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 import dateutil.parser
 import pytz
+from babel.dates import get_timezone
 from sqlalchemy import inspect
+from werkzeug.utils import cached_property
+
+from indico.core.config import config
+from indico.core.db import db
 
 
-class SettingConverter(object):
+class SettingConverter:
     """
     Implement a custom conversion between Python types and
     JSON-serializable types.
@@ -58,6 +52,25 @@ class DatetimeConverter(SettingConverter):
         return dateutil.parser.parse(value).astimezone(pytz.utc)
 
 
+class ServerDateConverter(SettingConverter):
+    """Convert an ISO 8601 date to/from a datetime in server timezone.
+
+    The datetime will be at midnight in the configured server timezone. The
+    python object going in should either be a date, or already have the correct
+    timezone.
+    """
+
+    @staticmethod
+    def from_python(value):
+        return value.strftime('%Y-%m-%d')
+
+    @staticmethod
+    def to_python(value):
+        dateval = date.fromisoformat(value)
+        server_tz = get_timezone(config.DEFAULT_TIMEZONE)
+        return datetime(year=dateval.year, month=dateval.month, day=dateval.day, tzinfo=server_tz)
+
+
 class TimedeltaConverter(SettingConverter):
     """Convert a timedelta object from/to seconds."""
 
@@ -87,12 +100,19 @@ class EnumConverter(SettingConverter):
 class ModelConverter(SettingConverter):
     """Convert a SQLAlchemy object from/to its PK.
 
-    :param model: A SQLAlchemy model with a single-column PK.
+    :param model: A SQLAlchemy model with a single-column PK or the name
+                  of a model (if importing the model would cause circular
+                  dependencies).
     """
 
     def __init__(self, model):
-        self.model = model
+        self._model = model
+
+    @cached_property
+    def model(self):
+        model = getattr(db.m, self._model) if isinstance(self._model, str) else self._model
         assert len(inspect(model).primary_key) == 1
+        return model
 
     def from_python(self, value):
         if value is None:
@@ -109,18 +129,29 @@ class ModelConverter(SettingConverter):
 class ModelListConverter(SettingConverter):
     """Convert a list of SQLAlchemy objects from/to a list of PKs.
 
-    :param model: A SQLAlchemy model with a single-column PK.
+    :param model: A SQLAlchemy model with a single-column PK or the name
+                  of a model (if importing the model would cause circular
+                  dependencies).
     :param collection_class: The collection to use for the python-side
                              value. Defaults to `list` but could also be
                              `set` for example.
     """
 
     def __init__(self, model, collection_class=list):
-        self.model = model
+        self._model = model
         self.collection_class = collection_class
-        pks = inspect(model).primary_key
+
+    @cached_property
+    def model(self):
+        if isinstance(self._model, str):
+            return getattr(db.m, self._model)
+        return self._model
+
+    @cached_property
+    def column(self):
+        pks = inspect(self.model).primary_key
         assert len(pks) == 1
-        self.column = pks[0]
+        return pks[0]
 
     def from_python(self, value):
         if not value:

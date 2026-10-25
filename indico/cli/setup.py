@@ -1,51 +1,41 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
+from importlib.metadata import entry_points
 from operator import attrgetter
+from pathlib import Path
 from smtplib import SMTP
+from urllib.parse import urlsplit
 
 import click
 from click import wrap_text
 from flask.helpers import get_root_path
-from pkg_resources import iter_entry_points
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from prompt_toolkit import prompt
-from prompt_toolkit.contrib.completers import PathCompleter, WordCompleter
-from prompt_toolkit.layout.lexers import SimpleLexer
-from prompt_toolkit.styles import style_from_dict
-from prompt_toolkit.token import Token
+from prompt_toolkit.completion import PathCompleter, WordCompleter
+from prompt_toolkit.styles import Style
 from pytz import all_timezones, common_timezones
 from redis import RedisError, StrictRedis
 from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 from terminaltables import AsciiTable
-from werkzeug.urls import url_parse
 
+import indico
+from indico.core.db.sqlalchemy.util.models import import_all_models
 from indico.util.console import cformat
 from indico.util.string import validate_email
-
-
-click.disable_unicode_literals_warning = True
 
 
 def _echo(msg=''):
@@ -89,25 +79,25 @@ def _get_dirs(target_dir):
     return get_root_path('indico'), os.path.abspath(target_dir)
 
 
-PROMPT_TOOLKIT_STYLE = style_from_dict({
-    Token.HELP: '#aaaaaa',
-    Token.PROMPT: '#5f87ff',
-    Token.DEFAULT: '#dfafff',
-    Token.BRACKET: '#ffffff',
-    Token.COLON: '#ffffff',
-    Token.INPUT: '#aaffaa',
+PROMPT_TOOLKIT_STYLE = Style.from_dict({
+    'help': '#aaaaaa',
+    'prompt': '#5f87ff',
+    'default': '#dfafff',
+    'bracket': '#ffffff',
+    'colon': '#ffffff',
+    '': '#aaffaa',  # user input
 })
 
 
 def _prompt(message, default='', path=False, list_=None, required=True, validate=None, allow_invalid=False,
             password=False, help=None):
-    def _get_prompt_tokens(cli):
+    def _get_prompt_tokens():
         rv = [
-            (Token.PROMPT, message),
-            (Token.COLON, ': '),
+            ('class:prompt', message),
+            ('class:colon', ': '),
         ]
         if first and help:
-            rv.insert(0, (Token.HELP, wrap_text(help) + '\n'))
+            rv.insert(0, ('class:help', wrap_text(help) + '\n'))
         return rv
 
     completer = None
@@ -122,8 +112,8 @@ def _prompt(message, default='', path=False, list_=None, required=True, validate
     first = True
     while True:
         try:
-            rv = prompt(get_prompt_tokens=_get_prompt_tokens, default=default, is_password=password,
-                        completer=completer, lexer=SimpleLexer(Token.INPUT), style=PROMPT_TOOLKIT_STYLE)
+            rv = prompt(_get_prompt_tokens(), default=default, is_password=password,
+                        completer=completer, style=PROMPT_TOOLKIT_STYLE)
         except (EOFError, KeyboardInterrupt):
             sys.exit(1)
         # pasting a multiline string works even with multiline disabled :(
@@ -144,22 +134,22 @@ def _prompt(message, default='', path=False, list_=None, required=True, validate
 
 
 def _confirm(message, default=False, abort=False, help=None):
-    def _get_prompt_tokens(cli):
+    def _get_prompt_tokens():
         rv = [
-            (Token.PROMPT, message),
-            (Token.BRACKET, ' ['),
-            (Token.DEFAULT, 'Y/n' if default else 'y/N'),
-            (Token.BRACKET, ']'),
-            (Token.COLON, ': '),
+            ('class:prompt', message),
+            ('class:bracket', ' ['),
+            ('class:default', 'Y/n' if default else 'y/N'),
+            ('class:bracket', ']'),
+            ('class:colon', ': '),
         ]
         if first and help:
-            rv.insert(0, (Token.HELP, wrap_text(help) + '\n'))
+            rv.insert(0, ('class:help', wrap_text(help) + '\n'))
         return rv
 
     first = True
     while True:
         try:
-            rv = prompt(get_prompt_tokens=_get_prompt_tokens, lexer=SimpleLexer(Token.INPUT),
+            rv = prompt(_get_prompt_tokens(),
                         completer=WordCompleter(['yes', 'no'], ignore_case=True, sentence=True),
                         style=PROMPT_TOOLKIT_STYLE)
         except (EOFError, KeyboardInterrupt):
@@ -183,14 +173,15 @@ def _confirm(message, default=False, abort=False, help=None):
 
 @click.group()
 def cli():
-    """This script helps with the initial steps of installing Indico"""
+    """This script helps with the initial steps of installing Indico."""
 
 
 @cli.command()
 def list_plugins():
-    """Lists the available indico plugins."""
+    """List the available Indico plugins."""
+    import_all_models()
     table_data = [['Name', 'Title']]
-    for ep in sorted(iter_entry_points('indico.plugins'), key=attrgetter('name')):
+    for ep in sorted(entry_points(group='indico.plugins'), key=attrgetter('name')):
         plugin = ep.load()
         table_data.append([ep.name, plugin.title])
     table = AsciiTable(table_data, cformat('%{white!}Available Plugins%{reset}'))
@@ -200,21 +191,21 @@ def list_plugins():
 @cli.command()
 @click.argument('target_dir')
 def create_symlinks(target_dir):
-    """Creates useful symlinks to run Indico from a webserver.
+    """Create useful symlinks to run Indico from a webserver.
 
     This lets you use static paths for the WSGI file and the htdocs
     folder so you do not need to update your webserver config when
     updating Indico.
     """
     root_dir, target_dir = _get_dirs(target_dir)
-    _link(os.path.join(root_dir, 'htdocs'), os.path.join(target_dir, 'htdocs'))
+    _link(os.path.join(root_dir, 'web', 'static'), os.path.join(target_dir, 'static'))
     _copy(os.path.join(root_dir, 'web', 'indico.wsgi'), os.path.join(target_dir, 'indico.wsgi'), force=True)
 
 
 @cli.command()
 @click.argument('target_dir')
 def create_logging_config(target_dir):
-    """Creates the default logging config file for Indico.
+    """Create the default logging config file for Indico.
 
     If a file already exists it is left untouched. This command is
     usually only used when doing a fresh indico installation when
@@ -225,13 +216,103 @@ def create_logging_config(target_dir):
 
 
 @cli.command()
+@click.option('--check', is_flag=True, help='Only check for updates but do not actually update.')
+@click.option('--no-pyenv-update', is_flag=True, help='Do not update pyenv')
+@click.option('--local', is_flag=True,
+              help='Set the local pyenv version instead of the global one. Do not use this in a standard Indico '
+                   'deployment; it is only meant for development where you do not have a dedicated indico user.')
+@click.option('--force-version',
+              help='Force using a custom python version, regardless of the preferred version this Indico version has. '
+                   'Only use this when explicitly asked to, either by a developer or in the upgrade instructions.')
+@click.option('--venv', required=True, metavar='PATH', envvar='VIRTUAL_ENV',
+              type=click.Path(exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+              help='The path of the Python venv; defaults to the active one.')
+def upgrade_python(check, no_pyenv_update, local, force_version, venv):
+    """Upgrade the Python version used in the Indico virtualenv.
+
+    When using `--check`, only Python versions currently available in pyenv will
+    be used; make sure to `pyenv update` first (this is done automatically when
+    you run this command without `--check`).
+
+    Be careful when using `--force-version` with a custom version; you may end up
+    using an unsupported version where this command will no longer work.
+    """
+    if not check and not no_pyenv_update:
+        click.echo('updating pyenv')
+        proc = subprocess.run(['pyenv', 'update'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if proc.returncode:
+            click.echo(proc.stdout)
+            click.confirm('pyenv update failed - continue anyway?', abort=True)
+
+    pyenv_mode = 'local' if local else 'global'
+    pyenv_version_list = subprocess.run(['pyenv', 'install', '--list'], capture_output=True,
+                                        encoding='utf-8').stdout.splitlines()
+    pyenv_versions = [Version(x) for line in pyenv_version_list
+                      if (x := line.strip()) and re.match(r'^\d+\.\d+\.\d+$', x)]
+    preferred_version_spec = SpecifierSet(indico.PREFERRED_PYTHON_VERSION_SPEC)
+    current_version = Version('.'.join(map(str, sys.version_info[:3])))
+
+    if force_version:
+        preferred_version = Version(force_version)
+        if preferred_version not in preferred_version_spec:
+            click.echo(f'Warning: {preferred_version} is not within {preferred_version_spec} spec')
+            click.confirm('Continue anyway?', abort=True)
+    else:
+        if not (available_versions := preferred_version_spec.filter(pyenv_versions)):
+            click.echo(f'Found no qualifying versions for {preferred_version_spec}')
+            sys.exit(1)
+        preferred_version = max(available_versions)
+
+    if current_version == preferred_version:
+        click.echo(f'Already running on preferred version ({preferred_version})')
+        sys.exit(0)
+
+    if (preferred_version.major, preferred_version.minor) != (current_version.major, current_version.minor):
+        old = f'{current_version.major}.{current_version.minor}'
+        new = f'{preferred_version.major}.{preferred_version.minor}'
+        click.echo(f'WARNING: You are upgrading from {old} to {new}. This upgrade CANNOT be done in-place.')
+        click.echo('You will need to `pip install indico` (and any other packages such as plugins)\n'
+                   'again after this upgrade! Do not perform this update, unless you are updating to\n'
+                   'a new major Indico release which is documented to require this Python version!')
+        click.confirm('Continue?', abort=True)
+
+    pyenv_local_version = Version(subprocess.run(['pyenv', 'version-name'], capture_output=True,
+                                                 encoding='utf-8').stdout.strip())
+    if pyenv_local_version != preferred_version:
+        click.echo(f'Currently selected version {pyenv_local_version} does not match '
+                   f'preferred version {preferred_version}')
+        if not check:
+            click.echo(f'Installing python {preferred_version} (may take some time)')
+            proc = subprocess.run(['pyenv', 'install', '--skip-existing', '--verbose', str(preferred_version)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if proc.returncode:
+                click.echo(proc.stdout)
+                click.echo(f'Installing python {preferred_version} update failed')
+                sys.exit(1)
+            click.echo(f'Setting {pyenv_mode} pyenv version to {preferred_version}')
+            subprocess.run(['pyenv', pyenv_mode, str(preferred_version)], check=True)
+        else:
+            click.echo(f'Would set {pyenv_mode} pyenv version to {preferred_version} (skipping due to --check)')
+
+    # Upgrade the virtualenv in-place
+    from . import python_upgrader
+    args = [venv]
+    if check:
+        args.append('--check')
+    # we need to run the upgrade script in an isolated environment to avoid any
+    # of the currently-installed packages or PYTHONPATH info leaking into the
+    # environment in case the venv builder needs to upgrade pip
+    subprocess.run([sys.executable, '-I', python_upgrader.__file__, *args], check=True)
+
+
+@cli.command()
 @click.option('--dev', is_flag=True)
 def wizard(dev):
-    """Runs a setup wizard to configure Indico from scratch."""
+    """Run a setup wizard to configure Indico from scratch."""
     SetupWizard().run(dev=dev)
 
 
-class SetupWizard(object):
+class SetupWizard:
     def __init__(self):
         self._missing_dirs = set()
         self.root_path = None
@@ -252,14 +333,15 @@ class SetupWizard(object):
         self.default_locale = None
         self.default_timezone = None
         self.rb_active = None
-        self.old_archive_dir = None
+        self.system_notices = True
+        self.public_user_search = None
 
     def run(self, dev):
         self._check_root()
         self._check_venv()
         self._prompt_root_path(dev=dev)
-        self.config_dir_path = (get_root_path('indico') if dev else os.path.join(self.root_path, 'etc'))
-        self.config_path = os.path.join(self.config_dir_path, 'indico.conf')
+        self.config_dir_path = Path(get_root_path('indico') if dev else os.path.join(self.root_path, 'etc'))
+        self.config_path = self.config_dir_path / 'indico.conf'
         self._check_configured()
         self._check_directories(dev=dev)
         self._prompt_indico_url(dev=dev)
@@ -269,8 +351,6 @@ class SetupWizard(object):
         self._prompt_smtp_data(dev=dev)
         self._prompt_defaults()
         self._prompt_misc()
-        if not dev:
-            self._prompt_migration()
         self._setup(dev=dev)
 
     def _check_root(self):
@@ -280,7 +360,7 @@ class SetupWizard(object):
             sys.exit(1)
 
     def _check_venv(self):
-        if not hasattr(sys, 'real_prefix'):
+        if sys.prefix == sys.base_prefix:
             _warn('It looks like you are not using a virtualenv. This is unsupported and strongly discouraged.')
             _prompt_abort()
 
@@ -293,29 +373,28 @@ class SetupWizard(object):
                 # we want to go up a level since the data dir should not be
                 # created inside the source directory
                 default_root = os.path.dirname(default_root)
-            default_root = default_root.decode(sys.getfilesystemencoding())
         else:
             default_root = '/opt/indico'
         self.root_path = _prompt('Indico root path', default=default_root, path=True,
                                  help='Enter the base directory where Indico will be installed.')
         # The root needs to exist (ideally created during `useradd`)
         if not os.path.isdir(self.root_path):
-            _error('The specified self.root_path path does not exist.')
+            _error('The specified root path path does not exist.')
             raise click.Abort
         # There is no harm in having the virtualenv somewhere else but it
         # is cleaner to keep everything within the root path
         if not sys.prefix.startswith(self.root_path + '/'):
-            _warn('It is recommended to have the virtualenv inside the root directory, e.g. {}/.venv'
-                  .format(self.root_path))
-            _warn('The virtualenv is currently located in {}'.format(sys.prefix))
+            _warn(f'It is recommended to have the virtualenv inside the root directory, e.g. {self.root_path}/.venv')
+            _warn(f'The virtualenv is currently located in {sys.prefix}')
             _prompt_abort()
         self.data_root_path = os.path.join(self.root_path, 'data') if dev else self.root_path
 
     def _check_configured(self):
         # Bail out early if indico is already configured
-        if os.path.exists(self.config_path):
-            _error('Config file already exists. If you really want to run this wizard again, delete {}'.format(
-                self.config_path))
+        if self.config_path.exists():
+            _error(
+                f'Config file already exists. If you really want to run this wizard again, delete {self.config_path}'
+            )
             raise click.Abort
 
     def _check_directories(self, dev=False):
@@ -342,11 +421,11 @@ class SetupWizard(object):
 
     def _prompt_indico_url(self, dev=False):
         def _check_url(url):
-            data = url_parse(url)
-            if not data.scheme or not data.host:
+            data = urlsplit(url)
+            if not data.scheme or not data.hostname:
                 _warn('Invalid URL: scheme/host missing')
                 return False
-            elif data.fragment or data.query or data.auth:
+            elif data.fragment or data.query or '@' in data.netloc:
                 _warn('Invalid URL: must not contain fragment, query string or username/password')
                 return False
             elif not dev and data.scheme != 'https':
@@ -354,10 +433,12 @@ class SetupWizard(object):
                 return False
             elif data.path not in ('', '/'):
                 _warn('It is recommended to run Indico on a subdomain instead of a subdirectory')
+                _warn('Unless you built your own indico package for the specified path, '
+                      'Indico will not work correctly!')
                 return False
             return True
 
-        default_url = ('http://127.0.0.1:8000' if dev else 'https://{}'.format(socket.getfqdn()))
+        default_url = ('http://127.0.0.1:8000' if dev else f'https://{socket.getfqdn()}')
         url = _prompt('Indico URL', validate=_check_url, allow_invalid=True,
                       default=default_url,
                       help='Indico needs to know the URL through which it is accessible. '
@@ -372,7 +453,7 @@ class SetupWizard(object):
                 engine.connect().close()
             except OperationalError as exc:
                 if not silent:
-                    _warn('Invalid database URI: ' + unicode(exc.orig).strip())
+                    _warn('Invalid database URI: ' + str(exc.orig).strip())
                 return False
             else:
                 return True
@@ -394,7 +475,7 @@ class SetupWizard(object):
             try:
                 client.ping()
             except RedisError as exc:
-                _warn('Invalid redis URI: ' + unicode(exc))
+                _warn('Invalid redis URI: ' + str(exc))
                 return False
             else:
                 return True
@@ -446,7 +527,7 @@ class SetupWizard(object):
             for host, port in candidates:
                 try:
                     SMTP(host, port, timeout=3).close()
-                except Exception:
+                except Exception:  # noqa: S112
                     continue
                 return host, port
             return '', ''
@@ -459,7 +540,7 @@ class SetupWizard(object):
                                 help=('Indico needs an SMTP server to send emails.' if first else None))
             if smtp_host != default_smtp_host:
                 default_smtp_port = _get_default_smtp(smtp_host)[1]
-            smtp_port = int(_prompt('SMTP port', default=unicode(default_smtp_port or 25)))
+            smtp_port = int(_prompt('SMTP port', default=str(default_smtp_port or 25)))
             smtp_user = _prompt('SMTP username', default=smtp_user, required=False,
                                 help=('If your SMTP server requires authentication, '
                                       'enter the username now.' if first else None))
@@ -474,7 +555,7 @@ class SetupWizard(object):
                     smtp.login(smtp_user, smtp_password)
                 smtp.quit()
             except Exception as exc:
-                _warn('SMTP connection failed: ' + unicode(exc))
+                _warn('SMTP connection failed: ' + str(exc))
                 if not click.confirm('Keep these settings anyway?'):
                     default_smtp_host = smtp_host
                     default_smtp_port = smtp_port
@@ -488,22 +569,24 @@ class SetupWizard(object):
     def _prompt_defaults(self):
         def _get_all_locales():
             # get all directories in indico/translations
-            return os.walk(os.path.join(get_root_path('indico'), 'translations')).next()[1]
+            root = Path(get_root_path('indico')) / 'translations'
+            return [ent.name for ent in root.iterdir() if ent.is_dir()]
 
         def _get_system_timezone():
             candidates = []
             # Get a timezone name directly
-            if os.path.isfile('/etc/timezone'):
-                with open('/etc/timezone') as f:
-                    candidates.append(f.read().strip())
+            etc_timezone = Path('/etc/timezone')
+            if etc_timezone.is_file():
+                candidates.append(etc_timezone.read_text().strip())
             # Get the timezone from the symlink
-            if os.path.islink('/etc/localtime'):
-                candidates.append(re.sub(r'.*/usr/share/zoneinfo/', '', os.readlink('/etc/localtime')))
+            etc_localtime = Path('/etc/localtime')
+            if etc_localtime.is_symlink():
+                candidates.append(re.sub(r'.*/usr/share/zoneinfo/', '', str(etc_localtime.readlink())))
             # We do not try to find a matching zoneinfo based on a checksum
             # as e.g. https://stackoverflow.com/a/12523283/298479 suggests
             # since this is ambiguous and we rather have the user type their
             # timezone if we don't have a very likely match.
-            return next((unicode(tz) for tz in candidates if tz in common_timezones), '')
+            return next((str(tz) for tz in candidates if tz in common_timezones), '')
 
         self.default_locale = _prompt('Default locale', default='en_GB', list_=_get_all_locales(),
                                       help='Specify the default language/locale used by Indico.')
@@ -517,73 +600,86 @@ class SetupWizard(object):
                                   help='Indico contains a room booking system. If you do not plan to maintain a list '
                                        'of rooms available in your organization in Indico and use it to book them, it '
                                        'is recommended to leave the room booking system disabled.')
-
-    def _prompt_migration(self):
-        def _check_path(path):
-            if os.path.exists(path):
-                return True
-            _warn('Directory does not exist')
-            return False
-
-        self.old_archive_dir = _prompt('Old archive dir', path=True, required=False, validate=_check_path,
-                                       allow_invalid=True,
-                                       help='If you are upgrading from Indico 1.2, please specify the path to the '
-                                            'ArchiveDir of the old indico version.  Leave this empty if you are not '
-                                            'upgrading.')
+        self.system_notices = _confirm('Enable system notices?', default=True,
+                                       help='Indico can show important system notices (e.g. about security issues) to '
+                                            'administrators. They are retrieved once a day without sending any data '
+                                            'related to your Indico instance. It is strongly recommended to enable '
+                                            'them.')
+        self.public_user_search = _confirm('Enable public user search?', default=True,
+                                            help='By default, authenticated users can search for other users by name, '
+                                                 'email address and affiliation, and see this data for users in their '
+                                                 'search results. This is usually expected in academic environments '
+                                                 'where the convenience of being able to find someone to add them as '
+                                                 'an abstract author is appreciated. In other environments, you may '
+                                                 'prefer the increased privacy of not revealing email addresses of '
+                                                 'users to other users, in which case you would need to disable this.\n'
+                                                 'Please see the documentation for details if you are unsure:\n'
+                                                 'https://docs.getindico.io/en/stable/config/settings/#ALLOW_PUBLIC_USER_SEARCH')
 
     def _setup(self, dev=False):
         storage_backends = {'default': 'fs:' + os.path.join(self.data_root_path, 'archive')}
-        if self.old_archive_dir:
-            storage_backends['legacy'] = 'fs-readonly:' + self.old_archive_dir
 
         config_link_path = os.path.expanduser('~/.indico.conf')
         if not dev:
             create_config_link = _confirm('Create symlink?', default=True,
-                                          help='By creating a symlink to indico.conf in {}, you can run '
-                                               'indico without having to set the INDICO_CONFIG '
-                                               'environment variable'.format(config_link_path))
+                                          help=f'By creating a symlink to indico.conf in {config_link_path}, you can '
+                                               'run indico without having to set the INDICO_CONFIG environment '
+                                               'variable')
         else:
             create_config_link = False
 
         config_data = [
-            b'# General settings',
-            b'SQLALCHEMY_DATABASE_URI = {!r}'.format(self.db_uri.encode('utf-8')),
-            b'SECRET_KEY = {!r}'.format(os.urandom(32)),
-            b'BASE_URL = {!r}'.format(self.indico_url.encode('utf-8')),
-            b'CELERY_BROKER = {!r}'.format(self.redis_uri_celery.encode('utf-8')),
-            b'REDIS_CACHE_URL = {!r}'.format(self.redis_uri_cache.encode('utf-8')),
-            b"CACHE_BACKEND = 'redis'",
-            b'DEFAULT_TIMEZONE = {!r}'.format(self.default_timezone.encode('utf-8')),
-            b'DEFAULT_LOCALE = {!r}'.format(self.default_locale.encode('utf-8')),
-            b'ENABLE_ROOMBOOKING = {!r}'.format(self.rb_active),
-            b'CACHE_DIR = {!r}'.format(os.path.join(self.data_root_path, 'cache').encode('utf-8')),
-            b'TEMP_DIR = {!r}'.format(os.path.join(self.data_root_path, 'tmp').encode('utf-8')),
-            b'LOG_DIR = {!r}'.format(os.path.join(self.data_root_path, 'log').encode('utf-8')),
-            b'STORAGE_BACKENDS = {!r}'.format({k.encode('utf-8'): v.encode('utf-8')
-                                              for k, v in storage_backends.iteritems()}),
-            b"ATTACHMENT_STORAGE = 'default'",
-            b'ROUTE_OLD_URLS = True' if self.old_archive_dir else None,
-            b'',
-            b'# Email settings',
-            b'SMTP_SERVER = {!r}'.format((self.smtp_host.encode('utf-8'), self.smtp_port)),
-            b'SMTP_USE_TLS = {!r}'.format(bool(self.smtp_user and self.smtp_password)),
-            b'SMTP_LOGIN = {!r}'.format(self.smtp_user.encode('utf-8')),
-            b'SMTP_PASSWORD = {!r}'.format(self.smtp_password.encode('utf-8')),
-            b'SUPPORT_EMAIL = {!r}'.format(self.admin_email.encode('utf-8')),
-            b'PUBLIC_SUPPORT_EMAIL = {!r}'.format(self.contact_email.encode('utf-8')),
-            b'NO_REPLY_EMAIL = {!r}'.format(self.noreply_email.encode('utf-8'))
+            '# General settings',
+            f'SQLALCHEMY_DATABASE_URI = {self.db_uri!r}',
+            f'SECRET_KEY = {os.urandom(32)!r}',
+            f'BASE_URL = {self.indico_url!r}',
+            f'CELERY_BROKER = {self.redis_uri_celery!r}',
+            f'REDIS_CACHE_URL = {self.redis_uri_cache!r}',
+            f'DEFAULT_TIMEZONE = {self.default_timezone!r}',
+            f'DEFAULT_LOCALE = {self.default_locale!r}',
+            f'ENABLE_ROOMBOOKING = {self.rb_active!r}',
+            'CACHE_DIR = {!r}'.format(os.path.join(self.data_root_path, 'cache')),
+            'TEMP_DIR = {!r}'.format(os.path.join(self.data_root_path, 'tmp')),
+            'LOG_DIR = {!r}'.format(os.path.join(self.data_root_path, 'log')),
+            'LOCAL_PASSWORD_MIN_LENGTH = 15',  # use NIST recommendation for new installations
+            'CSP_ENABLED = True',  # TODO remove once we make this the default for all installations
+            f'STORAGE_BACKENDS = {storage_backends!r}',
+            "ATTACHMENT_STORAGE = 'default'",
+            '',
+            '# Email settings',
+            f'SMTP_SERVER = {(self.smtp_host, self.smtp_port)!r}',
+            f'SMTP_USE_TLS = {bool(self.smtp_user and self.smtp_password)!r}',
+            f'SMTP_LOGIN = {self.smtp_user!r}',
+            f'SMTP_PASSWORD = {self.smtp_password!r}',
+            f'SUPPORT_EMAIL = {self.admin_email!r}',
+            f'PUBLIC_SUPPORT_EMAIL = {self.contact_email!r}',
+            f'NO_REPLY_EMAIL = {self.noreply_email!r}'
         ]
 
         if dev:
             config_data += [
-                b'',
-                b'# Development options',
-                b'DB_LOG = True',
-                b'DEBUG = True',
-                b'SMTP_USE_CELERY = False'
+                '',
+                '# Development options',
+                'DB_LOG = True',
+                'DEBUG = True',
+                'SMTP_USE_CELERY = False'
             ]
 
-        config = b'\n'.join(x for x in config_data if x is not None)
+        if not self.system_notices:
+            config_data += [
+                '',
+                '# Disable system notices',
+                'SYSTEM_NOTICES_URL = None'
+            ]
+
+        if not self.public_user_search:
+            config_data += [
+                '',
+                '# Disable public user search',
+                'ALLOW_PUBLIC_USER_SEARCH = False'
+            ]
+
+        config = '\n'.join(x for x in config_data if x is not None)
 
         if dev:
             if not os.path.exists(self.data_root_path):
@@ -595,15 +691,14 @@ class SetupWizard(object):
             os.mkdir(path)
 
         _echo(cformat('%{magenta}Creating %{magenta!}{}%{reset}%{magenta}').format(self.config_path))
-        with open(self.config_path, 'wb') as f:
-            f.write(config + b'\n')
+        self.config_path.write_text(f'{config}\n')
 
         package_root = get_root_path('indico')
         _copy(os.path.normpath(os.path.join(package_root, 'logging.yaml.sample')),
               os.path.join(self.config_dir_path, 'logging.yaml'))
 
         if not dev:
-            _link(os.path.join(package_root, 'htdocs'), os.path.join(self.data_root_path, 'web', 'htdocs'))
+            _link(os.path.join(package_root, 'web', 'static'), os.path.join(self.data_root_path, 'web', 'static'))
             _copy(os.path.join(package_root, 'web', 'indico.wsgi'),
                   os.path.join(self.data_root_path, 'web', 'indico.wsgi'),
                   force=True)
@@ -617,8 +712,4 @@ class SetupWizard(object):
             _echo(cformat('Run %{green!}export INDICO_CONFIG={}%{reset} to use your config file')
                   .format(self.config_path))
 
-        if self.old_archive_dir:
-            _echo(cformat('Check %{green!}https://git.io/vHP6o%{reset} for a guide on how to '
-                          'import data from Indico v1.2'))
-        else:
-            _echo(cformat('You can now run %{green!}indico db prepare%{reset} to initialize your Indico database'))
+        _echo(cformat('You can now run %{green!}indico db prepare%{reset} to initialize your Indico database'))

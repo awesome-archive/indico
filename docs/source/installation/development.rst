@@ -6,28 +6,25 @@ Installation guide (development)
 Installing System Packages
 --------------------------
 
-We'll assume you've installed PostgreSQL (and its ``contrib`` package, if on a Linux system) and managed to setup/start
-the server. PostgreSQL 9.6 at least is required.
-
-You can find instructions on how to install it on Fedora/CentOS
-`here <https://wiki.postgresql.org/wiki/YUM_Installation>`_. You can find the same for Debian/Ubuntu
-`here <https://wiki.postgresql.org/wiki/Apt>`_. If you're a macOS user, you will probably want to use Homebrew::
-
-    brew install postgresql
-    brew services start postgresql
-
 Web assets such as JavaScript and SCSS files are compiled using `Webpack <https://webpack.js.org>`_, which
 requires NodeJS to be present. You can find information on how to install NodeJS
 `here <https://nodejs.org/en/download/package-manager/>`_.
 
-CentOS/Fedora
-+++++++++++++
+Do not use the default NodeJS packages from your Linux distribution as they are usually outdated or come with
+an outdated npm version.
+
+Since only the latest Linux distributions include Python 3.12 in their package managers, we recommend installing
+`uv <https://docs.astral.sh/uv/>`_.
+
+RPM-based distributions (Alma, Rocky, Fedora)
++++++++++++++++++++++++++++++++++++++++++++++
 
 .. code-block:: shell
 
-    yum install -y gcc redis python-devel python-virtualenv libjpeg-turbo-devel libxslt-devel libxml2-devel \
-        libffi-devel pcre-devel libyaml-devel redhat-rpm-config
-    systemctl start redis.service
+    dnf install -y gcc redis libjpeg-turbo-devel libxslt-devel libxml2-devel \
+        libffi-devel pcre-devel libyaml-devel redhat-rpm-config \
+        postgresql postgresql-server postgresql-contrib libpq-devel pango
+    systemctl start redis.service postgresql.service
 
 
 Debian/Ubuntu
@@ -35,8 +32,8 @@ Debian/Ubuntu
 
 .. code-block:: shell
 
-    apt install -y --install-recommends python-dev python-virtualenv libxslt1-dev libxml2-dev libffi-dev libpcre3-dev \
-        libyaml-dev build-essential redis-server
+    apt install -y --install-recommends libxslt1-dev libxml2-dev libffi-dev libpcre3-dev \
+        libyaml-dev build-essential redis-server postgresql libpq-dev libpango1.0-dev
 
 Then on Debian::
 
@@ -52,8 +49,9 @@ macOS
 
 We recommend that you use `Homebrew <https://brew.sh/>`_::
 
-    brew install python2 redis libjpeg libffi pcre libyaml
-    pip install virtualenv
+    brew install redis libjpeg libffi pcre libyaml postgresql pango
+    brew services start postgresql
+    brew services start redis
 
 
 Creating the directory structure
@@ -69,8 +67,10 @@ developers keep all their code inside a ``dev`` or ``code`` dir. We will assume 
 We will need a virtualenv where to run Indico::
 
     cd ~/dev/indico
-    virtualenv env -p /usr/bin/python2.7
+    uv venv --python=3.12
 
+
+.. _cloning:
 
 Cloning Indico
 --------------
@@ -78,14 +78,14 @@ Cloning Indico
 First, let's clone Indico's code base. If you're going to contribute back to the project, it's probably best if you
 clone your own `GitHub fork of the project <https://help.github.com/articles/fork-a-repo/>`_ and set it as the origin::
 
-    git clone --recursive git@github.com:<your-github-username>/indico.git src
+    git clone git@github.com:<your-github-username>/indico.git src
     cd src
     git remote add upstream https://github.com/indico/indico.git
     cd ..
 
 Otherwise, cloning the upstream repository as the origin should be enough::
 
-    git clone --recursive https://github.com/indico/indico.git src
+    git clone https://github.com/indico/indico.git src
 
 If you're going to be changing the standard Indico plugins and/or the documentation, you can also clone those::
 
@@ -103,16 +103,16 @@ unnecessarily. This is why we advise that you include a fake SMTP server in your
 `Maildump <https://github.com/ThiefMaster/maildump>`_ does exactly this and runs on Python. It should be quite simple
 to set up::
 
-    virtualenv maildump -p /usr/bin/python2.7
-    ./maildump/bin/pip install -U pip setuptools
-    ./maildump/bin/pip install maildump
-    ./maildump/bin/maildump -p /tmp/maildump.pid
+    uvx --with setuptools maildump -p /tmp/maildump.pid
 
 You'll then be able to access the message log at `<http://localhost:1080>`_.
 
 
 Creating the DB
 ---------------
+
+Linux
++++++
 
 .. code-block:: shell
 
@@ -121,19 +121,31 @@ Creating the DB
     sudo -u postgres psql indico_template -c "CREATE EXTENSION unaccent; CREATE EXTENSION pg_trgm;"
     createdb indico -T indico_template
 
+macOS
++++++
+
+If you are on macOS with PostgreSQL installed via Homebrew, you should not use ``sudo`` as that only works on Linux
+systems where a system user named ``postgres`` exists. Use the following instead:
+
+.. code-block:: shell
+
+    createdb indico_template -O $USER
+    psql indico_template -c "CREATE EXTENSION unaccent; CREATE EXTENSION pg_trgm;"
+    createdb indico -T indico_template
+
+
+.. _configuring-dev:
 
 Configuring
 -----------
 
 Let's get into the Indico virtualenv::
 
-    source ./env/bin/activate
-    pip install -U pip setuptools
+    source .venv/bin/activate
 
     cd src
-    pip install -r requirements.dev.txt
-    pip install -e .
-    npm install
+    uv pip install -e '.[dev]'
+    npm ci
 
 Then, follow the instructions given by the wizard::
 
@@ -143,6 +155,13 @@ You can then initialize the DB::
 
     indico db prepare
 
+To build the locales, use:
+
+.. code-block:: shell
+
+    indico i18n compile indico
+
+.. _run-dev:
 
 Running Indico
 --------------
@@ -161,6 +180,8 @@ On the second one we'll run the Indico Development server:
     indico run -h <your-hostname> -q --enable-evalex
 
 Double-check that your hostname matches that which has been set in the config file (by the wizard).
+If you went with the default settings provided by the wizard it might be something like
+``indico run -h 127.0.0.1 -p 8000 -q --enable-evalex``
 
 It is also worth mentioning that when working on a plugin, it is necessary to run another webpack watcher
 to build the plugin assets. That can be accomplished using the same command as above with an argument specifying
@@ -168,7 +189,7 @@ which plugin you want to build the assets for:
 
 .. code-block:: shell
 
-    ./bin/maintenance/build-assets.py <plugin-name> --dev --watch
+    ./bin/maintenance/build-assets.py plugin <plugin-directory> --dev --watch
 
 You can also build the assets for all the plugins:
 
@@ -194,7 +215,7 @@ static files as well.
 
 You should obviously install nginx first::
 
-    sudo yum install nginx  # centos/fedora
+    sudo dnf install nginx  # alma/rocky/fedora
     sudo apt install nginx  # debian/ubuntu
     brew install nginx      # macOS
 
@@ -268,9 +289,6 @@ Here is an example of a ``nginx.conf`` you can use. It assumes your username is 
 
             root /var/empty;
 
-            location ~ ^/static/assets/(core|(?:plugin|theme)-[^/]+)/(.*)$ {
-                alias /home/jdoe/dev/indico/data/assets/$1/$2;
-            }
 
             location ~ ^/(images|fonts)(.*)/(.+?)(__v[0-9a-f]+)?\.([^.]+)$ {
                 alias /home/jdoe/dev/indico/src/indico/web/static/$1$2/$3.$5;
@@ -308,3 +326,75 @@ The Indico dev server should be run with the ``--proxy`` option::
     indico run -h 127.0.0.1 -p 8000 -q --enable-evalex --url https://acme.example.org --proxy
 
 You can then start nginx and access ``https://acme.example.org`` directly.
+
+
+Running the Unit Tests
+----------------------
+
+Indico comes with a comprehensive suite of unit tests. To run them, you will need to have PostgreSQL available. By default,
+the tests expect a local server, but you can also use the a Docker-backed setup for a more standalone and isolated environment.
+
+**Running tests with the default setup**
+
+To run all tests, simply execute:
+
+.. code-block:: shell
+
+    pytest
+
+You can also run a subset of tests by specifying the path or test name:
+
+.. code-block:: shell
+
+    pytest path/to/test_file.py
+    pytest -k test_some_function
+
+**Using the Docker-backed PostgreSQL for tests**
+
+Indico provides a Docker-based PostgreSQL fixture for running tests without requiring a local PostgreSQL installation. To enable this,
+set the ``INDICO_TEST_USE_DOCKER`` environment variable (to `yes`, `true` or `1`) before running the tests:
+
+.. code-block:: shell
+
+    INDICO_TEST_USE_DOCKER=1 pytest
+
+This will automatically start a temporary PostgreSQL server in a Docker container for the duration of the test run. The container and
+its data will be cleaned up automatically afterwards.
+
+If you want to use a custom Docker daemon (for example, if Docker is not running on the default socket), you can set
+``INDICO_TEST_USE_DOCKER`` to the Docker API URL, such as ``unix:///var/run/docker.sock`` or ``tcp://127.0.0.1:2375``.
+
+**Notes:**
+
+- Make sure Docker is installed and running on your system, and that your user has permission to access the Docker socket (you may need to be in the `docker` group);
+- The first time you run the tests with Docker, the required PostgreSQL image will be pulled, which may take a few minutes.
+
+
+**Using Podman instead of Docker**
+
+If you prefer to use Podman as a drop-in replacement for Docker, you can do so with Indico's Docker-backed PostgreSQL fixture. Podman is
+compatible with the Docker API, but you need to ensure that the Podman socket is available and that your user has permission to access it.
+
+To use Podman for running the tests, set the ``INDICO_TEST_USE_DOCKER`` environment variable to the Podman socket URL. For example:
+
+.. code-block:: shell
+
+    INDICO_TEST_USE_DOCKER=unix:///run/user/$(id -u)/podman/podman.sock pytest
+
+Make sure the Podman socket is running. You can start it with:
+
+.. code-block:: shell
+
+    systemctl --user start podman.socket
+
+Or, if you are not using systemd user services, you can run:
+
+.. code-block:: shell
+
+    podman system service --time=0 unix:///run/user/$(id -u)/podman/podman.sock
+
+**Notes:**
+
+- The first test run may take longer as Podman will pull the required PostgreSQL image;
+- Ensure your user has permission to access the Podman socket;
+- The rest of the test setup and cleanup works the same as with Docker.

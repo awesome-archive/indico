@@ -1,45 +1,39 @@
 # This file is part of Indico.
-# Copyright (C) 2002 - 2018 European Organization for Nuclear Research (CERN).
+# Copyright (C) 2002 - 2026 CERN
 #
 # Indico is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 3 of the
-# License, or (at your option) any later version.
-#
-# Indico is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Indico; if not, see <http://www.gnu.org/licenses/>.
-
-from __future__ import unicode_literals
+# modify it under the terms of the MIT License; see the
+# LICENSE file for more details.
 
 import posixpath
 
 from flask import g
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.ext.declarative import declared_attr
 
 from indico.core.config import config
 from indico.core.db import db
 from indico.core.db.sqlalchemy import PyIntEnum, UTCDateTime
 from indico.core.db.sqlalchemy.links import LinkType
 from indico.core.db.sqlalchemy.protection import ProtectionMixin
+from indico.core.db.sqlalchemy.searchable import SearchableTitleMixin
+from indico.core.db.sqlalchemy.util.models import auto_table_args
 from indico.core.db.sqlalchemy.util.session import no_autoflush
 from indico.core.storage import StoredFileMixin, VersionedResourceMixin
 from indico.modules.attachments.models.principals import AttachmentPrincipal
 from indico.modules.attachments.preview import get_file_previewer
 from indico.modules.attachments.util import can_manage_attachments
 from indico.util.date_time import now_utc
-from indico.util.i18n import _
-from indico.util.string import return_ascii, strict_unicode
-from indico.util.struct.enum import RichIntEnum
+from indico.util.enum import RichIntEnum
+from indico.util.fs import secure_filename
+from indico.util.i18n import pgettext
+from indico.util.string import strict_str
 from indico.web.flask.util import url_for
 
 
 class AttachmentType(RichIntEnum):
-    __titles__ = [None, _('File'), _('Link')]
+    __titles__ = [None, pgettext('Attachment type (noun)', 'File'), pgettext('Attachment type (noun)', 'Link')]
     file = 1
     link = 2
 
@@ -87,46 +81,44 @@ class AttachmentFile(StoredFileMixin, db.Model):
     def is_previewable(self):
         return get_file_previewer(self) is not None
 
+    @property
+    def is_image(self):
+        return self.content_type.startswith('image/')
+
     @no_autoflush
     def _build_storage_path(self):
         folder = self.attachment.folder
         assert folder.object is not None
         if folder.link_type == LinkType.category:
             # category/<id>/...
-            path_segments = ['category', strict_unicode(folder.category.id)]
+            path_segments = ['category', strict_str(folder.category.id)]
         else:
             # event/<id>/event/...
-            path_segments = ['event', strict_unicode(folder.event.id), folder.link_type.name]
+            path_segments = ['event', strict_str(folder.event.id), folder.link_type.name]
             if folder.link_type == LinkType.session:
                 # event/<id>/session/<session_id>/...
-                path_segments.append(strict_unicode(folder.session.id))
+                path_segments.append(strict_str(folder.session.id))
             elif folder.link_type == LinkType.contribution:
                 # event/<id>/contribution/<contribution_id>/...
-                path_segments.append(strict_unicode(folder.contribution.id))
+                path_segments.append(strict_str(folder.contribution.id))
             elif folder.link_type == LinkType.subcontribution:
                 # event/<id>/subcontribution/<subcontribution_id>/...
-                path_segments.append(strict_unicode(folder.subcontribution.id))
+                path_segments.append(strict_str(folder.subcontribution.id))
         self.attachment.assign_id()
         self.assign_id()
-        filename = '{}-{}-{}'.format(self.attachment.id, self.id, self.filename)
-        path = posixpath.join(*(path_segments + [filename]))
+        filename = '{}-{}-{}'.format(self.attachment.id, self.id, secure_filename(self.filename, 'file'))
+        path = posixpath.join(*path_segments, filename)
         return config.ATTACHMENT_STORAGE, path
 
-    @return_ascii
     def __repr__(self):
-        return '<AttachmentFile({}, {}, {}, {})>'.format(
-            self.id,
-            self.attachment_id,
-            self.filename,
-            self.content_type
-        )
+        return f'<AttachmentFile({self.id}, {self.attachment_id}, {self.filename}, {self.content_type})>'
 
 
-class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
+class Attachment(SearchableTitleMixin, ProtectionMixin, VersionedResourceMixin, db.Model):
     __tablename__ = 'attachments'
-    __table_args__ = (
+    __auto_table_args = (
         # links: url but no file
-        db.CheckConstraint('type != {} OR (link_url IS NOT NULL AND file_id IS NULL)'.format(AttachmentType.link.value),
+        db.CheckConstraint(f'type != {AttachmentType.link.value} OR (link_url IS NOT NULL AND file_id IS NULL)',
                            'valid_link'),
         # we can't require the file_id to be NOT NULL for files because of the circular relationship...
         # but we can ensure that we never have both a file_id AND a link_url...for
@@ -137,6 +129,11 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
     stored_file_table = 'attachments.files'
     stored_file_class = AttachmentFile
     stored_file_fkey = 'attachment_id'
+    title_required = False
+
+    @declared_attr
+    def __table_args__(cls):
+        return auto_table_args(cls)
 
     #: The ID of the attachment
     id = db.Column(
@@ -164,11 +161,6 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
         nullable=False,
         default=False
     )
-    #: The name of the attachment
-    title = db.Column(
-        db.String,
-        nullable=False
-    )
     #: The description of the attachment
     description = db.Column(
         db.Text,
@@ -192,7 +184,19 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
         db.String,
         nullable=True
     )
-
+    #: The ID of the attachment that was converted from
+    converted_from_id = db.Column(
+        db.Integer,
+        db.ForeignKey('attachments.attachments.id'),
+        nullable=True,
+        index=True
+    )
+    #: Attachment annotations (metadata)
+    annotations = db.Column(
+        JSONB,
+        nullable=False,
+        default={}
+    )
     #: The user who created the attachment
     user = db.relationship(
         'User',
@@ -220,7 +224,19 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
     #: The ACL of the folder (used for ProtectionMode.protected)
     acl = association_proxy('acl_entries', 'principal', creator=lambda v: AttachmentPrincipal(principal=v))
 
+    converted_from = db.relationship(
+        'Attachment',
+        lazy=True,
+        remote_side=id,
+        backref=db.backref(
+            'converted_into',
+            primaryjoin='(Attachment.id == Attachment.converted_from_id) & ~Attachment.is_deleted',
+            lazy=True
+        )
+    )
+
     # relationship backrefs:
+    # - converted_into (Attachment.converted_from)
     # - legacy_mapping (LegacyAttachmentMapping.attachment)
 
     @property
@@ -232,7 +248,7 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
         return dict(self.folder.locator, attachment_id=self.id)
 
     def get_download_url(self, absolute=False):
-        """Returns the download url for the attachment.
+        """Return the download url for the attachment.
 
         During static site generation this returns a local URL for the
         file or the target URL for the link.
@@ -247,24 +263,23 @@ class Attachment(ProtectionMixin, VersionedResourceMixin, db.Model):
 
     @property
     def download_url(self):
-        """The download url for the attachment"""
+        """The download url for the attachment."""
         return self.get_download_url()
 
     @property
     def absolute_download_url(self):
-        """The absolute download url for the attachment"""
+        """The absolute download url for the attachment."""
         return self.get_download_url(absolute=True)
 
     def can_access(self, user, *args, **kwargs):
-        """Checks if the user is allowed to access the attachment.
+        """Check if the user is allowed to access the attachment.
 
         This is the case if the user has access to see the attachment
         or if the user can manage attachments for the linked object.
         """
-        return (super(Attachment, self).can_access(user, *args, **kwargs) or
-                can_manage_attachments(self.folder.object, user))
+        return (super().can_access(user, *args, **kwargs) or
+                can_manage_attachments(self.folder.object, user, allow_admin=kwargs.get('allow_admin', True)))
 
-    @return_ascii
     def __repr__(self):
         return '<Attachment({}, {}, {}{}, {}, {})>'.format(
             self.id,
@@ -285,15 +300,15 @@ def _offline_download_url(attachment):
     # Legacy offline download link generation
     if attachment.type == AttachmentType.file:
         if isinstance(attachment.folder.object, db.m.Event):
-            path = ""
+            path = ''
         elif isinstance(attachment.folder.object, db.m.Session):
-            path = "{}-session".format(attachment.folder.session.friendly_id)
+            path = f'{attachment.folder.session.friendly_id}-session'
         elif isinstance(attachment.folder.object, db.m.Contribution):
-            path = "{}-contribution".format(attachment.folder.contribution.friendly_id)
+            path = f'{attachment.folder.contribution.friendly_id}-contribution'
         elif isinstance(attachment.folder.object, db.m.SubContribution):
-            path = "{}-subcontribution".format(attachment.folder.subcontribution.friendly_id)
+            path = f'{attachment.folder.subcontribution.friendly_id}-subcontribution'
         else:
             return ''
-        return posixpath.join("material", path, str(attachment.id) + "-" + attachment.file.filename)
+        return posixpath.join('material', path, str(attachment.id) + '-' + attachment.file.filename)
     else:
         return attachment.link_url
